@@ -3,7 +3,7 @@ import { createLogger } from "./runtime/logger.js";
 import { createDatabasePool } from "./runtime/db.js";
 import { acquireSingleton, SingletonTakenError, type Singleton } from "./runtime/singleton.js";
 import { WorkQueueRepo } from "./runtime/work-queue.js";
-import { CognitiveWorker, type WorkHandler } from "./runtime/worker.js";
+import { CognitiveWorker, SkipWorkError, type WorkHandler } from "./runtime/worker.js";
 import { BackgroundScheduler } from "./runtime/scheduler.js";
 import { withTransaction } from "./runtime/transactions.js";
 import { applyDeltas } from "./runtime/deltas.js";
@@ -86,8 +86,7 @@ const handlers: Record<string, WorkHandler> = {
   },
   direct: async (item, signal) => {
     if (!model) {
-      await repo.skip(item.id, "модель не настроена (MODEL_ENDPOINT/API_KEY/MODEL)");
-      return;
+      throw new SkipWorkError("модель не настроена", "модель не настроена (MODEL_ENDPOINT/API_KEY/MODEL)");
     }
     const result = await model.runTurn({
       turnId: item.id,

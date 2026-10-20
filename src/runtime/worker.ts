@@ -6,6 +6,20 @@ import { withTimeout } from "./with-timeout.js";
 
 export type WorkHandler = (item: WorkItem, signal: AbortSignal) => Promise<void>;
 
+/**
+ * Осознанный отказ обрабатывать работу: worker помечает её терминальным
+ * пропуском вместо done и не считает попытку ошибкой.
+ */
+export class SkipWorkError extends Error {
+  constructor(
+    message: string,
+    public readonly reason: string,
+  ) {
+    super(message);
+    this.name = "SkipWorkError";
+  }
+}
+
 export interface WorkerOptions {
   /** Пауза между опросами очереди, когда работы нет. */
   pollIntervalMs?: number;
@@ -84,12 +98,24 @@ export class CognitiveWorker {
     const handler = this.handlers[item.kind];
     try {
       if (!handler) {
-        throw new Error(`нет обработчика для kind="${item.kind}"`);
+        throw new SkipWorkError(
+          `нет обработчика для kind="${item.kind}"`,
+          `нет обработчика для kind="${item.kind}"`,
+        );
       }
       await withTimeout((signal) => handler(item, signal), this.handlerTimeoutMs);
       await this.repo.complete(item.id);
       this.logger.debug("работа завершена", { id: item.id, kind: item.kind });
     } catch (error) {
+      if (error instanceof SkipWorkError) {
+        await this.repo.skip(item.id, error.reason);
+        this.logger.info("работа помечена терминальным пропуском", {
+          id: item.id,
+          kind: item.kind,
+          reason: error.reason,
+        });
+        return;
+      }
       const reason = error instanceof Error ? error.message : String(error);
       // Попытка уже посчитана при claim: решаем requeue или терминальный пропуск.
       if (decideRecoveryAction(item.attempts, WORK_MAX_ATTEMPTS) === "skip") {
