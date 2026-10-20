@@ -16,7 +16,7 @@
 
 Параллелизуем с: ничем (фундамент).
 
-- [ ] 0.1 TypeScript-проект: package.json, tsconfig, eslint, vitest; скрипты `lint`, `typecheck`, `test` (юнит, без БД)
+- [x] 0.1 TypeScript-проект: package.json, tsconfig, eslint, vitest; скрипты `lint`, `typecheck`, `test` (юнит, без БД)
 - [ ] 0.2 Структура папок по пяти модулям: `src/telegram`, `src/character`, `src/memory`, `src/background`, `src/runtime`
 - [ ] 0.3 docker-compose с PostgreSQL (+pgvector) для локальной разработки; `.env.example`
 - [ ] 0.4 Миграции БД (инструмент выбран и подключён)
