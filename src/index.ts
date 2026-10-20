@@ -5,6 +5,7 @@ import { acquireSingleton, SingletonTakenError, type Singleton } from "./runtime
 import { WorkQueueRepo } from "./runtime/work-queue.js";
 import { CognitiveWorker, SkipWorkError, type WorkHandler } from "./runtime/worker.js";
 import { BackgroundScheduler } from "./runtime/scheduler.js";
+import { BudgetRepo } from "./runtime/budgets.js";
 import { withTransaction } from "./runtime/transactions.js";
 import { applyDeltas } from "./runtime/deltas.js";
 import { OpenAICompatModelAdapter, type CharacterModel, type ModelTurnContext } from "./character/model-adapter.js";
@@ -111,8 +112,7 @@ const handlers: Record<string, WorkHandler> = {
 
 const worker = new CognitiveWorker(repo, handlers, logger);
 const scheduler = new BackgroundScheduler(
-  (kind) => repo.enqueue(kind, {}).then(() => undefined),
-  logger,
+  { enqueue: (kind) => repo.enqueue(kind, {}).then(() => undefined), logger, budget: new BudgetRepo(pool) },
 );
 worker.start();
 scheduler.start();
