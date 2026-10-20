@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "migrate": "tsx src/db/migrate.ts",
-    "migrate:create": "node-pg-migrate create -m migrations"
+    "migrate:create": "node-pg-migrate create -m migrations",
+    "turn": "tsx src/scripts/enqueue-turn.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -30,6 +31,7 @@
   "dependencies": {
     "dotenv": "^18.0.8",
     "node-pg-migrate": "^9.0.0",
-    "pg": "^8.23.1"
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
   }
 }
