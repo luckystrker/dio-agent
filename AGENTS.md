@@ -8,7 +8,7 @@ TypeScript · PostgreSQL (+pgvector) · один процесс на VPS · syst
 | Вопрос | Файл |
 |---|---|
 | Как устроена система (спецификация — источник истины) | `docs/ARCHITECTURE_v0.6-1.md` |
-| Что означают термины (жargon → по-русски) | `docs/GLOSSARY.md` |
+| Что означают термины (жаргон → по-русски) | `docs/GLOSSARY.md` |
 | С какими приоритетами сверяются решения | `docs/PHILOSOPHY.md` |
 | Что делаем сейчас и что уже принято | `CHECKLIST.md` |
 | Референс подхода к работе с агентами | `docs/references/yt-summary-uY1bTL1i2DM.md` |
