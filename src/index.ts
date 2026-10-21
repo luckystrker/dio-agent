@@ -10,6 +10,8 @@ import { withTransaction } from "./runtime/transactions.js";
 import { applyDeltas } from "./runtime/deltas.js";
 import { OpenAICompatModelAdapter, type CharacterModel } from "./character/model-adapter.js";
 import { makeTurnHandler } from "./character/turn-handler.js";
+import { MemoryRepo } from "./memory/memory-repo.js";
+import { consolidateEpisodes } from "./memory/consolidation.js";
 import { DryRunTelegramApi, HttpTelegramApi, type TelegramApi } from "./telegram/api.js";
 import { fileURLToPath } from "node:url";
 import { TelegramPoller } from "./telegram/polling.js";
@@ -68,15 +70,22 @@ const model: CharacterModel | null = config.model
     })
   : null;
 
-const handleTurn = makeTurnHandler({ pool, model, outbox, logger });
+const memory = new MemoryRepo(pool);
+const handleTurn = makeTurnHandler({ pool, model, outbox, memory, logger });
 
 const handlers: Record<string, WorkHandler> = {
   consolidation: async (item) => {
+    // §10.2: episode summaries закрытых эпизодов + служебная заметка о такте
+    const result = await consolidateEpisodes(pool);
     await withTransaction(pool, (client) =>
       applyDeltas(client, item.id, [
-        { type: "append_note", text: `maintenance tick ${new Date().toISOString()}` },
+        {
+          type: "append_note",
+          text: `consolidation tick ${new Date().toISOString()}: эпизодов ${result.chats}, событий ${result.events}`,
+        },
       ]),
     );
+    logger.info("консолидация эпизодов", result);
   },
   direct: handleTurn,
   group: handleTurn,

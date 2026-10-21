@@ -161,6 +161,7 @@ describe("CognitiveWorker с реальной БД", () => {
     const worker = new CognitiveWorker(repo, { exploration: handler }, logger, {
       pollIntervalMs: 20,
       handlerTimeoutMs,
+      retryBaseMs: 1, // паузы повторов не влияют на границу сигнала (1.8)
     });
     const id = await repo.enqueue("exploration", {});
     const startedAt = Date.now();

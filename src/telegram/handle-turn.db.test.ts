@@ -11,6 +11,7 @@ import type { Pool } from "pg";
 import { ChatBufferManager } from "./buffers.js";
 import { OutboxRepo } from "./outbox.js";
 import { makeTurnHandler, SYSTEM_PROMPT } from "../character/turn-handler.js";
+import { MemoryRepo } from "../memory/memory-repo.js";
 import { OpenAICompatModelAdapter, type ModelTransport } from "../character/model-adapter.js";
 import { SkipWorkError, type WorkHandler } from "../runtime/worker.js";
 import { WorkQueueRepo, type WorkItem } from "../runtime/work-queue.js";
@@ -74,7 +75,7 @@ function makeStubModel(calls: Array<{ messages: Array<{ role: string; content: s
 }
 
 function makeHandler(model: OpenAICompatModelAdapter | null): WorkHandler {
-  return makeTurnHandler({ pool, model, outbox, logger: silentLogger });
+  return makeTurnHandler({ pool, model, outbox, memory: new MemoryRepo(pool), logger: silentLogger });
 }
 
 /** Реальный путь буферов: события → flushAll → turn + work_item. */
