@@ -95,5 +95,6 @@ export function validateIntentionProposals(input: unknown): IntentionProposal[] 
 
 /** Ключ дедупликации §14.1: тип + тема + чат. */
 export function intentionDedupeKey(kind: IntentionKind, topic: string, chatId: string): string {
-  return `${kind}:${topic.trim().toLowerCase()}:${chatId}`;
+  // JSON-склейка инъективна для любых строк темы/чата (Н5 этапа 5)
+  return JSON.stringify([kind, topic.trim().toLowerCase(), chatId]);
 }

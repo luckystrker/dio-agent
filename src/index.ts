@@ -118,6 +118,7 @@ const handlers: Record<string, WorkHandler> = {
   intention: makeIntentionHandler({
     pool,
     model,
+    mood: moodRepo,
     memory,
     persona,
     outbox,

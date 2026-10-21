@@ -10,6 +10,8 @@ import type { Budget } from "../runtime/budgets.js";
 import type { CharacterModel } from "../character/model-adapter.js";
 import type { Persona } from "../character/persona.js";
 import { buildSystemPrompt } from "../character/persona.js";
+import { describeMood, type MoodRepo } from "../character/mood.js";
+import { describeRelationship } from "../character/relationships.js";
 import { MemoryRepo } from "../memory/memory-repo.js";
 import { validateMemoryCandidates } from "../memory/memory-candidates.js";
 import { chatScope } from "../memory/scope.js";
@@ -28,6 +30,7 @@ export const MAX_EXPLORATIONS_PER_DAY = 2;
 export interface IntentionHandlerDeps {
   pool: Pool;
   model: CharacterModel | null;
+  mood: MoodRepo;
   memory: MemoryRepo;
   persona: Persona;
   outbox: OutboxRepo;
@@ -149,36 +152,46 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     const scopeId = chatScope(intention.targetChatId);
     const related = await memory.retrieve(scopeId, { textQuery: intention.topic, limit: 6 });
     const memoryBlock = related.map((row) => `- (${row.kind}) ${row.text}`).join("\n");
+    const extras = await backgroundExtras(scopeId, memoryBlock);
 
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
       context: {
-        system:
-          buildSystemPrompt(persona, memoryBlock ? { memoryBlock } : {}) +
-          `\n\n${EXPLORE_SYSTEM_ADDENDUM}`,
+        system: buildSystemPrompt(persona, extras) + `\n\n${EXPLORE_SYSTEM_ADDENDUM}`,
         messages: [{ role: "user", content: `Тема для размышления: ${intention.topic}. Причина: ${intention.reason}` }],
       },
       signal,
     });
     const candidates = validateMemoryCandidates(result.memory);
 
-    // §15: находка становится share-намерением, а не отправкой
-    if (result.decision === "answer" && result.messages.length > 0) {
-      await withTransaction(pool, (client) =>
-        deps.intentions.create(client, {
+    // Применение + завершение ОДНОЙ транзакцией (§12.1, инвариант 4):
+    // CAS на статус — победитель один; дублей памяти нет, зомби-running нет
+    // (находки Н1–Н3 приёмки этапа 5)
+    await withTransaction(pool, async (client) => {
+      const won = await client.query(
+        `UPDATE intentions SET status = 'completed', updated_at = now()
+         WHERE id = $1 AND status IN ('queued', 'running') RETURNING id`,
+        [intentionId],
+      );
+      if ((won.rowCount ?? 0) === 0) {
+        logger.warn("exploration уже исполнен параллельной попыткой — пропуск", { intentionId });
+        await workQueue.completeWithClient(client, item.id);
+        return;
+      }
+
+      const source = { kind: "runtime_action" as const, ref: `intention:${intentionId}` };
+      for (const candidate of candidates) {
+        await memory.insertCandidate(client, candidate, scopeId, source);
+      }
+      // §15: находка становится share-намерением, а не отправкой
+      if (result.decision === "answer" && result.messages.length > 0) {
+        await deps.intentions.create(client, {
           kind: "share",
           topic: intention.topic,
           reason: `находка исследования: ${result.reason ?? intention.topic}`,
           targetChatId: intention.targetChatId,
           delayHours: 10 / 60, // §14.2: исследование → sharing ~10–25 мин
-        }),
-      );
-    }
-
-    await withTransaction(pool, async (client) => {
-      const source = { kind: "runtime_action" as const, ref: `intention:${intentionId}` };
-      for (const candidate of candidates) {
-        await memory.insertCandidate(client, candidate, scopeId, source);
+        });
       }
       const noteDeltas = validateDeltas(
         result.notes.map((text) => ({ type: "append_note" as const, text })),
@@ -186,7 +199,6 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
       await applyDeltas(client, item.id, noteDeltas);
       await workQueue.completeWithClient(client, item.id);
     });
-    await intentions.complete(intentionId);
     logger.info("exploration завершён", { intentionId, topic: intention.topic, findings: candidates.length });
   }
 
@@ -199,7 +211,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     signal: AbortSignal,
   ): Promise<void> {
     const chatType = await pool.query<{ chat_type: string }>(
-      "SELECT chat_type FROM social_events WHERE chat_id = $1 LIMIT 1",
+      "SELECT chat_type FROM social_events WHERE chat_id = $1 ORDER BY id LIMIT 1",
       [intention.targetChatId],
     );
     const isPrivate = chatType.rows[0]?.["chat_type"] === "private";
@@ -216,13 +228,12 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     const scopeId = chatScope(intention.targetChatId);
     const related = await memory.retrieve(scopeId, { textQuery: intention.topic, limit: 6 });
     const memoryBlock = related.map((row) => `- (${row.kind}) ${row.text}`).join("\n");
+    const extras = await backgroundExtras(scopeId, memoryBlock);
 
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
       context: {
-        system:
-          buildSystemPrompt(persona, memoryBlock ? { memoryBlock } : {}) +
-          `\n\n${INITIATIVE_SYSTEM_ADDENDUM}`,
+        system: buildSystemPrompt(persona, extras) + `\n\n${INITIATIVE_SYSTEM_ADDENDUM}`,
         messages: [
           {
             role: "user",
@@ -243,6 +254,20 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
 
     const candidates = validateMemoryCandidates(result.memory);
     await withTransaction(pool, async (client) => {
+      // CAS-однократность исполнения (§12.1, инвариант 4): победитель один;
+      // проигравший повтор (timeout-requeue против брошенного handler) не
+      // создаёт второй turn с дублем сообщений и не обходит §14.3 (Н1)
+      const won = await client.query(
+        `UPDATE intentions SET status = 'completed', updated_at = now()
+         WHERE id = $1 AND status IN ('queued', 'running') RETURNING id`,
+        [intentionId],
+      );
+      if ((won.rowCount ?? 0) === 0) {
+        logger.warn("инициатива уже исполнена параллельной попыткой — пропуск", { intentionId });
+        await workQueue.completeWithClient(client, item.id);
+        return;
+      }
+
       // инициативный turn: тот же путь доставки, что и разговорный ответ
       const turn = await client.query<{ id: string }>(
         "INSERT INTO turns (chat_id) VALUES ($1) RETURNING id",
@@ -267,13 +292,50 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     if (result.decision === "answer") {
       await recordTopicInitiative(intention, scopeId);
     }
-    await intentions.complete(intentionId);
     logger.info("инициатива отправлена", {
       intentionId,
       kind: intention.kind,
       topic: intention.topic,
       messages: result.messages.length,
     });
+  }
+
+  /** §11.1: фоновый ход тоже видит настроение и отношение к собеседнику чата. */
+  async function backgroundExtras(
+    scopeId: string,
+    memoryBlock: string,
+  ): Promise<{ moodLine?: string; relationshipLine?: string; memoryBlock?: string }> {
+    const extras: { moodLine?: string; relationshipLine?: string; memoryBlock?: string } = {};
+    try {
+      const moodNow = await deps.mood.readDecayed(persona.moodBaseline);
+      extras.moodLine = describeMood(moodNow.mood);
+    } catch {
+      // без настроения фоновый ход не срываем
+    }
+    try {
+      const relationship = await pool.query(
+        `SELECT familiarity, affinity, trust FROM relationships
+         WHERE scope_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+        [scopeId],
+      );
+      const row = relationship.rows[0] as
+        | { familiarity: string; affinity: string; trust: string }
+        | undefined;
+      if (row) {
+        extras.relationshipLine = describeRelationship({
+          personEntityId: "0",
+          scopeId,
+          familiarity: Number(row.familiarity),
+          affinity: Number(row.affinity),
+          trust: Number(row.trust),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // без отношений фоновый ход не срываем
+    }
+    if (memoryBlock.length > 0) extras.memoryBlock = memoryBlock;
+    return extras;
   }
 
   async function recordTopicInitiative(intention: IntentionRow, scopeId: string): Promise<void> {
