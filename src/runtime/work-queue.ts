@@ -50,6 +50,7 @@ const CLAIM_SQL = `
   WHERE id = (
     SELECT id FROM work_items
     WHERE status = 'pending'
+      AND (next_attempt_at IS NULL OR next_attempt_at <= now())
     ORDER BY priority DESC, created_at ASC, id ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
@@ -96,8 +97,14 @@ export class WorkQueueRepo {
     await this.pool.query("UPDATE work_items SET status = 'done', updated_at = now() WHERE id = $1", [id]);
   }
 
-  async requeue(id: string): Promise<void> {
-    await this.pool.query("UPDATE work_items SET status = 'pending', updated_at = now() WHERE id = $1", [id]);
+  /** Вернуть в очередь; pauseMs — пауза до следующей попытки (§12.1). */
+  async requeue(id: string, pauseMs = 0): Promise<void> {
+    await this.pool.query(
+      `UPDATE work_items
+       SET status = 'pending', next_attempt_at = now() + ($2::bigint * interval '1 millisecond'), updated_at = now()
+       WHERE id = $1`,
+      [id, Math.max(0, Math.round(pauseMs))],
+    );
   }
 
   /** Терминальный пропуск: работа сознательно не будет обработана, и это видно. */

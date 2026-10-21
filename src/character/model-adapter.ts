@@ -63,7 +63,13 @@ const DEFAULTS = {
   maxOutputTokens: 1000,
   timeoutMs: 60_000,
   maxRetries: 1,
+  /** пауза между попытками внутри адаптера, мс * 2^номер (§12.1) */
+  retryBaseMs: 1_000,
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function combineSignals(outer: AbortSignal | undefined, inner: AbortSignal): AbortSignal {
   if (!outer) return inner;
@@ -146,6 +152,11 @@ export class OpenAICompatModelAdapter implements CharacterModel {
       let lastError: ModelError = new ModelError("адаптер не выполнял запросов", false);
 
       for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+        if (attempt > 0) {
+          // §12.1: пауза между попытками, растущая с номером —
+          // мгновенный повтор сжигает попытки при кратковременном 429
+          await sleep(DEFAULTS.retryBaseMs * 2 ** (attempt - 1));
+        }
         let response: Response;
         try {
           response = await this.transport(`${this.endpoint}/chat/completions`, {

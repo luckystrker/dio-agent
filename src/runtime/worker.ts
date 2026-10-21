@@ -25,12 +25,19 @@ export interface WorkerOptions {
   pollIntervalMs?: number;
   /** Верхняя граница выполнения одного обработчика (§5.2, §16). */
   handlerTimeoutMs?: number;
+  /** База экспоненциальной паузы повторов, мс (§12.1). */
+  retryBaseMs?: number;
 }
 
 const DEFAULTS = {
   pollIntervalMs: 500,
   handlerTimeoutMs: 120_000,
+  retryBaseMs: 2_000,
 };
+
+function backoffMs(attempts: number, retryBaseMs: number): number {
+  return retryBaseMs * 2 ** Math.max(0, attempts - 1);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -44,6 +51,7 @@ function sleep(ms: number): Promise<void> {
 export class CognitiveWorker {
   private readonly pollIntervalMs: number;
   private readonly handlerTimeoutMs: number;
+  private readonly retryBaseMs: number;
   private stopped = false;
   private current?: Promise<void>;
 
@@ -55,6 +63,7 @@ export class CognitiveWorker {
   ) {
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
     this.handlerTimeoutMs = options.handlerTimeoutMs ?? DEFAULTS.handlerTimeoutMs;
+    this.retryBaseMs = options.retryBaseMs ?? DEFAULTS.retryBaseMs;
   }
 
   start(): void {
@@ -122,8 +131,15 @@ export class CognitiveWorker {
         await this.repo.skip(item.id, `превышен лимит попыток: ${reason}`);
         this.logger.warn("работа помечена терминальным пропуском", { id: item.id, kind: item.kind, reason });
       } else {
-        await this.repo.requeue(item.id);
-        this.logger.warn("работа возвращена в очередь", { id: item.id, kind: item.kind, attempt: item.attempts, reason });
+        const pauseMs = backoffMs(item.attempts, this.retryBaseMs);
+        await this.repo.requeue(item.id, pauseMs);
+        this.logger.warn("работа возвращена в очередь с паузой", {
+          id: item.id,
+          kind: item.kind,
+          attempt: item.attempts,
+          pauseMs,
+          reason,
+        });
       }
     }
   }
