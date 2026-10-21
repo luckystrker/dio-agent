@@ -73,7 +73,9 @@ afterEach(async () => {
 async function seedChatEvent(
   chatId: string,
   chatType: "private" | "group",
-  occurredAtSql = "now()",
+  // прошлое по умолчанию: гейт свежести (occurred_at > created_at) не срабатывает
+  // ложно из-за миллисекундного усечения JS Date (находка повторного прогона критика)
+  occurredAtSql = "now() - interval '1 minute'",
 ): Promise<void> {
   await pool.query(
     `INSERT INTO social_events
@@ -688,22 +690,24 @@ describe("фоновый промпт содержит настроение и �
 });
 
 describe("детерминизм chat_type (Н4): первое событие чата решает", () => {
-  it("group-событие раньше private: инициатива отменена как групповая", async () => {
-    // два события: сначала группа, потом личка — берётся ПЕРВОЕ (ORDER BY id)
+  it("group-событие раньше private: инициатива отменена ГРУППОВОЙ политикой, модель не вызывалась", async () => {
+    // два события в явном прошлом: гейт свежести молчит, отменяет именно §14.3
+    await seedChatEvent("3604", "group", "now() - interval '2 hour'");
     await pool.query(
-      `INSERT INTO social_events (telegram_update_id, chat_id, chat_type, kind, raw_update, status)
-       VALUES (900001, 3604, 'group', 'message', '{}', 'journal_only')`,
-    );
-    await pool.query(
-      `INSERT INTO social_events (telegram_update_id, chat_id, chat_type, kind, raw_update, status)
-       VALUES (900002, 3604, 'private', 'message', '{}', 'journal_only')`,
+      `INSERT INTO social_events
+         (telegram_update_id, chat_id, chat_type, kind, raw_update, status, occurred_at)
+       VALUES (900002, 3604, 'private', 'message', '{}', 'journal_only', now() - interval '1 hour')`,
     );
     const { intentionId, item } = await queueIntention("check_in", "тип чата", "3604");
-    const { model } = countingModel({ decision: "answer", messages: ["привет"] });
+    const { model, calls } = countingModel({ decision: "answer", messages: ["привет"] });
 
     await handlerWith(model)(item, SIGNAL());
 
-    expect((await intentionRow(intentionId))!.status).toBe("cancelled");
+    const intention = await intentionRow(intentionId);
+    expect(intention!.status).toBe("cancelled");
+    expect(intention!.reason).toContain("§14.3"); // отмена групповой политикой, не свежестью
+    expect(calls()).toBe(0); // модель не тратилась
     expect(await scalar("FROM turns")).toBe(0);
   });
 });
+

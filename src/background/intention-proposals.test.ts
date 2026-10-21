@@ -53,3 +53,13 @@ describe("intentionDedupeKey (§14.1: тип+тема+чат)", () => {
     expect(intentionDedupeKey("explore", "горы", "111")).not.toBe(intentionDedupeKey("explore", "горы", "222"));
   });
 });
+
+describe("intentionDedupeKey: инъективность для произвольных строк (пин Н5 этапа 5)", () => {
+  it("двоеточия в теме/чате не создают коллизий (убивало бы колоночную склейку)", () => {
+    // при конкатенации kind:topic:chat обе пары дали бы "explore:a:b:c"
+    expect(intentionDedupeKey("explore", "a:b", "c")).not.toBe(intentionDedupeKey("explore", "a", "b:c"));
+    expect(intentionDedupeKey("explore", "a:b:c", "d")).not.toBe(intentionDedupeKey("explore", "a", "b:c:d"));
+    // одинаковые тройки — одинаковый ключ (коллизий нет, дедуп работает)
+    expect(intentionDedupeKey("share", "x:y", "1:2")).toBe(intentionDedupeKey("share", "x:y", "1:2"));
+  });
+});

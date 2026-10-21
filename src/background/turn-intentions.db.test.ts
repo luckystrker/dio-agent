@@ -12,6 +12,7 @@ import { MoodRepo } from "../character/mood.js";
 import { RelationshipRepo } from "../character/relationships.js";
 import type { CharacterModel } from "../character/model-adapter.js";
 import type { TurnResult } from "../character/turn-result.js";
+import { TurnResultSchema } from "../character/turn-result.js";
 import { MemoryRepo } from "../memory/memory-repo.js";
 import { IntentionRepo } from "./intentions.js";
 import { OutboxRepo } from "../telegram/outbox.js";
@@ -228,4 +229,13 @@ describe("intentions в TurnResult создаются ходом (§14.1)", () =
     const rows = await intentions();
     expect(rows).toHaveLength(0); // defer_hours при answer игнорируется созданием reply_later
   });
+  it("defer без defer_hours: схема отвергает весь ответ, намерение не создаётся (§11.2, желательная доработка критика)", () => {
+    const parsed = TurnResultSchema.safeParse({ decision: "defer", messages: [], notes: [] });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const paths = parsed.error.issues.map((issue) => issue.path.join("."));
+      expect(paths).toContain("defer_hours");
+    }
+  });
+
 });
