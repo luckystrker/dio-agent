@@ -181,7 +181,7 @@ describe("согласованность TURN_RESULT_JSON_SCHEMA с zod-схем
 
   it("набор свойств и required совпадают с zod-схемой", () => {
     expect(Object.keys(TURN_RESULT_JSON_SCHEMA.properties).sort()).toEqual(
-      ["decision", "messages", "notes", "reason"],
+      ["decision", "memory", "messages", "notes", "reason"],
     );
     expect([...TURN_RESULT_JSON_SCHEMA.required]).toEqual(["decision"]);
   });
