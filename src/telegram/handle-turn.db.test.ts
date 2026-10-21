@@ -12,6 +12,7 @@ import { ChatBufferManager } from "./buffers.js";
 import { OutboxRepo } from "./outbox.js";
 import { makeTurnHandler } from "../character/turn-handler.js";
 import { MemoryRepo } from "../memory/memory-repo.js";
+import { IntentionRepo } from "../background/intentions.js";
 import { MoodRepo } from "../character/mood.js";
 import { RelationshipRepo } from "../character/relationships.js";
 import { DEFAULT_PERSONA } from "../character/persona.js";
@@ -94,6 +95,7 @@ function makeHandler(model: OpenAICompatModelAdapter | null): WorkHandler {
     model,
     outbox,
     memory: new MemoryRepo(pool),
+    intentions: new IntentionRepo(pool),
     persona: DEFAULT_PERSONA_STUB,
     mood: new MoodRepo(pool),
     relationships: new RelationshipRepo(pool),

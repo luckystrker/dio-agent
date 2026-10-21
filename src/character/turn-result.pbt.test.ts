@@ -20,6 +20,7 @@ interface TurnResultCandidate {
   decision: Decision;
   messages: string[];
   reaction?: string | undefined;
+  deferHours?: number | undefined;
   notes: string[];
   reason?: string | undefined;
 }
@@ -33,15 +34,18 @@ const specValidArb: fc.Arbitrary<TurnResultCandidate> = fc
     reaction: fc.option(fc.string({ minLength: 1, maxLength: 64, unit: "grapheme" }), {
       nil: undefined,
     }),
+    deferHours: fc.double({ min: 0.05, max: 168, noNaN: true }),
     notes: fc.array(nonEmptyStringArb, { maxLength: 5 }),
     reason: fc.option(fc.string({ minLength: 1, maxLength: 500, unit: "grapheme" }), {
       nil: undefined,
     }),
   })
-  .map(({ decision, answerMessages, silentMessages, reaction, notes, reason }) => ({
+  .map(({ decision, answerMessages, silentMessages, reaction, deferHours, notes, reason }) => ({
     decision,
     messages: decision === "answer" ? answerMessages : silentMessages,
     reaction: decision === "react" ? (reaction ?? "👍") : undefined,
+    defer_hours: decision === "defer" ? deferHours : undefined,
+    intentions: [],
     notes,
     reason,
   }));
@@ -62,15 +66,17 @@ describe("PBT: TurnResultSchema принимает всё, что требует
     );
   });
 
-  it("минимальный объект {decision: ignore|defer} разбирается с дефолтами", async () => {
+  it("минимальный объект {decision: ignore} разбирается с дефолтами; defer требует defer_hours (§11.2)", async () => {
     await fc.assert(
-      fc.property(fc.constantFrom("ignore", "defer" as const), (decision) => {
+      fc.property(fc.constantFrom("ignore" as const), (decision) => {
         const parsed = TurnResultSchema.parse({ decision });
         expect(parsed.messages).toEqual([]);
         expect(parsed.notes).toEqual([]);
         expect(parsed.reason).toBeUndefined();
       }),
     );
+    expect(() => TurnResultSchema.parse({ decision: "defer" })).toThrow(/defer_hours/);
+    expect(TurnResultSchema.parse({ decision: "defer", defer_hours: 2 }).defer_hours).toBe(2);
   });
 });
 
@@ -142,7 +148,7 @@ describe("PBT: строгие отклонения схемы (§17: невал�
   it("лишние ключи отвергаются (.strict): контракт для модели и runtime один", async () => {
     const extraKeyArb = fc
       .string({ minLength: 1, maxLength: 10, unit: "grapheme" })
-      .filter((key) => !["decision", "messages", "notes", "reason"].includes(key));
+      .filter((key) => !["decision", "messages", "notes", "reason", "memory", "reaction", "intentions", "defer_hours", "mood_delta", "relationship_delta"].includes(key));
     const extraValueArb = fc.jsonValue({ maxDepth: 2 });
     await fc.assert(
       fc.property(specValidArb, extraKeyArb, extraValueArb, (candidate, key, value) => {
@@ -251,7 +257,7 @@ describe("согласованность TURN_RESULT_JSON_SCHEMA с zod-схем
 
   it("набор свойств и required совпадают с zod-схемой", () => {
     expect(Object.keys(TURN_RESULT_JSON_SCHEMA.properties).sort()).toEqual(
-      ["decision", "memory", "messages", "mood_delta", "notes", "reaction", "reason", "relationship_delta"],
+      ["decision", "defer_hours", "intentions", "memory", "messages", "mood_delta", "notes", "reaction", "reason", "relationship_delta"],
     );
     expect([...TURN_RESULT_JSON_SCHEMA.required]).toEqual(["decision"]);
   });

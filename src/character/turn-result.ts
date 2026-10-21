@@ -41,6 +41,16 @@ const moodDeltaSchema = z
   })
   .strict();
 
+// Предложения намерений (§10.1 ≤2/ход, §14.1): относительное время в часах.
+const intentionProposalSchema = z
+  .object({
+    kind: z.enum(["reply_later", "check_in", "share", "explore"]),
+    topic: z.string().min(1).max(200),
+    reason: z.string().min(1).max(500),
+    delay_hours: z.number().min(0.05).max(168),
+  })
+  .strict();
+
 // Изменение отношений (§7.3): affinity/trust меняются ограниченно и
 // с основанием; familiarity растёт по runtime-правилу, моделью не задаётся.
 const relationshipDeltaSchema = z
@@ -62,6 +72,9 @@ export const TurnResultSchema = z
     notes: z.array(z.string().min(1).max(2000)).max(5).default([]),
     memory: z.array(memoryCandidateSchema).max(5).default([]),
     reaction: z.string().min(1).max(64).optional(),
+    intentions: z.array(intentionProposalSchema).max(2).default([]),
+    /** defer: через сколько часов вернуться (§11.2 — reply_later с notBefore) */
+    defer_hours: z.number().min(0.05).max(168).optional(),
     mood_delta: moodDeltaSchema.optional(),
     relationship_delta: relationshipDeltaSchema.optional(),
     reason: z.string().max(500).optional(),
@@ -101,6 +114,20 @@ export const TurnResultSchema = z
         code: "custom",
         path: ["reaction"],
         message: "reaction допустим только при decision=react",
+      });
+    }
+    if (result.decision === "defer" && result.defer_hours === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defer_hours"],
+        message: "defer требует defer_hours (reply_later с notBefore, §11.2)",
+      });
+    }
+    if (result.decision !== "defer" && result.defer_hours !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defer_hours"],
+        message: "defer_hours допустим только при decision=defer",
       });
     }
   });
@@ -150,6 +177,23 @@ export const TURN_RESULT_JSON_SCHEMA = {
       },
     },
     reaction: { type: "string", minLength: 1, maxLength: 64, description: "Эмодзи-реакция на последнее сообщение (только при decision=react)" },
+    intentions: {
+      type: "array",
+      maxItems: 2,
+      description: "До 2 отложенных действий: вернуться к теме (reply_later), спросить как дела (check_in), поделиться находкой (share), изучить тему (explore). Время — относительное, в часах от сейчас.",
+      items: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["reply_later", "check_in", "share", "explore"] },
+          topic: { type: "string", minLength: 1, maxLength: 200 },
+          reason: { type: "string", minLength: 1, maxLength: 500 },
+          delay_hours: { type: "number", minimum: 0.05, maximum: 168 },
+        },
+        required: ["kind", "topic", "reason", "delay_hours"],
+        additionalProperties: false,
+      },
+    },
+    defer_hours: { type: "number", minimum: 0.05, maximum: 168, description: "При decision=defer: через сколько часов вернуться к ответу" },
     mood_delta: {
       type: "object",
       description: "Необязательное изменение твоего настроения этим ходом (маленькими шагами, с причиной)",

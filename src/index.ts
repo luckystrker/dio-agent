@@ -12,6 +12,9 @@ import { OpenAICompatModelAdapter, type CharacterModel } from "./character/model
 import { makeTurnHandler } from "./character/turn-handler.js";
 import { MemoryRepo } from "./memory/memory-repo.js";
 import { consolidateEpisodes } from "./memory/consolidation.js";
+import { IntentionRepo } from "./background/intentions.js";
+import { makeIntentionHandler } from "./background/intention-handler.js";
+import { InitiativeRepo } from "./character/initiative.js";
 import { PersonaRepo } from "./character/persona.js";
 import { MoodRepo } from "./character/mood.js";
 import { RelationshipRepo } from "./character/relationships.js";
@@ -79,11 +82,14 @@ const persona = await personaRepo.active();
 const moodRepo = new MoodRepo(pool);
 const relationshipRepo = new RelationshipRepo(pool);
 const modelBudget = new BudgetRepo(pool);
+const intentionsRepo = new IntentionRepo(pool);
+const initiativeRepo = new InitiativeRepo(pool);
 const handleTurn = makeTurnHandler({
   pool,
   model,
   outbox,
   memory,
+  intentions: intentionsRepo,
   persona,
   mood: moodRepo,
   relationships: relationshipRepo,
@@ -109,6 +115,19 @@ const handlers: Record<string, WorkHandler> = {
   },
   direct: handleTurn,
   group: handleTurn,
+  intention: makeIntentionHandler({
+    pool,
+    model,
+    memory,
+    persona,
+    outbox,
+    intentions: intentionsRepo,
+    initiative: initiativeRepo,
+    workQueue: repo,
+    modelBudget: config.model ? modelBudget : null,
+    modelDailyCallsLimit: config.model?.dailyCallsLimit ?? 100,
+    logger,
+  }),
 };
 
 const worker = new CognitiveWorker(repo, handlers, logger);
@@ -155,6 +174,22 @@ if (config.telegram) {
   scheduler.start();
 }
 
+// §14.2: планировщик намерений — проверка due-работ каждые 30 секунд,
+// сама проверка LLM не вызывает
+const INTENTION_TICK_MS = 30_000;
+const intentionTicker = setInterval(() => {
+  void intentionsRepo
+    .claimDue()
+    .then((count) => {
+      if (count > 0) logger.info("намерения переданы в работу", { count });
+    })
+    .catch((error: unknown) => {
+      logger.error("тикер намерений: ошибка", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}, INTENTION_TICK_MS);
+
 const HEARTBEAT_MS = 15_000;
 const heartbeat = setInterval(() => {
   logger.info("жив", { uptimeSec: Math.round((Date.now() - startedAt) / 1000) });
@@ -168,6 +203,7 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
     uptimeSec: Math.round((Date.now() - startedAt) / 1000),
   });
   clearInterval(heartbeat);
+  clearInterval(intentionTicker);
   // 1.11: каждый шаг в своей защите; exit-код выставляется всегда
   try {
     try {

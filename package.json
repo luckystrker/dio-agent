@@ -19,7 +19,8 @@
     "migrate:create": "node-pg-migrate create -m migrations",
     "turn": "tsx src/scripts/enqueue-turn.ts",
     "feed": "tsx src/scripts/feed.ts",
-    "fake-model": "tsx src/scripts/fake-model-server.ts"
+    "fake-model": "tsx src/scripts/fake-model-server.ts",
+    "intend": "tsx src/scripts/intend.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -7,6 +7,8 @@ import { applyDeltas, validateDeltas } from "../runtime/deltas.js";
 import type { OutboxRepo } from "../telegram/outbox.js";
 import type { CharacterModel, ModelTurnContext } from "./model-adapter.js";
 import { TurnResultSchema, type TurnResult } from "./turn-result.js";
+import { validateIntentionProposals } from "../background/intention-proposals.js";
+import type { IntentionRepo } from "../background/intentions.js";
 import { validateMemoryCandidates } from "../memory/memory-candidates.js";
 import type { MemoryRepo } from "../memory/memory-repo.js";
 import { chatScope } from "../memory/scope.js";
@@ -18,6 +20,7 @@ import {
   RelationshipRepo,
 } from "./relationships.js";
 import type { Budget } from "../runtime/budgets.js";
+import { reserveModelCall } from "../runtime/model-budget.js";
 import type { WorkQueueRepo } from "../runtime/work-queue.js";
 
 // Ход по turn (§12.1–12.2): события → сборка контекста из БД → модель →
@@ -33,6 +36,7 @@ export interface TurnHandlerDeps {
   persona: Persona;
   mood: MoodRepo;
   relationships: RelationshipRepo;
+  intentions: IntentionRepo;
   workQueue: WorkQueueRepo;
   /** Дневной бюджет модельных вызовов (§16, 1.9); null — не ограничивать */
   modelBudget: Budget | null;
@@ -62,6 +66,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     // --- Фаза 0: состояние turn (§12.2): result_ready применяется без LLM ---
     let result: TurnResult;
     let candidates = [] as ReturnType<typeof validateMemoryCandidates>;
+    let proposals = [] as ReturnType<typeof validateIntentionProposals>;
 
     const turnRow = turnId
       ? await pool.query<{ status: string; validated_result: unknown }>(
@@ -74,6 +79,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     if (turnId && turnStatus === "result_ready") {
       result = TurnResultSchema.parse(turnRow!.rows[0]!["validated_result"]);
       candidates = validateMemoryCandidates(result.memory);
+      proposals = validateIntentionProposals(result.intentions);
       logger.info("резюме хода: применяю сохранённый result_ready без нового LLM", { turnId });
     } else if (turnId && turnStatus === "applied") {
       logger.warn("turn уже применён — закрываю работу без повторов", { turnId });
@@ -97,6 +103,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
 
       result = await model.runTurn({ turnId: turnId ?? item.id, context, signal });
       candidates = validateMemoryCandidates(result.memory);
+      proposals = validateIntentionProposals(result.intentions);
 
       if (turnId) {
         // --- Фаза 2: сохранить результат ДО применения (§12.1, 2.7) ---
@@ -144,6 +151,36 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
         const source = { kind: "journal_event" as const, ref: `turn:${turnId}` };
         for (const candidate of candidates) {
           await memory.insertCandidate(client, candidate, scopeId, source);
+        }
+
+        // Намерения (§14.1): предложенные моделью + defer → reply_later (§11.2)
+        for (const proposal of proposals) {
+          const created = await deps.intentions.create(client, {
+            kind: proposal.kind,
+            topic: proposal.topic,
+            reason: proposal.reason,
+            targetChatId: payload.chatId ?? "0",
+            delayHours: proposal.delayHours,
+            relatedTurnId: turnId,
+          });
+          if (created === null) {
+            logger.debug("намерение-дубликат пропущено (dedupe §14.1)", { turnId, topic: proposal.topic });
+          }
+        }
+        if (result.decision === "defer" && result.defer_hours !== undefined) {
+          const batchTopic = (await client.query<{ text: string | null }>(
+            "SELECT text FROM social_events WHERE turn_id = $1 AND text IS NOT NULL ORDER BY id DESC LIMIT 1",
+            [turnId],
+          )).rows[0]?.["text"];
+          const deferTopic = (batchTopic ?? "отложенный ответ").slice(0, 80);
+          await deps.intentions.create(client, {
+            kind: "reply_later",
+            topic: deferTopic,
+            reason: "decision=defer: персонаж отложил ответ (§11.2)",
+            targetChatId: payload.chatId ?? "0",
+            delayHours: result.defer_hours,
+            relatedTurnId: turnId,
+          });
         }
 
         // Настроение: сжатие дельты + основание заметкой (§7.2)
@@ -207,18 +244,9 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     });
   };
 
-  /** Бюджет модельных вызовов (1.9): резерв с детерминированным operation_id. */
-  async function reserveModelBudget(workItemId: string, attempt: number): Promise<void> {
-    if (!deps.modelBudget) return;
-    const used = await deps.modelBudget.reservedToday();
-    if (used >= deps.modelDailyCallsLimit) {
-      throw new SkipWorkError(
-        "дневной бюджет модельных вызовов исчерпан",
-        `дневной бюджет модельных вызовов исчерпан (${used}/${deps.modelDailyCallsLimit})`,
-      );
-    }
-    // false = попытка уже оплачена (повтор после сбоя того же work_item) — не двойной расход
-    await deps.modelBudget.tryReserve(`model:${workItemId}:${attempt}`);
+  /** Бюджет модельных вызовов (1.9): общий хелпер с intention-обработчиком. */
+  function reserveModelBudget(workItemId: string, attempt: number): Promise<void> {
+    return reserveModelCall(deps.modelBudget, deps.modelDailyCallsLimit, workItemId, attempt);
   }
 
   /** Карточка человека-собеседника (§7.3) — entity в scope чата. */

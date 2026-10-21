@@ -19,6 +19,7 @@ import { MemoryRepo } from "../memory/memory-repo.js";
 import { CandidateError } from "../memory/memory-candidates.js";
 import { chatScope } from "../memory/scope.js";
 import { OutboxRepo } from "../telegram/outbox.js";
+import { IntentionRepo } from "../background/intentions.js";
 import { WorkQueueRepo, type WorkItem } from "../runtime/work-queue.js";
 import { cleanMemoryTables, createTestPool } from "../test-support/db.js";
 import { cleanTelegramTables, silentLogger } from "../test-support/telegram-db.js";
@@ -146,6 +147,7 @@ function handlerWith(model: CharacterModel | null) {
     model,
     outbox,
     memory,
+    intentions: new IntentionRepo(pool),
     persona: PERSONA_STUB,
     mood: new MoodRepo(pool),
     relationships: new RelationshipRepo(pool),

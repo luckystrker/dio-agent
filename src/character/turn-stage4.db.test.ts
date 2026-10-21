@@ -21,6 +21,7 @@ import { RelationshipRepo } from "./relationships.js";
 import { OpenAICompatModelAdapter, ModelError, type CharacterModel, type ModelTransport, type ModelTurnContext } from "./model-adapter.js";
 import type { TurnResult } from "./turn-result.js";
 import { MemoryRepo } from "../memory/memory-repo.js";
+import { IntentionRepo } from "../background/intentions.js";
 import { chatScope } from "../memory/scope.js";
 import { OutboxRepo } from "../telegram/outbox.js";
 import { DeliveryLoop } from "../telegram/delivery.js";
@@ -110,7 +111,7 @@ function countingModel(
   partial: Partial<TurnResult> & Pick<TurnResult, "decision">,
 ): { model: CharacterModel; calls: () => number } {
   // нормализация как у TurnResultSchema.parse: дефолты пустых списков
-  const result: TurnResult = { messages: [], notes: [], memory: [], ...partial };
+  const result: TurnResult = { messages: [], notes: [], memory: [], intentions: [], ...partial };
   let calls = 0;
   return {
     model: {
@@ -206,6 +207,7 @@ function handlerWith(
     model,
     outbox: options.outboxRepo ?? outbox,
     memory,
+    intentions: new IntentionRepo(pool),
     persona: PERSONA_STUB,
     mood: new MoodRepo(pool),
     relationships: new RelationshipRepo(pool),
@@ -338,6 +340,7 @@ describe("result_ready: сбой применения до commit — повто
       messages: ["сохранённый ответ"],
       notes: ["заметка хода"],
       memory: [],
+      intentions: [],
       reaction: undefined,
       mood_delta: undefined,
       relationship_delta: undefined,
@@ -435,7 +438,7 @@ describe("история контекста: только ОТПРАВЛЕННЫ
     // ход 2 того же чата: pending-ответ НЕ подставляется как свершившийся факт
     const secondCtx: ModelTurnContext[] = [];
     const capture = (partial: Partial<TurnResult> & Pick<TurnResult, "decision">): CharacterModel => {
-      const result: TurnResult = { messages: [], notes: [], memory: [], ...partial };
+      const result: TurnResult = { messages: [], notes: [], memory: [], intentions: [], ...partial };
       return {
         async runTurn(input): Promise<TurnResult> {
           secondCtx.push(input.context);
@@ -551,7 +554,7 @@ describe("лимиты строк ответа (§11.3, чек-лист 1.10)", 
     const model: CharacterModel = {
       async runTurn(input): Promise<TurnResult> {
         captured.push({ system: input.context.system });
-        return { decision: "answer", messages: ["норм"], notes: [], memory: [] };
+        return { decision: "answer", messages: ["норм"], notes: [], memory: [], intentions: [] };
       },
     };
 
