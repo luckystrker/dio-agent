@@ -12,7 +12,11 @@ import type { MemoryRepo } from "../memory/memory-repo.js";
 import { chatScope } from "../memory/scope.js";
 import { buildSystemPrompt, type Persona } from "./persona.js";
 import { clampMoodDelta, describeMood, MoodRepo, type Mood } from "./mood.js";
-import { describeRelationship, RelationshipRepo } from "./relationships.js";
+import {
+  describeRelationship,
+  RELATIONSHIP_LIMITS,
+  RelationshipRepo,
+} from "./relationships.js";
 import type { Budget } from "../runtime/budgets.js";
 import type { WorkQueueRepo } from "../runtime/work-queue.js";
 
@@ -166,12 +170,18 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
               affinity: result.relationship_delta.affinity,
               trust: result.relationship_delta.trust,
             });
+            // аудит-след пишет СЖАТУЮ дельту — как применено (§7.3)
+            const clampStep = (value: number | undefined, limit: number): number =>
+              value === undefined ? 0 : Math.max(-limit, Math.min(limit, value));
             await applyDeltas(client, item.id, [
               {
                 type: "append_note",
                 text: `отношения: ${JSON.stringify({
-                  affinity: result.relationship_delta.affinity ?? 0,
-                  trust: result.relationship_delta.trust ?? 0,
+                  affinity: clampStep(
+                    result.relationship_delta.affinity,
+                    RELATIONSHIP_LIMITS.affinityPerTurn,
+                  ),
+                  trust: clampStep(result.relationship_delta.trust, RELATIONSHIP_LIMITS.trustPerTurn),
                 })} — ${result.relationship_delta.reason}`,
               },
             ]);

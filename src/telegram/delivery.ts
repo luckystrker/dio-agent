@@ -120,7 +120,8 @@ export class DeliveryLoop {
           (signal) => this.deps.api.setMessageReaction(row.chatId, row.targetMessageId!, row.emoji!, signal),
           this.options.sendTimeoutMs,
         );
-        await this.deps.repo.markSent(row.id, "reaction");
+        // у реакции нет telegram_message_id (bigint) — NULL, а не строка
+        await this.deps.repo.markSent(row.id, null);
         this.deps.logger.info("реакция поставлена", {
           turnId: row.turnId,
           emoji: row.emoji,

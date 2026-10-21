@@ -164,9 +164,10 @@ export class OutboxRepo {
     }
   }
 
-  async markSent(id: string, telegramMessageId: string): Promise<void> {
+  async markSent(id: string, telegramMessageId: string | null): Promise<void> {
     // Условная запись: отменённая (cancelled) строка не перезаписывается
-    // отправкой из устаревшей памяти (находка Н2 приёмки этапа 2)
+    // отправкой из устаревшей памяти (находка Н2 приёмки этапа 2).
+    // null — у реакции нет telegram_message_id (§13.1).
     await this.pool.query(
       `UPDATE delivery_outbox
        SET status = 'sent', telegram_message_id = $2, last_error = NULL, updated_at = now()

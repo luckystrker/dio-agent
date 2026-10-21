@@ -102,7 +102,7 @@ export class MoodRepo {
     const elapsed = Date.now() - current.updated_at.getTime();
     const decayed = decayMood(stored, baseline, elapsed);
     await this.pool.query(
-      "UPDATE mood_state SET valence = $2, arousal = $3, social_energy = $4, updated_at = now() WHERE id = 1",
+      "UPDATE mood_state SET valence = $1, arousal = $2, social_energy = $3, updated_at = now() WHERE id = 1",
       [decayed.valence, decayed.arousal, decayed.socialEnergy],
     );
     return { mood: decayed, updatedAt: new Date() };
@@ -128,18 +128,16 @@ export class MoodRepo {
     const elapsed = row ? Date.now() - row.updated_at.getTime() : 0;
     const base = decayMood(stored, baseline, elapsed);
 
+    // округление до 3 знаков: избавляет от артефактов плавающей точки в хранилище
+    const round3 = (value: number): number => Math.round(value * 1000) / 1000;
     const next: Mood = {
-      valence: clamp(
-        base.valence + (delta.valence ?? 0),
-        -1,
-        1,
-      ),
-      arousal: clamp(base.arousal + (delta.arousal ?? 0), 0, 1),
-      socialEnergy: clamp(base.socialEnergy + (delta.socialEnergy ?? 0), 0, 1),
+      valence: round3(clamp(base.valence + (delta.valence ?? 0), -1, 1)),
+      arousal: round3(clamp(base.arousal + (delta.arousal ?? 0), 0, 1)),
+      socialEnergy: round3(clamp(base.socialEnergy + (delta.socialEnergy ?? 0), 0, 1)),
     };
     await client.query(
       `INSERT INTO mood_state (id, valence, arousal, social_energy, updated_at)
-       VALUES (1, $2, $3, $4, now())
+       VALUES (1, $1, $2, $3, now())
        ON CONFLICT (id) DO UPDATE
          SET valence = EXCLUDED.valence, arousal = EXCLUDED.arousal,
              social_energy = EXCLUDED.social_energy, updated_at = now()`,
