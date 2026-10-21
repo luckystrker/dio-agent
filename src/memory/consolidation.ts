@@ -23,12 +23,19 @@ export async function consolidateEpisodes(
 ): Promise<{ chats: number; events: number }> {
   const memory = new MemoryRepo(pool);
 
+  // §10.2: граница эпизода — 4 часа ТИШИНЫ в чате: консолидируются чаты,
+  // чьё последнее событие старше границы. События свежего чата не трогаются,
+  // даже если сами по себе старше 4 часов.
   const stale = await pool.query<StaleEvent>(
-    `SELECT id::text, chat_id::text, text, occurred_at
-     FROM social_events
-     WHERE status = 'processed' AND summarized_at IS NULL
-       AND occurred_at < now() - ($1::int * interval '1 hour')
-     ORDER BY chat_id, id`,
+    `SELECT e.id::text, e.chat_id::text, e.text, e.occurred_at
+     FROM social_events e
+     WHERE e.status = 'processed' AND e.summarized_at IS NULL
+       AND e.chat_id IN (
+         SELECT chat_id FROM social_events
+         GROUP BY chat_id
+         HAVING max(occurred_at) < now() - ($1::int * interval '1 hour')
+       )
+     ORDER BY e.chat_id, e.id`,
     [EPISODE_SILENCE_HOURS],
   );
   if (stale.rows.length === 0) return { chats: 0, events: 0 };

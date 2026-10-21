@@ -77,4 +77,31 @@ describe("validateMemoryCandidates", () => {
       validateMemoryCandidates([{ ...VALID, entities: [{ name: "x", kind: "dragon", role: "subject" }] }]),
     ).toThrow(CandidateError);
   });
+
+  describe("посторонние поля (провенанс и ID модели недоступны, §8.3/§10.1)", () => {
+    it("source отклоняется: источник назначает runtime, не модель", () => {
+      expect(() => validateMemoryCandidates([{ ...VALID, source: "x" }])).toThrow(
+        /постороннее поле "source"/,
+      );
+    });
+
+    it("id отклоняется: постоянные ID назначает runtime в транзакции", () => {
+      expect(() => validateMemoryCandidates([{ ...VALID, id: 1 }])).toThrow(/постороннее поле "id"/);
+    });
+
+    it("created_by отклоняется: авторство модели — не поле кандидата", () => {
+      expect(() => validateMemoryCandidates([{ ...VALID, created_by: "model" }])).toThrow(
+        /постороннее поле "created_by"/,
+      );
+    });
+
+    it("постороннее поле у одного кандидата валит весь набор (нет «лучшего усилия»)", () => {
+      expect(() =>
+        validateMemoryCandidates([
+          { kind: "experience", text: "валидный сосед" },
+          { ...VALID, source: "x" },
+        ]),
+      ).toThrow(/постороннее поле "source"/);
+    });
+  });
 });

@@ -18,6 +18,14 @@ export async function cleanTables(pool: Pool): Promise<void> {
   );
 }
 
+/** Очистка таблиц памяти (этап 3): entities, memory_items, links, sources. */
+export async function cleanMemoryTables(pool: Pool): Promise<void> {
+  await pool.query(
+    "TRUNCATE TABLE stance_basis, stances, memory_derivations, memory_sources, " +
+      "memory_links, memory_items, entity_aliases, entities, sources RESTART IDENTITY CASCADE",
+  );
+}
+
 /** Поллинг условия с дедлайном — для ожидания асинхронного worker'а. */
 export async function waitFor(
   condition: () => Promise<boolean>,

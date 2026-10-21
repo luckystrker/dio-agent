@@ -60,6 +60,15 @@ export function validateMemoryCandidates(input: unknown): MemoryCandidate[] {
     }
     const record = entry as Record<string, unknown>;
 
+    // Эшелон strict-схемы адаптера: посторонние поля (source, id, …)
+    // отклоняются и здесь — провенанс модели недоступен ни одним путём
+    const allowedKeys = new Set(["kind", "text", "entities", "salience", "confidence"]);
+    for (const key of Object.keys(record)) {
+      if (!allowedKeys.has(key)) {
+        throw new CandidateError(`${prefix}: постороннее поле "${key}"`);
+      }
+    }
+
     const kind = record["kind"];
     if (typeof kind !== "string" || !(MEMORY_KINDS as readonly string[]).includes(kind)) {
       throw new CandidateError(`${prefix}: неизвестный вид "${String(kind)}"`);

@@ -99,7 +99,7 @@ export class MemoryRepo {
       [item.id, sourceId],
     );
 
-    for (const entity of candidate.entities) {
+    for (const entity of candidate.entities ?? []) {
       const entityRow = await this.entities.findOrCreate(
         client,
         entity.kind as EntityKind,
@@ -117,7 +117,9 @@ export class MemoryRepo {
 
   /**
    * Supersede (§8.2, §10.3): новая запись заменяет старую; старая помечается
-   * superseded, история преемственности сохраняется. Тихая перезапись запрещена.
+   * superseded, история преемственности сохраняется. Тихая перезапись
+   * запрещена — заменять можно только активную (или оспоренную) запись,
+   * иначе плодились бы «форки» текущей версии одного мнения.
    */
   async supersede(
     client: PoolClient,
@@ -126,6 +128,19 @@ export class MemoryRepo {
     scopeId: ScopeId,
     source: SourceRef,
   ): Promise<MemoryItemRow> {
+    const oldItem = await client.query<{ scope_id: string; status: string }>(
+      "SELECT scope_id, status FROM memory_items WHERE id = $1",
+      [oldItemId],
+    );
+    const old = oldItem.rows[0];
+    if (!old) throw new Error(`supersede: запись ${oldItemId} не найдена`);
+    if (old.scope_id !== scopeId) {
+      throw new Error("supersede: смена scope запрещена — пересечение аудиторий §9.1");
+    }
+    if (old.status !== "active" && old.status !== "disputed") {
+      throw new Error(`supersede: запись ${oldItemId} уже ${old.status} — форк запрещён (§10.3)`);
+    }
+
     const newItem = await this.insertCandidate(client, candidate, scopeId, source);
     await client.query(
       `UPDATE memory_items SET supersedes_id = $2 WHERE id = $1`,
@@ -143,8 +158,8 @@ export class MemoryRepo {
     return newItem;
   }
 
-  /** Цепочка supersede от записи к корню (преемственность мнений). */
-  async supersedeChain(itemId: string): Promise<MemoryItemRow[]> {
+  /** Цепочка supersede от записи к корню (преемственность мнений), §9.2: только записи, видимые аудитории. */
+  async supersedeChain(itemId: string, audienceScope: ScopeId): Promise<MemoryItemRow[]> {
     const result = await this.pool.query<MemoryDbRow>(
       `WITH RECURSIVE chain AS (
          SELECT m.* FROM memory_items m WHERE m.id = $1::bigint
@@ -153,8 +168,10 @@ export class MemoryRepo {
          JOIN chain ON prev.id = chain.supersedes_id
        )
        SELECT id, kind, text, scope_id, status, salience, confidence, recorded_at
-       FROM chain`,
-      [itemId],
+       FROM chain
+       WHERE scope_id IN ($2, 'public')
+       ORDER BY recorded_at DESC`,
+      [itemId, audienceScope],
     );
     return result.rows.map(toRow);
   }

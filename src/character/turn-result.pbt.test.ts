@@ -172,6 +172,71 @@ describe("PBT: строгие отклонения схемы (§17: невал�
   });
 });
 
+describe("структурный Г-критерий: у кандидатов памяти НЕТ полей источника (§8.3, §10.1)", () => {
+  const memoryItemSchema = TURN_RESULT_JSON_SCHEMA.properties.memory.items;
+  const entityItemSchema = (
+    memoryItemSchema.properties.entities as {
+      items: { properties: Record<string, unknown>; additionalProperties?: unknown };
+    }
+  ).items;
+
+  it("JSON Schema кандидата памяти содержит только kind/text/entities/salience/confidence", () => {
+    expect(Object.keys(memoryItemSchema.properties).sort()).toEqual([
+      "confidence",
+      "entities",
+      "kind",
+      "salience",
+      "text",
+    ]);
+    expect(memoryItemSchema.additionalProperties).toBe(false);
+  });
+
+  it("JSON Schema сущности — только name/kind/role; дополнительных полей нет", () => {
+    expect(Object.keys(entityItemSchema.properties).sort()).toEqual(["kind", "name", "role"]);
+    expect(entityItemSchema.additionalProperties).toBe(false);
+  });
+
+  it("ни одно свойство контракта не называется как источник/провенанс", () => {
+    const forbidden = /source|provenance|ref|url|origin/i;
+    const allKeys = [
+      ...Object.keys(memoryItemSchema.properties),
+      ...Object.keys(entityItemSchema.properties),
+    ];
+    expect(allKeys.filter((key) => forbidden.test(key))).toEqual([]);
+  });
+
+  it("PBT: ЛЮБОЕ постороннее поле у кандидата (source/id/created_by/…) отклоняется strict-схемой", async () => {
+    const allowed = ["kind", "text", "entities", "salience", "confidence"];
+    const extraKeyArb = fc
+      .string({ minLength: 1, maxLength: 12, unit: "grapheme" })
+      .filter((key) => !allowed.includes(key));
+    const extraValueArb = fc.jsonValue({ maxDepth: 2 });
+    const validCandidateArb = fc.record({
+      kind: fc.constantFrom("claim", "experience", "thought", "preference" as const),
+      text: fc.constant("пользователь рассказал о важном"),
+    });
+    await fc.assert(
+      fc.property(validCandidateArb, extraKeyArb, extraValueArb, (candidate, key, value) => {
+        const result = TurnResultSchema.safeParse({
+          decision: "ignore",
+          memory: [{ ...candidate, [key]: value }],
+        });
+        expect(result.success).toBe(false);
+      }),
+    );
+  });
+
+  it("точечные имена посторонних полей отклоняются: source, provenanceId, id, created_by", () => {
+    for (const field of ["source", "provenanceId", "id", "created_by", "sourceIds"]) {
+      const result = TurnResultSchema.safeParse({
+        decision: "ignore",
+        memory: [{ kind: "claim", text: "текст", [field]: "turn:999" }],
+      });
+      expect(result.success, `поле ${field} должно отклоняться`).toBe(false);
+    }
+  });
+});
+
 describe("согласованность TURN_RESULT_JSON_SCHEMA с zod-схемой", () => {
   it("перечисление решений совпадает с zod-перечислением", () => {
     expect([...TURN_RESULT_JSON_SCHEMA.properties.decision.enum].sort()).toEqual(
