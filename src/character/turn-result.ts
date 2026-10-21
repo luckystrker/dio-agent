@@ -29,19 +29,41 @@ const memoryCandidateSchema = z
     { message: "confidence допустим только у claim", path: ["confidence"] },
   );
 
-// TurnResult с кросс-полями по §11.2:
-// answer — 1–4 сообщения; ignore/defer — без отправляемых сообщений.
-// Данные намерения для defer (notBefore) приходят с фоновым модулем (этап 5);
-// поле добавляется тогда — сейчас его отсутствие не валидируется сознательно.
-// Адаптер валидирует по этой схеме ДО применения (§17: невалидный ответ
-// не применяется, «лучшего усилия» нет).
+// Изменение настроения за ход (§7.2): три параметра, ограничены на ход;
+// значимое изменение требует краткого основания. Runtime дополнительно
+// сжимает дельту до ±MAX_MOOD_DELTA_PER_TURN.
+const moodDeltaSchema = z
+  .object({
+    valence: z.number().min(-1).max(1).optional(),
+    arousal: z.number().min(0).max(1).optional(),
+    socialEnergy: z.number().min(0).max(1).optional(),
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
 
+// Изменение отношений (§7.3): affinity/trust меняются ограниченно и
+// с основанием; familiarity растёт по runtime-правилу, моделью не задаётся.
+const relationshipDeltaSchema = z
+  .object({
+    affinity: z.number().min(-1).max(1).optional(),
+    trust: z.number().min(0).max(1).optional(),
+    reason: z.string().min(1).max(500),
+  })
+  .strict();
+
+// TurnResult (§11.2): answer — 1–4 сообщения; react — реакция на сообщение;
+// ignore/defer — без отправляемых сообщений. Данные намерения для defer
+// (notBefore) приходят с фоновым модулем (этап 5) — сознательное отложение.
+// Лимиты строк (1.10): сообщение ≤ 4000 (граница Telegram), заметка ≤ 2000.
 export const TurnResultSchema = z
   .object({
-    decision: z.enum(["answer", "ignore", "defer"]),
-    messages: z.array(z.string().min(1)).max(4).default([]),
-    notes: z.array(z.string().min(1)).max(5).default([]),
+    decision: z.enum(["answer", "react", "ignore", "defer"]),
+    messages: z.array(z.string().min(1).max(4000)).max(4).default([]),
+    notes: z.array(z.string().min(1).max(2000)).max(5).default([]),
     memory: z.array(memoryCandidateSchema).max(5).default([]),
+    reaction: z.string().min(1).max(64).optional(),
+    mood_delta: moodDeltaSchema.optional(),
+    relationship_delta: relationshipDeltaSchema.optional(),
     reason: z.string().max(500).optional(),
   })
   .strict()
@@ -53,11 +75,32 @@ export const TurnResultSchema = z
         message: "answer требует от 1 до 4 сообщений",
       });
     }
-    if (result.decision !== "answer" && result.messages.length > 0) {
+    if (result.decision === "react" && result.reaction === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reaction"],
+        message: "react требует reaction (эмодзи)",
+      });
+    }
+    if (result.decision === "react" && result.messages.length > 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["messages"],
+        message: "react не содержит сообщений",
+      });
+    }
+    if (result.decision !== "answer" && result.decision !== "react" && result.messages.length > 0) {
       ctx.addIssue({
         code: "custom",
         path: ["messages"],
         message: "ignore/defer не содержат отправляемых сообщений",
+      });
+    }
+    if (result.decision !== "react" && result.reaction !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reaction"],
+        message: "reaction допустим только при decision=react",
       });
     }
   });
@@ -65,14 +108,13 @@ export const TurnResultSchema = z
 export type TurnResult = z.infer<typeof TurnResultSchema>;
 
 // JSON Schema для forced tool-calling. Написана руками и обязана оставаться
-// согласованной с TurnResultSchema (minLength/maxItems/maxLength включены;
-// согласованность проверяется тестом).
+// согласованной с TurnResultSchema (согласованность проверяется тестом).
 export const TURN_RESULT_JSON_SCHEMA = {
   type: "object",
   properties: {
-    decision: { type: "string", enum: ["answer", "ignore", "defer"] },
-    messages: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 4 },
-    notes: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 5 },
+    decision: { type: "string", enum: ["answer", "react", "ignore", "defer"] },
+    messages: { type: "array", items: { type: "string", minLength: 1, maxLength: 4000 }, maxItems: 4 },
+    notes: { type: "array", items: { type: "string", minLength: 1, maxLength: 2000 }, maxItems: 5 },
     memory: {
       type: "array",
       maxItems: 5,
@@ -106,6 +148,30 @@ export const TURN_RESULT_JSON_SCHEMA = {
         required: ["kind", "text"],
         additionalProperties: false,
       },
+    },
+    reaction: { type: "string", minLength: 1, maxLength: 64, description: "Эмодзи-реакция на последнее сообщение (только при decision=react)" },
+    mood_delta: {
+      type: "object",
+      description: "Необязательное изменение твоего настроения этим ходом (маленькими шагами, с причиной)",
+      properties: {
+        valence: { type: "number", minimum: -1, maximum: 1 },
+        arousal: { type: "number", minimum: 0, maximum: 1 },
+        socialEnergy: { type: "number", minimum: 0, maximum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["reason"],
+      additionalProperties: false,
+    },
+    relationship_delta: {
+      type: "object",
+      description: "Необязательное малое изменение отношения к собеседнику, с причиной",
+      properties: {
+        affinity: { type: "number", minimum: -1, maximum: 1 },
+        trust: { type: "number", minimum: 0, maximum: 1 },
+        reason: { type: "string", minLength: 1, maxLength: 500 },
+      },
+      required: ["reason"],
+      additionalProperties: false,
     },
     reason: { type: "string", maxLength: 500 },
   },

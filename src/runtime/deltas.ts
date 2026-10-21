@@ -47,17 +47,20 @@ export function validateDeltas(input: unknown): RuntimeDelta[] {
  * Применяет дельты ВНУТРИ переданной транзакции. Вызывающий оборачивает в
  * withTransaction — тогда список применяется целиком либо не применяется
  * вовсе (инвариант 4: один ход применяется к состоянию не более одного раза
- * и «всё или ничего»).
+ * и «всё или ничего»). Идемпотентность вторым поясом: UNIQUE(work_item_id,
+ * op_index) — повторное применение того же хода не создаёт дублей (1.7).
  */
 export async function applyDeltas(
   client: PoolClient,
   workItemId: string | null,
   deltas: RuntimeDelta[],
 ): Promise<number> {
-  for (const delta of deltas) {
+  for (const [opIndex, delta] of deltas.entries()) {
     await client.query(
-      "INSERT INTO state_notes (work_item_id, text) VALUES ($1, $2)",
-      [workItemId === null ? null : BigInt(workItemId), delta.text],
+      `INSERT INTO state_notes (work_item_id, text, op_index)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (work_item_id, op_index) DO NOTHING`,
+      [workItemId === null ? null : BigInt(workItemId), delta.text, opIndex],
     );
   }
   return deltas.length;

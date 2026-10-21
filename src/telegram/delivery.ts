@@ -111,6 +111,23 @@ export class DeliveryLoop {
     }
 
     try {
+      if (row.kind === "reaction") {
+        if (row.targetMessageId === null || row.emoji === null) {
+          await this.deps.repo.markFailed(row.id, "реакция без emoji/message_id");
+          return;
+        }
+        await withTimeout(
+          (signal) => this.deps.api.setMessageReaction(row.chatId, row.targetMessageId!, row.emoji!, signal),
+          this.options.sendTimeoutMs,
+        );
+        await this.deps.repo.markSent(row.id, "reaction");
+        this.deps.logger.info("реакция поставлена", {
+          turnId: row.turnId,
+          emoji: row.emoji,
+          messageId: row.targetMessageId,
+        });
+        return;
+      }
       const result = await withTimeout(
         (signal) => this.deps.api.sendMessage(row.chatId, row.text, signal),
         this.options.sendTimeoutMs,

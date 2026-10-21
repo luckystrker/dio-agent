@@ -29,6 +29,7 @@ function fullEvent(partial: PartialEvent): NormalizedEvent {
     chatId: "1",
     chatType: partial.chatType ?? "private",
     actorId: "1",
+    actorName: null,
     kind: (partial.kind as NormalizedEvent["kind"]) ?? "message",
     text: "x",
     supported: partial.supported,

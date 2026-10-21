@@ -5,7 +5,7 @@ import { createDatabasePool } from "../runtime/db.js";
 
 /** Отдельная база для тестов; разработческая dio не используется. */
 export const TEST_DATABASE_URL =
-  process.env["TEST_DATABASE_URL"] ?? "postgres://dio:dio@localhost:5433/dio_test";
+  process.env["TEST_DATABASE_URL"] ?? "postgres://dio:dio@127.0.0.1:5433/dio_test";
 
 export function createTestPool(): Pool {
   return createDatabasePool(TEST_DATABASE_URL);

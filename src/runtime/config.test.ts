@@ -60,6 +60,7 @@ describe("loadConfig", () => {
       timeoutMs: 60_000,
       maxRetries: 1,
       maxOutputTokens: 1000,
+      dailyCallsLimit: 100,
     });
   });
 

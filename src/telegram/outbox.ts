@@ -19,7 +19,10 @@ export interface OutboxRow {
   turnId: string;
   position: number;
   chatId: string;
+  kind: "message" | "reaction";
   text: string;
+  emoji: string | null;
+  targetMessageId: string | null;
   status: OutboxStatus;
   attempts: number;
 }
@@ -29,18 +32,26 @@ interface OutboxRowDb {
   turn_id: string | bigint;
   position: number;
   chat_id: string | bigint;
-  payload: { text?: string };
+  payload: { text?: string; type?: string; emoji?: string; message_id?: string | number };
   status: string;
   attempts: number;
 }
 
 function toRow(row: OutboxRowDb): OutboxRow {
+  const isReaction = row.payload?.["type"] === "reaction";
   return {
     id: String(row.id),
     turnId: String(row.turn_id),
     position: row.position,
     chatId: String(row.chat_id),
+    kind: isReaction ? "reaction" : "message",
     text: row.payload?.["text"] ?? "",
+    emoji: isReaction ? (row.payload?.["emoji"] ?? null) : null,
+    targetMessageId: isReaction
+      ? row.payload?.["message_id"] !== undefined
+        ? String(row.payload["message_id"])
+        : null
+      : null,
     status: row.status as OutboxStatus,
     attempts: row.attempts,
   };
@@ -89,6 +100,27 @@ export class OutboxRepo {
        ON CONFLICT (turn_id, position) DO NOTHING
        RETURNING id`,
       params,
+    );
+    return inserted.rowCount ?? 0;
+  }
+
+  /**
+   * Реакция на сообщение — единица доставки с UNIQUE(turn_id, position).
+   * Реакция — установка состояния: своя retry-политика у адаптера (§13.2).
+   */
+  async enqueueReaction(
+    client: PoolClient,
+    turnId: string,
+    chatId: string,
+    emoji: string,
+    targetMessageId: string,
+  ): Promise<number> {
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO delivery_outbox (turn_id, position, chat_id, payload)
+       VALUES ($1, 0, $2, $3::jsonb)
+       ON CONFLICT (turn_id, position) DO NOTHING
+       RETURNING id`,
+      [turnId, chatId, JSON.stringify({ type: "reaction", emoji, message_id: targetMessageId })],
     );
     return inserted.rowCount ?? 0;
   }

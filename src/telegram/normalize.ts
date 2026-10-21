@@ -9,6 +9,8 @@ export interface NormalizedEvent {
   chatId: string;
   chatType: ChatType;
   actorId: string | null;
+  /** Отображаемое имя автора (first_name/username) — для карточки человека */
+  actorName: string | null;
   kind: EventKind;
   text: string | null;
   /** false — update не поддерживается: журнал без обработки, offset не застревает */
@@ -22,11 +24,23 @@ interface TelegramEntity {
 }
 
 interface TelegramMessage {
-  from?: { id?: number };
+  from?: { id?: number; first_name?: string; last_name?: string; username?: string };
   text?: string;
   entities?: TelegramEntity[];
   reply_to_message?: unknown;
   chat?: { id?: number; type?: string };
+}
+
+function actorNameOf(message: TelegramMessage): string | null {
+  const from = message.from;
+  if (!from) return null;
+  if (typeof from.first_name === "string" && from.first_name.length > 0) {
+    return typeof from.last_name === "string" && from.last_name.length > 0
+      ? `${from.first_name} ${from.last_name}`
+      : from.first_name;
+  }
+  if (typeof from.username === "string" && from.username.length > 0) return from.username;
+  return null;
 }
 
 interface TelegramUpdate {
@@ -89,6 +103,7 @@ export function normalizeUpdate(raw: unknown): NormalizedEvent {
       chatId: "0",
       chatType: "group",
       actorId: null,
+      actorName: null,
       kind: "other",
       text: null,
       supported: false,
@@ -104,6 +119,7 @@ export function normalizeUpdate(raw: unknown): NormalizedEvent {
     chatId: String(chat.id),
     chatType,
     actorId,
+    actorName: actorNameOf(message),
     kind,
     text: typeof message.text === "string" ? message.text : null,
     supported: true,

@@ -30,8 +30,8 @@ export async function ingestUpdate(
     try {
       const inserted = await client.query<{ id: string | bigint }>(
         `INSERT INTO social_events
-           (telegram_update_id, chat_id, chat_type, actor_id, kind, text, raw_update, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (telegram_update_id) DO NOTHING
          RETURNING id`,
         [
@@ -39,6 +39,7 @@ export async function ingestUpdate(
           event.chatId,
           event.chatType,
           event.actorId,
+          event.actorName,
           event.kind,
           event.text,
           JSON.stringify(rawUpdate),

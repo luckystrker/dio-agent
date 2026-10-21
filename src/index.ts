@@ -12,6 +12,9 @@ import { OpenAICompatModelAdapter, type CharacterModel } from "./character/model
 import { makeTurnHandler } from "./character/turn-handler.js";
 import { MemoryRepo } from "./memory/memory-repo.js";
 import { consolidateEpisodes } from "./memory/consolidation.js";
+import { PersonaRepo } from "./character/persona.js";
+import { MoodRepo } from "./character/mood.js";
+import { RelationshipRepo } from "./character/relationships.js";
 import { DryRunTelegramApi, HttpTelegramApi, type TelegramApi } from "./telegram/api.js";
 import { fileURLToPath } from "node:url";
 import { TelegramPoller } from "./telegram/polling.js";
@@ -71,7 +74,24 @@ const model: CharacterModel | null = config.model
   : null;
 
 const memory = new MemoryRepo(pool);
-const handleTurn = makeTurnHandler({ pool, model, outbox, memory, logger });
+const personaRepo = new PersonaRepo(pool);
+const persona = await personaRepo.active();
+const moodRepo = new MoodRepo(pool);
+const relationshipRepo = new RelationshipRepo(pool);
+const modelBudget = new BudgetRepo(pool);
+const handleTurn = makeTurnHandler({
+  pool,
+  model,
+  outbox,
+  memory,
+  persona,
+  mood: moodRepo,
+  relationships: relationshipRepo,
+  workQueue: repo,
+  modelBudget: config.model ? modelBudget : null,
+  modelDailyCallsLimit: config.model?.dailyCallsLimit ?? 100,
+  logger,
+});
 
 const handlers: Record<string, WorkHandler> = {
   consolidation: async (item) => {
@@ -148,15 +168,36 @@ async function shutdown(reason: string, exitCode = 0): Promise<void> {
     uptimeSec: Math.round((Date.now() - startedAt) / 1000),
   });
   clearInterval(heartbeat);
-  if (poller) await poller.stop();
-  if (buffers) await buffers.flushAll(); // незакрытые порции → turn
-  scheduler.stop();
-  await worker.stop();
-  if (delivery) await delivery.stop();
+  // 1.11: каждый шаг в своей защите; exit-код выставляется всегда
   try {
-    await singleton.release();
+    try {
+      if (poller) await poller.stop();
+    } catch (error) {
+      logger.error("shutdown: poller", { error: String(error) });
+    }
+    try {
+      if (buffers) await buffers.flushAll();
+    } catch (error) {
+      logger.error("shutdown: buffers", { error: String(error) });
+    }
+    scheduler.stop();
+    try {
+      await worker.stop();
+    } catch (error) {
+      logger.error("shutdown: worker", { error: String(error) });
+    }
+    try {
+      if (delivery) await delivery.stop();
+    } catch (error) {
+      logger.error("shutdown: delivery", { error: String(error) });
+    }
+    try {
+      await singleton.release();
+    } catch (error) {
+      logger.error("shutdown: singleton", { error: String(error) });
+    }
   } finally {
-    await pool.end();
+    await pool.end().catch(() => undefined);
     process.exit(exitCode);
   }
 }

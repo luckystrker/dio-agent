@@ -9,7 +9,7 @@ import { TurnResultSchema, TURN_RESULT_JSON_SCHEMA } from "./turn-result.js";
 // обязаны проходить обе схемы. Нарушения кросс-полей и лимитов — строгое
 // отклонение, без «лучшего усилия».
 
-const DECISIONS = ["answer", "ignore", "defer"] as const;
+const DECISIONS = ["answer", "defer", "ignore", "react"] as const;
 type Decision = (typeof DECISIONS)[number];
 
 const decisionArb = fc.constantFrom(...DECISIONS);
@@ -19,6 +19,7 @@ const nonEmptyStringArb = fc.string({ minLength: 1, maxLength: 200, unit: "graph
 interface TurnResultCandidate {
   decision: Decision;
   messages: string[];
+  reaction?: string | undefined;
   notes: string[];
   reason?: string | undefined;
 }
@@ -29,14 +30,18 @@ const specValidArb: fc.Arbitrary<TurnResultCandidate> = fc
     decision: decisionArb,
     answerMessages: fc.array(nonEmptyStringArb, { minLength: 1, maxLength: 4 }),
     silentMessages: fc.constant([] as string[]),
+    reaction: fc.option(fc.string({ minLength: 1, maxLength: 64, unit: "grapheme" }), {
+      nil: undefined,
+    }),
     notes: fc.array(nonEmptyStringArb, { maxLength: 5 }),
     reason: fc.option(fc.string({ minLength: 1, maxLength: 500, unit: "grapheme" }), {
       nil: undefined,
     }),
   })
-  .map(({ decision, answerMessages, silentMessages, notes, reason }) => ({
+  .map(({ decision, answerMessages, silentMessages, reaction, notes, reason }) => ({
     decision,
     messages: decision === "answer" ? answerMessages : silentMessages,
+    reaction: decision === "react" ? (reaction ?? "👍") : undefined,
     notes,
     reason,
   }));
@@ -246,7 +251,7 @@ describe("согласованность TURN_RESULT_JSON_SCHEMA с zod-схем
 
   it("набор свойств и required совпадают с zod-схемой", () => {
     expect(Object.keys(TURN_RESULT_JSON_SCHEMA.properties).sort()).toEqual(
-      ["decision", "memory", "messages", "notes", "reason"],
+      ["decision", "memory", "messages", "mood_delta", "notes", "reaction", "reason", "relationship_delta"],
     );
     expect([...TURN_RESULT_JSON_SCHEMA.required]).toEqual(["decision"]);
   });

@@ -8,6 +8,7 @@ function event(overrides: Partial<NormalizedEvent>): NormalizedEvent {
     chatId: "1",
     chatType: "private",
     actorId: "1",
+    actorName: null,
     kind: "message",
     text: "x",
     supported: true,

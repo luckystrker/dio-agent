@@ -14,6 +14,12 @@ export interface SendMessageResult {
 export interface TelegramApi {
   getUpdates(offset: number, timeoutSec: number, signal: AbortSignal): Promise<TelegramUpdate[]>;
   sendMessage(chatId: string, text: string, signal: AbortSignal): Promise<SendMessageResult>;
+  setMessageReaction(
+    chatId: string,
+    messageId: string,
+    emoji: string,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export type HttpTransport = (
@@ -59,6 +65,15 @@ export class HttpTelegramApi implements TelegramApi {
       throw new TelegramApiError("sendMessage вернул ответ без message_id", 200, null);
     }
     return { messageId: String(messageId) };
+  }
+
+  async setMessageReaction(
+    chatId: string,
+    messageId: string,
+    emoji: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    await this.call("setMessageReaction", { chat_id: chatId, message_id: messageId, emoji }, signal);
   }
 
   private async call(method: string, payload: unknown, signal: AbortSignal): Promise<unknown> {
@@ -123,5 +138,9 @@ export class DryRunTelegramApi implements TelegramApi {
     this.log(`[dry-run → chat ${chatId}] ${text.replace(/\n/g, " ")}`);
     // числовой id: колонка telegram_message_id — bigint
     return { messageId: String(990_000 + this.sent.length) };
+  }
+
+  async setMessageReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
+    this.log(`[dry-run → chat ${chatId}] реакция ${emoji} на сообщение ${messageId}`);
   }
 }

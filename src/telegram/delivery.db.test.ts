@@ -41,9 +41,14 @@ type SendBehavior =
 
 class FakeApi implements TelegramApi {
   public readonly calls: Array<{ chatId: string; text: string }> = [];
+  public readonly reactions: Array<{ chatId: string; messageId: string; emoji: string }> = [];
   private scriptIndex = 0;
 
   constructor(private readonly script: SendBehavior[] = []) {}
+
+  async setMessageReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
+    this.reactions.push({ chatId, messageId, emoji });
+  }
 
   async getUpdates(): Promise<TelegramUpdate[]> {
     return [];

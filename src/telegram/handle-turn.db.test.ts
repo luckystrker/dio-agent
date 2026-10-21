@@ -10,8 +10,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
 import { ChatBufferManager } from "./buffers.js";
 import { OutboxRepo } from "./outbox.js";
-import { makeTurnHandler, SYSTEM_PROMPT } from "../character/turn-handler.js";
+import { makeTurnHandler } from "../character/turn-handler.js";
 import { MemoryRepo } from "../memory/memory-repo.js";
+import { MoodRepo } from "../character/mood.js";
+import { RelationshipRepo } from "../character/relationships.js";
+import { DEFAULT_PERSONA } from "../character/persona.js";
 import { OpenAICompatModelAdapter, type ModelTransport } from "../character/model-adapter.js";
 import { SkipWorkError, type WorkHandler } from "../runtime/worker.js";
 import { WorkQueueRepo, type WorkItem } from "../runtime/work-queue.js";
@@ -74,8 +77,31 @@ function makeStubModel(calls: Array<{ messages: Array<{ role: string; content: s
   });
 }
 
+const DEFAULT_PERSONA_STUB = {
+  id: "0",
+  version: 1,
+  name: DEFAULT_PERSONA.name,
+  description: DEFAULT_PERSONA.description,
+  speechStyle: DEFAULT_PERSONA.speechStyle,
+  values: [...DEFAULT_PERSONA.values],
+  moodBaseline: { ...DEFAULT_PERSONA.moodBaseline },
+  seedBio: DEFAULT_PERSONA.seedBio,
+};
+
 function makeHandler(model: OpenAICompatModelAdapter | null): WorkHandler {
-  return makeTurnHandler({ pool, model, outbox, memory: new MemoryRepo(pool), logger: silentLogger });
+  return makeTurnHandler({
+    pool,
+    model,
+    outbox,
+    memory: new MemoryRepo(pool),
+    persona: DEFAULT_PERSONA_STUB,
+    mood: new MoodRepo(pool),
+    relationships: new RelationshipRepo(pool),
+    workQueue: new WorkQueueRepo(pool),
+    modelBudget: null,
+    modelDailyCallsLimit: 100,
+    logger: silentLogger,
+  });
 }
 
 /** Реальный путь буферов: события → flushAll → turn + work_item. */
@@ -138,10 +164,11 @@ describe("makeTurnHandler: применение хода (§12.1, инвариа
 
     await handler(item, new AbortController().signal);
 
-    // контекст собран приложением явно: system + события как user-сообщения
+    // контекст собран приложением явно: persona-system (с mood/relationship)
+    // + события как user-сообщения
     expect(modelCalls).toHaveLength(1);
     expect(modelCalls[0]!.messages).toEqual([
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: expect.stringContaining(DEFAULT_PERSONA_STUB.name) },
       { role: "user", content: "первое сообщение" },
       { role: "user", content: "второе сообщение" },
     ]);
@@ -177,9 +204,9 @@ describe("makeTurnHandler: применение хода (§12.1, инвариа
     expect(afterSecond.outboxRows).toEqual(afterFirst.outboxRows);
     expect(afterSecond.notes).toHaveLength(afterFirst.notes.length); // 2, не 4
     expect(afterSecond.notes).toEqual(afterFirst.notes);
-    // модель могла вызваться повторно — допустимая потеря стоимости (§12.2),
-    // повторного применения состояния быть не должно
-    expect(modelCalls).toHaveLength(2);
+    // 2.7: применённый turn закрывается БЕЗ повторного вызова модели —
+    // «ответ хода переживает процесс», повторного применения нет
+    expect(modelCalls).toHaveLength(1);
   });
 
   it("(c) конкурентный двойной вызов одного turn: применяется ровно один", async () => {

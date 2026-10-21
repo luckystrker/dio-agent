@@ -10,6 +10,8 @@ export interface ModelSettings {
   timeoutMs: number;
   maxRetries: number;
   maxOutputTokens: number;
+  /** Дневной лимит модельных вызовов (§16, чек-лист 1.9). */
+  dailyCallsLimit: number;
 }
 
 export interface TelegramSettings {
@@ -119,5 +121,6 @@ function parseModelSettings(env: NodeJS.ProcessEnv): ModelSettings | null {
     timeoutMs: positiveInt(env["MODEL_TIMEOUT_MS"], 60_000),
     maxRetries: positiveInt(env["MODEL_MAX_RETRIES"], 1),
     maxOutputTokens: positiveInt(env["MODEL_MAX_OUTPUT_TOKENS"], 1000),
+    dailyCallsLimit: positiveInt(env["MODEL_DAILY_CALLS_LIMIT"], 100),
   };
 }

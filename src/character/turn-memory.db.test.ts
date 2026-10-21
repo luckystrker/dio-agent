@@ -7,7 +7,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Pool } from "pg";
-import { makeTurnHandler, SYSTEM_PROMPT } from "./turn-handler.js";
+import { makeTurnHandler } from "./turn-handler.js";
+import { DEFAULT_PERSONA } from "./persona.js";
+import { MoodRepo } from "./mood.js";
+import { RelationshipRepo } from "./relationships.js";
 import type { CharacterModel } from "./model-adapter.js";
 import { OpenAICompatModelAdapter, type ModelTransport } from "./model-adapter.js";
 import type { TurnResult } from "./turn-result.js";
@@ -126,8 +129,31 @@ async function makeTurn(chatId: string, texts: string[]): Promise<{ turnId: stri
   return { turnId, item: item! };
 }
 
+const PERSONA_STUB = {
+  id: "0",
+  version: 1,
+  name: DEFAULT_PERSONA.name,
+  description: DEFAULT_PERSONA.description,
+  speechStyle: DEFAULT_PERSONA.speechStyle,
+  values: [...DEFAULT_PERSONA.values],
+  moodBaseline: { ...DEFAULT_PERSONA.moodBaseline },
+  seedBio: DEFAULT_PERSONA.seedBio,
+};
+
 function handlerWith(model: CharacterModel | null) {
-  return makeTurnHandler({ pool, model, outbox, memory, logger: silentLogger });
+  return makeTurnHandler({
+    pool,
+    model,
+    outbox,
+    memory,
+    persona: PERSONA_STUB,
+    mood: new MoodRepo(pool),
+    relationships: new RelationshipRepo(pool),
+    workQueue: new WorkQueueRepo(pool),
+    modelBudget: null,
+    modelDailyCallsLimit: 100,
+    logger: silentLogger,
+  });
 }
 
 async function memoryRows() {
@@ -208,13 +234,16 @@ describe("запись после хода (§10.1): валидные канди
       { kind: "journal_event", ref: `turn:${turnId}`, memory_ids: [claim!.id, experience!.id] },
     ]);
 
-    // сущность создана в scope хода и переиспользована обоими кандидатами
+    // сущности в scope хода: карточка собеседника (runtime, §7.3)
+    // + «минералы», переиспользованная обоими кандидатами
     expect(state.entities).toEqual([
+      { id: expect.any(String), name: "user:42", scope_id: chatScope("500") },
       { id: expect.any(String), name: "минералы", scope_id: chatScope("500") },
     ]);
+    const minerals = state.entities.find((row) => row.name === "минералы")!;
     expect(state.links).toEqual([
-      { memory_id: claim!.id, entity_id: state.entities[0]!.id, role: "subject" },
-      { memory_id: experience!.id, entity_id: state.entities[0]!.id, role: "context" },
+      { memory_id: claim!.id, entity_id: minerals.id, role: "subject" },
+      { memory_id: experience!.id, entity_id: minerals.id, role: "context" },
     ]);
 
     // ход применён, события обработаны
@@ -333,7 +362,8 @@ describe("записи доступны следующему ходу сразу
     const stranger = makeModel({ decision: "answer", messages: ["ответ"], notes: [] });
     await handlerWith(stranger.adapter)(third.item, SIGNAL());
     expect(stranger.calls).toHaveLength(1);
-    expect(stranger.calls[0]!.system).toBe(SYSTEM_PROMPT);
+    // система — persona-промпт (с mood/relationship-строками), без памяти чужого чата
+    expect(stranger.calls[0]!.system).toContain(PERSONA_STUB.name);
     expect(stranger.calls[0]!.system.includes(MEMORIZED)).toBe(false);
   });
 });

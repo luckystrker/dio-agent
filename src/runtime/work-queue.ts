@@ -93,8 +93,20 @@ export class WorkQueueRepo {
     return row ? toWorkItem(row) : null;
   }
 
+  /** Закрытие работы на конкретном соединении — внутри транзакции применения (1.7). */
+  async completeWithClient(client: PoolClient, id: string): Promise<void> {
+    await client.query(
+      "UPDATE work_items SET status = 'done', updated_at = now() WHERE id = $1 AND status = 'running'",
+      [id],
+    );
+  }
+
+  /** Идемпотентный пояс: если уже закрыта в транзакции применения — no-op (1.7). */
   async complete(id: string): Promise<void> {
-    await this.pool.query("UPDATE work_items SET status = 'done', updated_at = now() WHERE id = $1", [id]);
+    await this.pool.query(
+      "UPDATE work_items SET status = 'done', updated_at = now() WHERE id = $1 AND status = 'running'",
+      [id],
+    );
   }
 
   /** Вернуть в очередь; pauseMs — пауза до следующей попытки (§12.1). */
