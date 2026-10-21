@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:db": "vitest run --config vitest.db.config.ts",
+    "test:mutation": "tsx src/scripts/mutation-test.ts",
     "migrate": "tsx src/db/migrate.ts",
     "migrate:create": "node-pg-migrate create -m migrations",
     "turn": "tsx src/scripts/enqueue-turn.ts",

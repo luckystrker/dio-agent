@@ -10,8 +10,8 @@ export async function reserveModelCall(
   dailyCallsLimit: number,
   workItemId: string,
   attempt: number,
-): Promise<void> {
-  if (!budget) return;
+): Promise<string | null> {
+  if (!budget) return null;
   const used = await budget.reservedToday();
   if (used >= dailyCallsLimit) {
     throw new SkipWorkError(
@@ -20,5 +20,7 @@ export async function reserveModelCall(
     );
   }
   // false = эта попытка уже оплачена (повтор того же work_item после сбоя)
-  await budget.tryReserve(`model:${workItemId}:${attempt}`);
+  const operationId = `model:${workItemId}:${attempt}`;
+  await budget.tryReserve(operationId);
+  return operationId; // журнал хода §20: бюджетная бронь вызова
 }

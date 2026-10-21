@@ -43,6 +43,10 @@ describe("claimDue (§13.1)", () => {
     for (const row of first) {
       expect(row.status).toBe("sending");
       expect(row.attempts).toBe(1);
+      // строки-сообщения: kind message и БЕЗ цели реакции (toRow §13.1)
+      expect(row.kind).toBe("message");
+      expect(row.targetMessageId).toBeNull();
+      expect(row.emoji).toBeNull();
     }
 
     expect(await repo.claimDue(10)).toEqual([]); // ничего не отдаётся повторно
@@ -71,6 +75,32 @@ describe("claimDue (§13.1)", () => {
       `5/${chat5Turn2}/0`,
       `7/${chat7Turn1}/0`,
     ]);
+  });
+
+  it("реакция: enqueueReaction → claimDue отдаёт kind/emoji/цель — путь доставки реакций §13.1", async () => {
+    // находка мутационного тестирования (этап 6.2): ветка toRow для реакций
+    // не была покрыта ни одним тестом — мутант payload.message_id выживал
+    const turnId = await createTurnRow(pool, "500");
+    const client = await pool.connect();
+    try {
+      const inserted = await repo.enqueueReaction(client, turnId, "500", "🔥", "777");
+      expect(inserted).toBe(1);
+      // идемпотентность UNIQUE(turn_id, position) для реакций тоже
+      expect(await repo.enqueueReaction(client, turnId, "500", "🔥", "777")).toBe(0);
+    } finally {
+      client.release();
+    }
+
+    const claimed = await repo.claimDue(10);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]).toMatchObject({
+      kind: "reaction",
+      emoji: "🔥",
+      targetMessageId: "777",
+      chatId: "500",
+      position: 0,
+    });
+    expect(claimed[0]!.text).toBe("");
   });
 
   it("claimDue выдаёт правильный набор строк (порядок проверяется отдельным тестом выше)", async () => {

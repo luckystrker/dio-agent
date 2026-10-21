@@ -251,3 +251,33 @@ describe("recoverStale: восстановление после падения �
     expect(await repo.pendingCount()).toBe(1);
   });
 });
+
+// Этап 6.5: наблюдаемость §20 — глубина очереди и возраст старейшей
+// pending-работы (находка ревью: pendingCount написан, но возраста не было).
+describe("queueStats: глубина и возраст очереди (§20)", () => {
+  it("пустая очередь: pending 0, возраст null", async () => {
+    expect(await repo.queueStats()).toEqual({ pending: 0, oldestPendingAgeSec: null });
+  });
+
+  it("свежая и состаренная работа: возраст старейшей считается от created_at", async () => {
+    await repo.enqueue("direct", {});
+    const old = await repo.enqueue("consolidation", {});
+    await pool.query("UPDATE work_items SET created_at = now() - interval '300 seconds' WHERE id = $1", [old]);
+
+    const stats = await repo.queueStats();
+    expect(stats.pending).toBe(2);
+    expect(stats.oldestPendingAgeSec).not.toBeNull();
+    expect(stats.oldestPendingAgeSec!).toBeGreaterThanOrEqual(299);
+  });
+
+  it("не-pending работы в глубину и возраст не попадают", async () => {
+    const id = await repo.enqueue("direct", {});
+    const claimed = await repo.claimNext(); // direct → running
+    expect(claimed).not.toBeNull();
+    expect(claimed!.id).toBe(id);
+    await pool.query("UPDATE work_items SET created_at = now() - interval '300 seconds' WHERE id = $1", [
+      claimed!.id,
+    ]);
+    expect(await repo.queueStats()).toEqual({ pending: 0, oldestPendingAgeSec: null });
+  });
+});

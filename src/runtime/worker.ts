@@ -118,7 +118,8 @@ export class CognitiveWorker {
     } catch (error) {
       if (error instanceof SkipWorkError) {
         await this.repo.skip(item.id, error.reason);
-        this.logger.info("работа помечена терминальным пропуском", {
+        // терминальный пропуск — видимое событие эксплуатации (§20), не шум
+        this.logger.warn("работа помечена терминальным пропуском", {
           id: item.id,
           kind: item.kind,
           reason: error.reason,

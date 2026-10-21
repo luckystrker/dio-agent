@@ -21,6 +21,8 @@ import { SkipWorkError, type WorkHandler } from "../runtime/worker.js";
 import { WorkQueueRepo, type WorkItem } from "../runtime/work-queue.js";
 import { createTestPool } from "../test-support/db.js";
 import { cleanTelegramTables, silentLogger } from "../test-support/telegram-db.js";
+import { BudgetRepo } from "../runtime/budgets.js";
+import type { Logger } from "../runtime/logger.js";
 
 let pool: Pool;
 let outbox: OutboxRepo;
@@ -241,5 +243,50 @@ describe("makeTurnHandler: применение хода (§12.1, инвариа
     expect(item!.id).toBe(id);
 
     await expect(handler(item!, new AbortController().signal)).rejects.toBeInstanceOf(SkipWorkError);
+  });
+});
+
+// Этап 6.5, §20: журнал хода — одна структурированная запись с IDs, action,
+// latency, usage и бюджетной бронью модельного вызова.
+describe("журнал хода (§20, этап 6.5)", () => {
+  it("ход логирует ids/decision/latencyMs/usage/budgetOperationId одним входом", async () => {
+    const entries: Array<{ msg: string; fields: Record<string, unknown> }> = [];
+    const recordingLogger: Logger = {
+      debug: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+      info: (msg, fields) => entries.push({ msg, fields: (fields ?? {}) as Record<string, unknown> }),
+    };
+    const modelCalls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    const handler = makeTurnHandler({
+      pool,
+      model: makeStubModel(modelCalls),
+      outbox,
+      memory: new MemoryRepo(pool),
+      intentions: new IntentionRepo(pool),
+      persona: DEFAULT_PERSONA_STUB,
+      mood: new MoodRepo(pool),
+      relationships: new RelationshipRepo(pool),
+      workQueue: workRepo,
+      modelBudget: new BudgetRepo(pool),
+      modelDailyCallsLimit: 100,
+      logger: recordingLogger,
+    });
+    const { turnId, item } = await makeTurnWithEvents(["вопрос про журнал хода"]);
+    await handler(item, new AbortController().signal);
+
+    const entry = entries.find((candidate) => candidate.msg === "ход выполнен");
+    expect(entry).toBeDefined();
+    expect(entry!.fields).toMatchObject({
+      turnId,
+      chatId: "500",
+      workItemId: item.id,
+      decision: "answer",
+      messages: 2,
+      latencyMs: expect.any(Number),
+      usage: { promptTokens: 11, completionTokens: 7 },
+      budgetOperationId: `model:${item.id}:${item.attempts}`,
+    });
+    expect(entry!.fields["latencyMs"]).toBeGreaterThanOrEqual(0);
   });
 });

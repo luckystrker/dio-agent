@@ -166,6 +166,23 @@ export class WorkQueueRepo {
     return Number(result.rows[0]?.["count"] ?? 0);
   }
 
+  /**
+   * Наблюдаемость §20: глубина очереди и возраст старейшей pending-работы
+   * (queue wait). null возраста = очередь пуста.
+   */
+  async queueStats(): Promise<{ pending: number; oldestPendingAgeSec: number | null }> {
+    const result = await this.pool.query<{ count: string; oldest_age_sec: string | null }>(
+      `SELECT count(*)::text AS count,
+              EXTRACT(EPOCH FROM (now() - MIN(created_at)))::bigint::text AS oldest_age_sec
+       FROM work_items WHERE status = 'pending'`,
+    );
+    const row = result.rows[0];
+    return {
+      pending: Number(row?.["count"] ?? 0),
+      oldestPendingAgeSec: row === undefined || row["oldest_age_sec"] === null ? null : Number(row["oldest_age_sec"]),
+    };
+  }
+
   private inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     return this.pool.connect().then(async (client) => {
       try {
@@ -181,4 +198,19 @@ export class WorkQueueRepo {
       }
     });
   }
+}
+
+/**
+ * Уровень записи о состоянии очереди в пульсе (§20: рост очереди требует
+ * предупреждения оператору). Чистая функция — логика пульса тестируема без
+ * entrypoint: пусто → молчим; глубина есть, но моложе порога → info;
+ * старейшая работа ждёт дольше порога → warn.
+ */
+export function queuePulseDecision(
+  stats: { pending: number; oldestPendingAgeSec: number | null },
+  warnAfterSec: number,
+): "silent" | "info" | "warn" {
+  if (stats.pending === 0) return "silent";
+  if (stats.oldestPendingAgeSec !== null && stats.oldestPendingAgeSec > warnAfterSec) return "warn";
+  return "info";
 }

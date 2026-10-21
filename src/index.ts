@@ -2,7 +2,7 @@ import { loadConfig } from "./runtime/config.js";
 import { createLogger } from "./runtime/logger.js";
 import { createDatabasePool } from "./runtime/db.js";
 import { acquireSingleton, SingletonTakenError, type Singleton } from "./runtime/singleton.js";
-import { WorkQueueRepo } from "./runtime/work-queue.js";
+import { WorkQueueRepo, queuePulseDecision } from "./runtime/work-queue.js";
 import { CognitiveWorker, type WorkHandler } from "./runtime/worker.js";
 import { BackgroundScheduler } from "./runtime/scheduler.js";
 import { BudgetRepo } from "./runtime/budgets.js";
@@ -191,9 +191,28 @@ const intentionTicker = setInterval(() => {
     });
 }, INTENTION_TICK_MS);
 
+// §20: пульс — debug (не заглушает полезные строки); при непустой очереди
+// отдельно видна глубина и возраст старейшей работы (queue wait), при
+// возрасте выше порога — предупреждение оператору.
 const HEARTBEAT_MS = 15_000;
+const QUEUE_AGE_WARN_SEC = 120;
 const heartbeat = setInterval(() => {
-  logger.info("жив", { uptimeSec: Math.round((Date.now() - startedAt) / 1000) });
+  logger.debug("жив", { uptimeSec: Math.round((Date.now() - startedAt) / 1000) });
+  void repo
+    .queueStats()
+    .then((stats) => {
+      const level = queuePulseDecision(stats, QUEUE_AGE_WARN_SEC);
+      if (level === "silent") return;
+      if (level === "warn") {
+        logger.warn("очередь растёт: старейшая работа ждёт дольше порога", {
+          ...stats,
+          warnAfterSec: QUEUE_AGE_WARN_SEC,
+        });
+      } else {
+        logger.info("очередь", stats);
+      }
+    })
+    .catch(() => undefined); // пульс не имеет права ронять процесс
 }, HEARTBEAT_MS);
 
 let shuttingDown = false;

@@ -53,6 +53,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
   const { pool, model, outbox, memory, persona, mood, relationships, workQueue, logger } = deps;
 
   return async function handleTurn(item, signal) {
+    const startedAtMs = Date.now();
     if (!model) {
       throw new SkipWorkError(
         "модель не настроена",
@@ -67,6 +68,9 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     let result: TurnResult;
     let candidates = [] as ReturnType<typeof validateMemoryCandidates>;
     let proposals = [] as ReturnType<typeof validateIntentionProposals>;
+    // §20: журнал хода — usage привязывается к этому вызову через onUsage
+    let usage: { promptTokens: number; completionTokens: number } | undefined;
+    let budgetOperationId: string | null = null;
 
     const turnRow = turnId
       ? await pool.query<{ status: string; validated_result: unknown }>(
@@ -87,7 +91,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
       return;
     } else {
       // --- Фаза 1: бюджет (1.9) → контекст из БД (4.4) → модель ---
-      await reserveModelBudget(item.id, item.attempts);
+      budgetOperationId = await reserveModelBudget(item.id, item.attempts);
 
       const events = turnId
         ? await pool.query<{ text: string | null; actor_id: string | null; actor_name: string | null; raw_update: unknown }>(
@@ -101,7 +105,12 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
         ? await assembleContext(events!.rows.map((row) => row.text ?? ""), actor, scopeId)
         : stubContext(item.payload);
 
-      result = await model.runTurn({ turnId: turnId ?? item.id, context, signal });
+      result = await model.runTurn({
+        turnId: turnId ?? item.id,
+        context,
+        signal,
+        onUsage: (value) => (usage = value),
+      });
       candidates = validateMemoryCandidates(result.memory);
       proposals = validateIntentionProposals(result.intentions);
 
@@ -235,17 +244,28 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
       }
     });
 
+    // §20: каждый ход логирует IDs, action, latency, usage, бюджет и outcome;
+    // основания существенных изменений (mood/отношения) — рядом, полный
+    // приватный промпт не логируется
     logger.info("ход выполнен", {
       turnId,
+      chatId: payload.chatId ?? null,
+      workItemId: item.id,
       decision: result.decision,
+      outcome: "applied",
       messages: result.messages.length,
       memoryCandidates: candidates.length,
+      latencyMs: Date.now() - startedAtMs,
+      ...(usage !== undefined ? { usage } : {}),
+      ...(budgetOperationId !== null ? { budgetOperationId } : {}),
+      ...(result.mood_delta ? { moodReason: result.mood_delta.reason } : {}),
+      ...(result.relationship_delta ? { relationshipReason: result.relationship_delta.reason } : {}),
       reason: result.reason,
     });
   };
 
   /** Бюджет модельных вызовов (1.9): общий хелпер с intention-обработчиком. */
-  function reserveModelBudget(workItemId: string, attempt: number): Promise<void> {
+  function reserveModelBudget(workItemId: string, attempt: number): Promise<string | null> {
     return reserveModelCall(deps.modelBudget, deps.modelDailyCallsLimit, workItemId, attempt);
   }
 

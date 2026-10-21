@@ -22,6 +22,8 @@ export interface ModelTurnInput {
   context: ModelTurnContext;
   constraints?: Record<string, unknown>;
   signal?: AbortSignal;
+  /** Usage конкретного вызова (§20: журнал хода) — приоритетнее колбэка адаптера. */
+  onUsage?: (usage: ModelUsage) => void;
 }
 
 export interface CharacterModel {
@@ -199,7 +201,7 @@ export class OpenAICompatModelAdapter implements CharacterModel {
               true,
             );
           }
-          this.reportUsage(json);
+          this.reportUsage(json, input);
           return parsed.data;
         } catch (error) {
           if (error instanceof ModelError) {
@@ -214,11 +216,12 @@ export class OpenAICompatModelAdapter implements CharacterModel {
     }, this.timeoutMs);
   }
 
-  private reportUsage(json: unknown): void {
-    if (!this.onUsage) return;
+  private reportUsage(json: unknown, input: ModelTurnInput): void {
+    const callback = input.onUsage ?? this.onUsage;
+    if (!callback) return;
     const usage = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number } })?.["usage"];
     if (!usage) return;
-    this.onUsage({
+    callback({
       promptTokens: usage["prompt_tokens"] ?? 0,
       completionTokens: usage["completion_tokens"] ?? 0,
     });

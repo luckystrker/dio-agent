@@ -65,6 +65,18 @@ describe("OpenAICompatModelAdapter", () => {
     expect(result.notes).toEqual([]);
   });
 
+  it("onUsage вызова замещает колбэк адаптера — usage привязывается к конкретному ходу (§20)", async () => {
+    const adapterOnUsage = vi.fn();
+    const callOnUsage = vi.fn();
+    const adapter = makeAdapter(
+      async () => toolCallResponse(VALID_ARGUMENTS, { prompt_tokens: 7, completion_tokens: 3 }),
+      { onUsage: adapterOnUsage },
+    );
+    await adapter.runTurn({ ...INPUT, onUsage: callOnUsage });
+    expect(callOnUsage).toHaveBeenCalledWith({ promptTokens: 7, completionTokens: 3 });
+    expect(adapterOnUsage).not.toHaveBeenCalled();
+  });
+
   it("невалидная схема — retry, затем явная ошибка (не «лучшее усилие»)", async () => {
     const calls: string[] = [];
     const adapter = makeAdapter(async (_url, init) => {

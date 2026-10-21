@@ -23,6 +23,14 @@ describe("validateDeltas", () => {
     ).toThrow(/#1.*delete_all/);
   });
 
+  it("элемент не-объект (число/строка/null) отклоняется именно как «ожидается объект с полем type»", () => {
+    // отдельные ветки guard'а §12.1: typeof, null, отсутствие поля type
+    expect(() => validateDeltas([5])).toThrow(/#0.*ожидается объект с полем type/);
+    expect(() => validateDeltas(["запись"])).toThrow(/#0.*ожидается объект с полем type/);
+    expect(() => validateDeltas([null])).toThrow(/#0.*ожидается объект с полем type/);
+    expect(() => validateDeltas([{}])).toThrow(/#0.*ожидается объект с полем type/);
+  });
+
   it("пустой текст отклоняется", () => {
     expect(() => validateDeltas([{ type: "append_note", text: "" }])).toThrow(DeltaError);
   });

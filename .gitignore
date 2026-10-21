@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .dry-run-updates.jsonl
 .DS_Store
+.mutation-report.json
