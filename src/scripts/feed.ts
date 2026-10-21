@@ -3,6 +3,7 @@
 // Использование: npm run feed -- "привет" "как дела" [--group] [--reply]
 
 import { appendFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 const isGroup = args.includes("--group");
@@ -13,7 +14,7 @@ if (texts.length === 0) {
   process.exit(1);
 }
 
-const UPDATES_FILE = new URL("../../../.dry-run-updates.jsonl", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1");
+const UPDATES_FILE = fileURLToPath(new URL("../../.dry-run-updates.jsonl", import.meta.url));
 
 // база update_id — от текущего времени, чтобы не конфликтовать с прошлыми прогонами
 let updateId = Math.floor(Date.now() / 1000);

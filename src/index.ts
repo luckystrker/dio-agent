@@ -10,6 +10,7 @@ import { withTransaction } from "./runtime/transactions.js";
 import { applyDeltas } from "./runtime/deltas.js";
 import { OpenAICompatModelAdapter, type CharacterModel, type ModelTurnContext } from "./character/model-adapter.js";
 import { DryRunTelegramApi, HttpTelegramApi, type TelegramApi } from "./telegram/api.js";
+import { fileURLToPath } from "node:url";
 import { TelegramPoller } from "./telegram/polling.js";
 import { ChatBufferManager } from "./telegram/buffers.js";
 import { OutboxRepo } from "./telegram/outbox.js";
@@ -169,7 +170,7 @@ let delivery: DeliveryLoop | null = null;
 
 if (config.telegram) {
   const telegramApi: TelegramApi = config.telegram.dryRun
-    ? new DryRunTelegramApi(new URL("../../../.dry-run-updates.jsonl", import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"), (line) =>
+    ? new DryRunTelegramApi(fileURLToPath(new URL("../.dry-run-updates.jsonl", import.meta.url)), (line) =>
         console.log(JSON.stringify({ ts: new Date().toISOString(), level: "info", msg: line })),
       )
     : new HttpTelegramApi(config.telegram.botToken!, config.telegram.apiBase);

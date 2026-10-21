@@ -121,6 +121,7 @@ export class DryRunTelegramApi implements TelegramApi {
   async sendMessage(chatId: string, text: string): Promise<SendMessageResult> {
     this.sent.push({ chatId, text });
     this.log(`[dry-run → chat ${chatId}] ${text.replace(/\n/g, " ")}`);
-    return { messageId: `dry-${this.sent.length}` };
+    // числовой id: колонка telegram_message_id — bigint
+    return { messageId: String(990_000 + this.sent.length) };
   }
 }

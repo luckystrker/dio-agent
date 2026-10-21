@@ -70,7 +70,7 @@ export class OutboxRepo {
     texts.forEach((text, position) => {
       const base = 4 + position * 4;
       fragments.push(
-        `($${base - 3}, $${base - 2}, $${base - 1}, $${base}, now() + ($${texts.length * 4 + 1} * $${position}::bigint * interval '1 millisecond'))`,
+        `($${base - 3}, $${base - 2}, $${base - 1}, $${base}, now() + ($${texts.length * 4 + 1} * ${position}::bigint * interval '1 millisecond'))`,
       );
       params.push(turnId, position, chatId, JSON.stringify({ text }));
     });
