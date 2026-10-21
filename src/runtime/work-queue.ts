@@ -57,6 +57,21 @@ const CLAIM_SQL = `
   RETURNING id, kind, priority, payload, status, attempts
 `;
 
+/** Постановка работы на конкретном соединении — внутри чужой транзакции. */
+export async function enqueueWithClient(
+  client: PoolClient,
+  kind: WorkKind,
+  payload: unknown,
+  priority?: number,
+): Promise<string> {
+  const resolved = priority ?? WORK_PRIORITIES[kind];
+  const result = await client.query<{ id: string | bigint }>(
+    "INSERT INTO work_items (kind, priority, payload) VALUES ($1, $2, $3) RETURNING id",
+    [kind, resolved, JSON.stringify(payload ?? {})],
+  );
+  return String(result.rows[0]?.id ?? "");
+}
+
 export class WorkQueueRepo {
   constructor(private readonly pool: Pool) {}
 
