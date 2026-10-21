@@ -3,12 +3,13 @@ import { createLogger } from "./runtime/logger.js";
 import { createDatabasePool } from "./runtime/db.js";
 import { acquireSingleton, SingletonTakenError, type Singleton } from "./runtime/singleton.js";
 import { WorkQueueRepo } from "./runtime/work-queue.js";
-import { CognitiveWorker, SkipWorkError, type WorkHandler } from "./runtime/worker.js";
+import { CognitiveWorker, type WorkHandler } from "./runtime/worker.js";
 import { BackgroundScheduler } from "./runtime/scheduler.js";
 import { BudgetRepo } from "./runtime/budgets.js";
 import { withTransaction } from "./runtime/transactions.js";
 import { applyDeltas } from "./runtime/deltas.js";
-import { OpenAICompatModelAdapter, type CharacterModel, type ModelTurnContext } from "./character/model-adapter.js";
+import { OpenAICompatModelAdapter, type CharacterModel } from "./character/model-adapter.js";
+import { makeTurnHandler } from "./character/turn-handler.js";
 import { DryRunTelegramApi, HttpTelegramApi, type TelegramApi } from "./telegram/api.js";
 import { fileURLToPath } from "node:url";
 import { TelegramPoller } from "./telegram/polling.js";
@@ -67,84 +68,7 @@ const model: CharacterModel | null = config.model
     })
   : null;
 
-const SYSTEM_PROMPT =
-  "Ты — Dio, живой персонаж в Telegram. Отвечай кратко, живо и по-русски. " +
-  "Сообщения пользователя идут пачкой одного собеседника — отвечай на пачку целиком.";
-
-function stubContextFromPayload(payload: unknown): ModelTurnContext {
-  const record = (payload ?? {}) as { messages?: Array<{ role?: string; content?: string }> };
-  const messages = Array.isArray(record["messages"])
-    ? record["messages"]
-        .filter((message) => typeof message?.["content"] === "string")
-        .map((message) => ({
-          role: message["role"] === "assistant" ? ("assistant" as const) : ("user" as const),
-          content: String(message["content"]),
-        }))
-    : [];
-  return { system: SYSTEM_PROMPT, messages };
-}
-
-/** Ход по turn: события → контекст → модель → транзакция применения (§12.1). */
-const handleTurn: WorkHandler = async (item, signal) => {
-  if (!model) {
-    throw new SkipWorkError("модель не настроена", "модель не настроена (MODEL_ENDPOINT/API_KEY/MODEL)");
-  }
-  const payload = (item.payload ?? {}) as { turnId?: string; chatId?: string };
-  const turnId = typeof payload.turnId === "string" ? payload.turnId : null;
-
-  let context: ModelTurnContext;
-  if (turnId) {
-    const events = await pool.query<{ text: string | null }>(
-      "SELECT text FROM social_events WHERE turn_id = $1 ORDER BY id",
-      [turnId],
-    );
-    context = {
-      system: SYSTEM_PROMPT,
-      messages: events.rows.map((row) => ({
-        role: "user" as const,
-        content: row.text ?? "[сообщение без текста]",
-      })),
-    };
-  } else {
-    context = stubContextFromPayload(item.payload);
-  }
-
-  const result = await model.runTurn({ turnId: turnId ?? item.id, context, signal });
-
-  await withTransaction(pool, async (client) => {
-    if (turnId) {
-      // CAS: применить turn не более одного раза (§12.1, инвариант 4)
-      const applied = await client.query(
-        "UPDATE turns SET status = 'applied' WHERE id = $1 AND status = 'created' RETURNING id",
-        [turnId],
-      );
-      if ((applied.rowCount ?? 0) === 0) {
-        logger.warn("повторное применение turn отклонено", { turnId });
-        return;
-      }
-      await client.query("UPDATE social_events SET status = 'processed' WHERE turn_id = $1", [turnId]);
-      await outbox.enqueueMessages(client, turnId, payload.chatId ?? "0", result.messages);
-      await applyDeltas(
-        client,
-        item.id,
-        result.notes.map((text) => ({ type: "append_note" as const, text })),
-      );
-    } else {
-      await applyDeltas(
-        client,
-        item.id,
-        result.notes.map((text) => ({ type: "append_note" as const, text })),
-      );
-    }
-  });
-
-  logger.info("ход выполнен", {
-    turnId: turnId,
-    decision: result.decision,
-    messages: result.messages.length,
-    reason: result.reason,
-  });
-};
+const handleTurn = makeTurnHandler({ pool, model, outbox, logger });
 
 const handlers: Record<string, WorkHandler> = {
   consolidation: async (item) => {

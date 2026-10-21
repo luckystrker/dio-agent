@@ -86,6 +86,18 @@ export class DeliveryLoop {
   }
 
   private async deliver(row: OutboxRow): Promise<void> {
+    // §13.2/§13.3: захваченная пачка могла устареть в памяти — предыдущий
+    // пузырь стал unknown и отменил этот. Перепроверяем статус перед отправкой.
+    const currentStatus = await this.deps.repo.statusOf(row.id);
+    if (currentStatus !== "sending") {
+      this.deps.logger.debug("строка больше не в sending — пропуск", {
+        turnId: row.turnId,
+        position: row.position,
+        currentStatus,
+      });
+      return;
+    }
+
     // §13.3: перед отправкой — устаревание. Новые события в чате после
     // создания turn делают продолжение неуместным: оставшиеся пузыри отменяются.
     if (await this.chatHasNewEventsAfterTurn(row)) {

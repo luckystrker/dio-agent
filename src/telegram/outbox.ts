@@ -48,6 +48,14 @@ function toRow(row: OutboxRowDb): OutboxRow {
 
 const DELIVERABLE_STATUSES = "'pending', 'retry_wait', 'sending'";
 
+function compareDeliveryOrder(a: OutboxRow, b: OutboxRow): number {
+  const byChat = Number(a.chatId) - Number(b.chatId);
+  if (byChat !== 0) return byChat;
+  const byTurn = Number(a.turnId) - Number(b.turnId);
+  if (byTurn !== 0) return byTurn;
+  return a.position - b.position;
+}
+
 export class OutboxRepo {
   constructor(private readonly pool: Pool) {}
 
@@ -113,7 +121,9 @@ export class OutboxRepo {
         [ids.map(String)],
       );
       await client.query("COMMIT");
-      return claimed.rows.map(toRow);
+      // §13.1: порядок внутри чата обязателен; RETURNING отдаёт физический
+      // порядок вставки — пересортируем явно (находка Н1 приёмки этапа 2)
+      return claimed.rows.map(toRow).sort(compareDeliveryOrder);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -123,12 +133,23 @@ export class OutboxRepo {
   }
 
   async markSent(id: string, telegramMessageId: string): Promise<void> {
+    // Условная запись: отменённая (cancelled) строка не перезаписывается
+    // отправкой из устаревшей памяти (находка Н2 приёмки этапа 2)
     await this.pool.query(
       `UPDATE delivery_outbox
        SET status = 'sent', telegram_message_id = $2, last_error = NULL, updated_at = now()
-       WHERE id = $1`,
+       WHERE id = $1 AND status = 'sending'`,
       [id, telegramMessageId],
     );
+  }
+
+  /** Текущий статус строки — перепроверка перед отправкой захваченной пачки. */
+  async statusOf(id: string): Promise<OutboxStatus | null> {
+    const result = await this.pool.query<{ status: string }>(
+      "SELECT status FROM delivery_outbox WHERE id = $1",
+      [id],
+    );
+    return (result.rows[0]?.["status"] as OutboxStatus | undefined) ?? null;
   }
 
   async markRetryWait(id: string, notBeforeMs: number, error: string): Promise<void> {
