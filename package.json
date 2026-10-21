@@ -17,7 +17,8 @@
     "test:db": "vitest run --config vitest.db.config.ts",
     "migrate": "tsx src/db/migrate.ts",
     "migrate:create": "node-pg-migrate create -m migrations",
-    "turn": "tsx src/scripts/enqueue-turn.ts"
+    "turn": "tsx src/scripts/enqueue-turn.ts",
+    "feed": "tsx src/scripts/feed.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -12,12 +12,20 @@ export interface ModelSettings {
   maxOutputTokens: number;
 }
 
+export interface TelegramSettings {
+  botToken: string | null;
+  apiBase: string;
+  dryRun: boolean;
+}
+
 export interface AppConfig {
   databaseUrl: string;
   logLevel: LogLevel;
   nodeEnv: NodeEnv;
   /** null — модель не настроена: ходы будут помечаться пропуском с причиной. */
   model: ModelSettings | null;
+  /** null — Telegram не настроен: polling и доставка выключены. */
+  telegram: TelegramSettings | null;
 }
 
 export class ConfigError extends Error {
@@ -53,13 +61,34 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const model = parseModelSettings(env);
+  const telegram = parseTelegramSettings(env);
 
   return {
     databaseUrl,
     logLevel: logLevelRaw as LogLevel,
     nodeEnv: nodeEnvRaw as NodeEnv,
     model,
+    telegram,
   };
+}
+
+function parseTelegramSettings(env: NodeJS.ProcessEnv): TelegramSettings | null {
+  const botToken = env["TELEGRAM_BOT_TOKEN"]?.trim() || null;
+  const apiBase = env["TELEGRAM_API_BASE"]?.trim() || "https://api.telegram.org";
+
+  const dryRunRaw = (env["TELEGRAM_DRY_RUN"] ?? "false").trim().toLowerCase();
+  if (dryRunRaw !== "true" && dryRunRaw !== "false") {
+    throw new ConfigError('TELEGRAM_DRY_RUN должен быть "true" или "false".');
+  }
+  const dryRun = dryRunRaw === "true";
+
+  if (!dryRun && !botToken) return null;
+  if (dryRun && botToken) {
+    throw new ConfigError(
+      "TELEGRAM_DRY_RUN=true вместе с TELEGRAM_BOT_TOKEN не имеет смысла: убери токен или выключи dry-run.",
+    );
+  }
+  return { botToken, apiBase, dryRun };
 }
 
 function parseModelSettings(env: NodeJS.ProcessEnv): ModelSettings | null {

@@ -6,4 +6,5 @@ coverage/
 .env
 .env.*
 !.env.example
+.dry-run-updates.jsonl
 .DS_Store
