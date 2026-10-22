@@ -9,8 +9,13 @@ import { withTimeout } from "../runtime/with-timeout.js";
 
 export interface ChatMessage {
   role: "user" | "assistant";
-  content: string;
+  /** Строка или массив частей (текст + картинки) — OpenAI-совместимый формат. */
+  content: string | ChatContentPart[];
 }
+
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
 
 export interface ModelTurnContext {
   system: string;

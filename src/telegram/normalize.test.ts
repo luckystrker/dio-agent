@@ -16,6 +16,13 @@ function messageUpdate(overrides: Record<string, unknown> = {}): unknown {
 }
 
 describe("normalizeUpdate", () => {
+  it("подпись к фото становится текстом запроса", () => {
+    const event = normalizeUpdate(messageUpdate({ text: undefined, caption: "что на фото?" }));
+    expect(event.text).toBe("что на фото?");
+    expect(event.kind).toBe("message");
+    expect(event.supported).toBe(true);
+  });
+
   it("личное сообщение: private + kind=message", () => {
     const event = normalizeUpdate(messageUpdate());
     expect(event).toMatchObject({

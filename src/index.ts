@@ -28,6 +28,7 @@ import { ChatBufferManager } from "./telegram/buffers.js";
 import { OutboxRepo } from "./telegram/outbox.js";
 import { DeliveryLoop } from "./telegram/delivery.js";
 import { TelegramTypingPulse } from "./telegram/typing.js";
+import { TelegramMediaFetcher } from "./telegram/media.js";
 
 // Startup по §5.3: подключить БД → singleton → конфигурация → восстановить
 // незавершённую работу → запустить polling, worker, scheduler, delivery.
@@ -121,6 +122,10 @@ const telegramApi: TelegramApi | null = config.telegram
     : new HttpTelegramApi(config.telegram.botToken!, config.telegram.apiBase)
   : null;
 const typing = telegramApi ? new TelegramTypingPulse(telegramApi) : undefined;
+const media =
+  config.telegram && !config.telegram.dryRun
+    ? new TelegramMediaFetcher(config.telegram.botToken!, config.telegram.apiBase)
+    : undefined;
 
 const handleTurn = makeTurnHandler({
   pool,
@@ -138,6 +143,7 @@ const handleTurn = makeTurnHandler({
   historyMessageLimit: config.model?.historyMessages ?? 1000,
   historyMaxChars: config.model?.historyMaxChars ?? 200_000,
   typing,
+  media,
   logger,
 });
 

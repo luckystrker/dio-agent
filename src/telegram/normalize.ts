@@ -26,7 +26,11 @@ interface TelegramEntity {
 interface TelegramMessage {
   from?: { id?: number; first_name?: string; last_name?: string; username?: string };
   text?: string;
+  /** Подпись к фото/видео: для модели это тот же текст запроса. */
+  caption?: string;
   entities?: TelegramEntity[];
+  caption_entities?: TelegramEntity[];
+  photo?: Array<{ file_id?: string; width?: number; height?: number }>;
   reply_to_message?: unknown;
   chat?: { id?: number; type?: string };
 }
@@ -121,7 +125,7 @@ export function normalizeUpdate(raw: unknown): NormalizedEvent {
     actorId,
     actorName: actorNameOf(message),
     kind,
-    text: typeof message.text === "string" ? message.text : null,
+    text: typeof message.text === "string" ? message.text : typeof message.caption === "string" ? message.caption : null,
     supported: true,
   };
 }

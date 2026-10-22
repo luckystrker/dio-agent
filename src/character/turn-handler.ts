@@ -5,7 +5,7 @@ import { SkipWorkError } from "../runtime/worker.js";
 import { withTransaction } from "../runtime/transactions.js";
 import { applyDeltas, validateDeltas } from "../runtime/deltas.js";
 import type { OutboxRepo } from "../telegram/outbox.js";
-import type { CharacterModel, ModelTurnContext } from "./model-adapter.js";
+import type { CharacterModel, ChatContentPart, ChatMessage, ModelTurnContext } from "./model-adapter.js";
 import { TurnResultSchema, type TurnResult } from "./turn-result.js";
 import { validateIntentionProposals } from "../background/intention-proposals.js";
 import type { IntentionRepo } from "../background/intentions.js";
@@ -13,6 +13,7 @@ import { validateMemoryCandidates } from "../memory/memory-candidates.js";
 import type { MemoryRepo } from "../memory/memory-repo.js";
 import { chatScope } from "../memory/scope.js";
 import type { TypingPulse } from "../telegram/typing.js";
+import { photoFileIdFromUpdate, type MediaFetcher } from "../telegram/media.js";
 import { buildSystemPrompt, type Persona } from "./persona.js";
 import { fitHistory, recentHistory } from "./recent-history.js";
 import { clampMoodDelta, describeMood, MoodRepo, type Mood } from "./mood.js";
@@ -50,6 +51,8 @@ export interface TurnHandlerDeps {
   historyMaxChars: number;
   /** «печатает…» на время вызова модели (8.4, §13.3); пусто — не показывать */
   typing?: TypingPulse;
+  /** Фото из Telegram (vision): пусто — модель видит только текст */
+  media?: MediaFetcher;
   logger: Logger;
 }
 
@@ -60,6 +63,9 @@ interface TurnActor {
 
 export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
   const { pool, model, outbox, memory, persona, mood, relationships, workQueue, logger } = deps;
+
+  /** Больше трёх фото в один ход не тянем: контекст и деньги. */
+  const MAX_IMAGES_PER_TURN = 3;
 
   return async function handleTurn(item, signal) {
     const startedAtMs = Date.now();
@@ -111,7 +117,12 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
 
       const actor = await resolveActor(events?.rows ?? [], scopeId);
       const context = turnId
-        ? await assembleContext(events!.rows.map((row) => row.text ?? ""), actor, scopeId, turnId)
+        ? await assembleContext(
+            events!.rows.map((row) => ({ text: row.text ?? "", raw: row.raw_update })),
+            actor,
+            scopeId,
+            turnId,
+          )
         : stubContext(item.payload);
 
       // 8.4 (§13.3): «печатает…», пока реально ожидается ответ модели
@@ -302,7 +313,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
 
   /** Сборка контекста хода из БД (§7, §10.4): persona + mood + отношения + память + история. */
   async function assembleContext(
-    batchTexts: string[],
+    batch: Array<{ text: string; raw: unknown }>,
     actor: TurnActor,
     scopeId: string,
     currentTurnId: string,
@@ -321,7 +332,11 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     // Память (§10.4): full-text по пачке + недавние; scope-фильтр внутри retrieve
     let memoryBlock: string | undefined;
     try {
-      const lastTexts = batchTexts.filter((text) => text.trim().length > 0).slice(-3).join(" ");
+      const lastTexts = batch
+        .map((item) => item.text)
+        .filter((text) => text.trim().length > 0)
+        .slice(-3)
+        .join(" ");
       const searched = lastTexts.length > 0 ? await memory.retrieve(scopeId, { textQuery: lastTexts, limit: 6 }) : [];
       const recent = await memory.retrieve(scopeId, { limit: 6 });
       const merged = new Map(searched.concat(recent).map((row) => [row.id, row]));
@@ -346,9 +361,36 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
       history = [];
     }
 
+    const messages: ChatMessage[] = [...history];
+    let images = 0;
+    for (const item of batch) {
+      const fileId = deps.media ? photoFileIdFromUpdate(item.raw) : null;
+      const fallbackText = item.text || (fileId ? "[фото]" : "[сообщение без текста]");
+      let content: string | ChatContentPart[] = fallbackText;
+
+      if (fileId && deps.media && images < MAX_IMAGES_PER_TURN) {
+        images++;
+        try {
+          const photo = await deps.media.fetchPhoto(fileId);
+          if (photo) {
+            content = [
+              { type: "text", text: fallbackText },
+              { type: "image_url", image_url: { url: `data:${photo.mime};base64,${photo.base64}` } },
+            ];
+          }
+        } catch (error) {
+          logger.warn("не удалось загрузить фото, ход по тексту", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      messages.push({ role: "user", content });
+    }
+
     return {
       system: buildSystemPrompt(persona, { moodLine, relationshipLine, memoryBlock }, deps.promptTemplate),
-      messages: [...history, ...batchTexts.map((text) => ({ role: "user" as const, content: text || "[сообщение без текста]" }))],
+      messages,
     };
   }
 
