@@ -90,7 +90,12 @@ export class BackgroundScheduler {
       }
     }
 
-    const operationId = `background:${this.kind}:${new Date().toISOString()}`;
+    // 24 слота в сутки: id операции привязан к часу (UTC), а не к моменту
+    // тика. Планировщик просыпается каждые 30 с, но резерв на новый job
+    // получает только первый тик часа — остальные видят дубль в бюджете.
+    // Перезапуск процесса не размножает работу: резерв лежит в БД.
+    const hourSlot = new Date().toISOString().slice(0, 13);
+    const operationId = `background:${this.kind}:${hourSlot}`;
     if (this.deps.budget) {
       const reserved = await this.deps.budget.tryReserve(operationId);
       if (!reserved) return; // операция уже резервирована — дубль не ставим

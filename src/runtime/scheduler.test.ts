@@ -86,6 +86,30 @@ describe("BackgroundScheduler с бюджетом из БД (фейковый Bu
     expect(tryReserveCalls).toHaveLength(1); // сама попытка была
   });
 
+  it("в пределах часа операция резервируется один раз — 24 слота в сутки", async () => {
+    const { logger } = makeLogger();
+    const seen = new Set<string>();
+    const budget: Budget = {
+      async tryReserve(operationId: string): Promise<boolean> {
+        if (seen.has(operationId)) return false;
+        seen.add(operationId);
+        return true;
+      },
+      async reservedToday(): Promise<number> {
+        return seen.size;
+      },
+    };
+    const enqueue = vi.fn().mockResolvedValue(undefined);
+    const scheduler = new BackgroundScheduler({ enqueue, logger, budget });
+
+    await scheduler.tick();
+    await scheduler.tick();
+    await scheduler.tick();
+
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect([...seen][0]).toMatch(/^background:consolidation:\d{4}-\d{2}-\d{2}T\d{2}$/);
+  });
+
   it("ошибка enqueue не бросается наружу из tick (логируется, процесс живёт)", async () => {
     const { logger, calls } = makeLogger();
     const { budget } = makeBudget({ reserved: 0, reserveResult: true });
