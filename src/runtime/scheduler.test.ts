@@ -86,6 +86,26 @@ describe("BackgroundScheduler с бюджетом из БД (фейковый Bu
     expect(tryReserveCalls).toHaveLength(1); // сама попытка была
   });
 
+  it("бюджет фоновых заданий считает только фоновые резервы, не модельные", async () => {
+    const { logger } = makeLogger();
+    const prefixes: Array<string | undefined> = [];
+    const budget: Budget = {
+      async tryReserve(): Promise<boolean> {
+        return false;
+      },
+      async reservedToday(prefix?: string): Promise<number> {
+        prefixes.push(prefix);
+        return 0;
+      },
+    };
+    const enqueue = vi.fn().mockResolvedValue(undefined);
+    const scheduler = new BackgroundScheduler({ enqueue, logger, budget });
+
+    await scheduler.tick();
+
+    expect(prefixes).toEqual(["background:"]);
+  });
+
   it("в пределах часа операция резервируется один раз — 24 слота в сутки", async () => {
     const { logger } = makeLogger();
     const seen = new Set<string>();

@@ -12,7 +12,7 @@ export async function reserveModelCall(
   attempt: number,
 ): Promise<string | null> {
   if (!budget) return null;
-  const used = await budget.reservedToday();
+  const used = await budget.reservedToday("model:");
   if (used >= dailyCallsLimit) {
     throw new SkipWorkError(
       "дневной бюджет модельных вызовов исчерпан",

@@ -71,7 +71,7 @@ export class BackgroundScheduler {
     if (this.stopped) return;
 
     if (this.deps.budget) {
-      const reserved = await this.deps.budget.reservedToday();
+      const reserved = await this.deps.budget.reservedToday("background:");
       if (reserved >= this.maxJobsPerDay) {
         this.warnExhaustedOnce("дневной бюджет фоновых заданий исчерпан", {
           reserved,
