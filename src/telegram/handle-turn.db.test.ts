@@ -104,6 +104,8 @@ function makeHandler(model: OpenAICompatModelAdapter | null): WorkHandler {
     workQueue: new WorkQueueRepo(pool),
     modelBudget: null,
     modelDailyCallsLimit: 100,
+    historyMessageLimit: 1000,
+    historyMaxChars: 200_000,
     logger: silentLogger,
   });
 }
@@ -270,6 +272,8 @@ describe("журнал хода (§20, этап 6.5)", () => {
       workQueue: workRepo,
       modelBudget: new BudgetRepo(pool),
       modelDailyCallsLimit: 100,
+    historyMessageLimit: 1000,
+    historyMaxChars: 200_000,
       logger: recordingLogger,
     });
     const { turnId, item } = await makeTurnWithEvents(["вопрос про журнал хода"]);

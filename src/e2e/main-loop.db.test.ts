@@ -93,6 +93,7 @@ function rawUpdate(updateId: number, text: string): unknown {
 function makeRecordingApi(sent: Array<{ chatId: string; text: string }>): TelegramApi {
   return {
     getUpdates: () => new Promise(() => undefined), // poller в E2E не участвует
+    sendChatAction: async () => undefined, // typing вне зоны E2E
     sendMessage: async (chatId, text) => {
       sent.push({ chatId, text });
       const result: SendMessageResult = { messageId: String(sent.length) };
@@ -262,6 +263,8 @@ describe("E2E: главный цикл §1 — тема → память с ис
         workQueue: workRepo,
         modelBudget,
         modelDailyCallsLimit: 50,
+        historyMessageLimit: 1000,
+        historyMaxChars: 200_000,
         logger: silentLogger,
       });
       const handleIntention = makeIntentionHandler({

@@ -14,6 +14,8 @@ export interface SendMessageResult {
 export interface TelegramApi {
   getUpdates(offset: number, timeoutSec: number, signal: AbortSignal): Promise<TelegramUpdate[]>;
   sendMessage(chatId: string, text: string, signal: AbortSignal): Promise<SendMessageResult>;
+  /** «печатает…» (8.4, §13.3): короткий fire-and-forget вызов */
+  sendChatAction(chatId: string, action: string): Promise<void>;
   setMessageReaction(
     chatId: string,
     messageId: string,
@@ -65,6 +67,11 @@ export class HttpTelegramApi implements TelegramApi {
       throw new TelegramApiError("sendMessage вернул ответ без message_id", 200, null);
     }
     return { messageId: String(messageId) };
+  }
+
+  async sendChatAction(chatId: string, action: string): Promise<void> {
+    const signal = AbortSignal.timeout(5_000);
+    await this.call("sendChatAction", { chat_id: chatId, action }, signal).catch(() => undefined);
   }
 
   async setMessageReaction(
@@ -142,5 +149,9 @@ export class DryRunTelegramApi implements TelegramApi {
 
   async setMessageReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
     this.log(`[dry-run → chat ${chatId}] реакция ${emoji} на сообщение ${messageId}`);
+  }
+
+  async sendChatAction(chatId: string, action: string): Promise<void> {
+    this.log(`[dry-run → chat ${chatId}] ${action}…`);
   }
 }

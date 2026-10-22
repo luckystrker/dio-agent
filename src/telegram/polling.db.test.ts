@@ -30,6 +30,10 @@ class FakeApi implements TelegramApi {
   public readonly offsetCalls: number[] = [];
   private pollCount = 0;
 
+  async sendChatAction(): Promise<void> {
+    // typing вне зоны polling-тестов
+  }
+
   async setMessageReaction(): Promise<void> {
     // реакции вне зоны polling-тестов
   }

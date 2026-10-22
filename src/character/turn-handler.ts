@@ -12,7 +12,9 @@ import type { IntentionRepo } from "../background/intentions.js";
 import { validateMemoryCandidates } from "../memory/memory-candidates.js";
 import type { MemoryRepo } from "../memory/memory-repo.js";
 import { chatScope } from "../memory/scope.js";
+import type { TypingPulse } from "../telegram/typing.js";
 import { buildSystemPrompt, type Persona } from "./persona.js";
+import { fitHistory, recentHistory } from "./recent-history.js";
 import { clampMoodDelta, describeMood, MoodRepo, type Mood } from "./mood.js";
 import {
   describeRelationship,
@@ -43,6 +45,11 @@ export interface TurnHandlerDeps {
   modelDailyCallsLimit: number;
   /** Каркас системного промпта (config/system-prompt.md, §7.1); пусто — встроенный по умолчанию */
   promptTemplate?: string;
+  /** Недавний разговор в контексте (8.1): окно сообщений и бюджет объёма */
+  historyMessageLimit: number;
+  historyMaxChars: number;
+  /** «печатает…» на время вызова модели (8.4, §13.3); пусто — не показывать */
+  typing?: TypingPulse;
   logger: Logger;
 }
 
@@ -104,15 +111,22 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
 
       const actor = await resolveActor(events?.rows ?? [], scopeId);
       const context = turnId
-        ? await assembleContext(events!.rows.map((row) => row.text ?? ""), actor, scopeId)
+        ? await assembleContext(events!.rows.map((row) => row.text ?? ""), actor, scopeId, turnId)
         : stubContext(item.payload);
 
-      result = await model.runTurn({
-        turnId: turnId ?? item.id,
-        context,
-        signal,
-        onUsage: (value) => (usage = value),
-      });
+      // 8.4 (§13.3): «печатает…», пока реально ожидается ответ модели
+      const typingChat = deps.typing && typeof payload.chatId === "string" ? payload.chatId : null;
+      if (typingChat !== null) deps.typing!.start(typingChat);
+      try {
+        result = await model.runTurn({
+          turnId: turnId ?? item.id,
+          context,
+          signal,
+          onUsage: (value) => (usage = value),
+        });
+      } finally {
+        if (typingChat !== null) deps.typing!.stop(typingChat);
+      }
       candidates = validateMemoryCandidates(result.memory);
       proposals = validateIntentionProposals(result.intentions);
 
@@ -290,6 +304,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     batchTexts: string[],
     actor: TurnActor,
     scopeId: string,
+    currentTurnId: string,
   ): Promise<ModelTurnContext> {
     // Настроение с затуханием
     const moodNow = await mood.readDecayed(persona.moodBaseline);
@@ -317,16 +332,15 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
       });
     }
 
-    // Последний отправленный ответ (§13.5: только sent — фактический разговор)
+    // Недавний разговор обеих сторон (8.1): до historyMessageLimit сообщений,
+    // обрезка по бюджету объёма; события текущей пачки исключены (уже в messages),
+    // в разговор попадают только доставленные ответы (§13.5)
     let history: Array<{ role: "user" | "assistant"; content: string }>;
     try {
-      const lastSent = await pool.query<{ text: string }>(
-        `SELECT payload->>'text' AS text FROM delivery_outbox
-         WHERE chat_id = $1 AND status = 'sent' AND payload->>'text' IS NOT NULL
-         ORDER BY id DESC LIMIT 2`,
-        [scopeId.replace("chat:", "")],
+      history = fitHistory(
+        await recentHistory(pool, scopeId.replace("chat:", ""), deps.historyMessageLimit, currentTurnId),
+        deps.historyMaxChars,
       );
-      history = lastSent.rows.reverse().map((row) => ({ role: "assistant" as const, content: row.text }));
     } catch {
       history = [];
     }

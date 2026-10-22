@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { HttpTelegramApi, TelegramApiError, type HttpTransport } from "./api.js";
+import { DryRunTelegramApi, HttpTelegramApi, TelegramApiError, type HttpTransport } from "./api.js";
 
 // §13.2 «учитывать retry_after»: значение обязано доезживать из ответа
 // Telegram до политики доставки (markRetryWait). Защита уровня парсинга:
@@ -131,5 +131,37 @@ describe("HttpTelegramApi.getUpdates (transport-заглушка)", () => {
     const error = await captureError(() => api.getUpdates(0, 1, signal()));
     expect(error).toBeInstanceOf(TelegramApiError);
     expect((error as TelegramApiError).httpStatus).toBe(401);
+  });
+});
+
+describe("sendChatAction (8.4, §13.3: fire-and-forget, ошибки не бросаются)", () => {
+  it("Http: ошибка транспорта проглатывается", async () => {
+    const api = makeApi(async () => {
+      throw new Error("сеть недоступна");
+    });
+    await expect(api.sendChatAction("500", "typing")).resolves.toBeUndefined();
+  });
+
+  it("Http: HTTP 400 от Telegram тоже не бросается", async () => {
+    const api = makeApi(async () => jsonResponse({ ok: false, description: "chat not found" }, 400));
+    await expect(api.sendChatAction("500", "typing")).resolves.toBeUndefined();
+  });
+
+  it("Http: запрос уходит на /sendChatAction с chat_id и action", async () => {
+    let seen: { url: string; body: string } | undefined;
+    const api = makeApi(async (url, init) => {
+      seen = { url, body: init.body };
+      return jsonResponse({ ok: true });
+    });
+    await api.sendChatAction("500", "typing");
+    expect(seen!.url).toContain("/sendChatAction");
+    expect(seen!.body).toContain("typing");
+  });
+
+  it("DryRun: sendChatAction пишет в лог", async () => {
+    const lines: string[] = [];
+    const api = new DryRunTelegramApi("нет-такого-файла.jsonl", (line) => lines.push(line));
+    await api.sendChatAction("500", "typing");
+    expect(lines[0]).toContain("typing");
   });
 });

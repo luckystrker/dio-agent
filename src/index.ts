@@ -27,6 +27,7 @@ import { TelegramPoller } from "./telegram/polling.js";
 import { ChatBufferManager } from "./telegram/buffers.js";
 import { OutboxRepo } from "./telegram/outbox.js";
 import { DeliveryLoop } from "./telegram/delivery.js";
+import { TelegramTypingPulse } from "./telegram/typing.js";
 
 // Startup по §5.3: подключить БД → singleton → конфигурация → восстановить
 // незавершённую работу → запустить polling, worker, scheduler, delivery.
@@ -110,6 +111,17 @@ const relationshipRepo = new RelationshipRepo(pool);
 const modelBudget = new BudgetRepo(pool);
 const intentionsRepo = new IntentionRepo(pool);
 const initiativeRepo = new InitiativeRepo(pool);
+
+// Telegram API создаётся до обработчиков: typing-пульс нужен ходу (8.4)
+const telegramApi: TelegramApi | null = config.telegram
+  ? config.telegram.dryRun
+    ? new DryRunTelegramApi(fileURLToPath(new URL("../.dry-run-updates.jsonl", import.meta.url)), (line) =>
+        console.log(JSON.stringify({ ts: new Date().toISOString(), level: "info", msg: line })),
+      )
+    : new HttpTelegramApi(config.telegram.botToken!, config.telegram.apiBase)
+  : null;
+const typing = telegramApi ? new TelegramTypingPulse(telegramApi) : undefined;
+
 const handleTurn = makeTurnHandler({
   pool,
   model,
@@ -123,6 +135,9 @@ const handleTurn = makeTurnHandler({
   modelBudget: config.model ? modelBudget : null,
   modelDailyCallsLimit: config.model?.dailyCallsLimit ?? 100,
   promptTemplate,
+  historyMessageLimit: config.model?.historyMessages ?? 1000,
+  historyMaxChars: config.model?.historyMaxChars ?? 200_000,
+  typing,
   logger,
 });
 
@@ -170,11 +185,7 @@ let buffers: ChatBufferManager | null = null;
 let delivery: DeliveryLoop | null = null;
 
 if (config.telegram) {
-  const telegramApi: TelegramApi = config.telegram.dryRun
-    ? new DryRunTelegramApi(fileURLToPath(new URL("../.dry-run-updates.jsonl", import.meta.url)), (line) =>
-        console.log(JSON.stringify({ ts: new Date().toISOString(), level: "info", msg: line })),
-      )
-    : new HttpTelegramApi(config.telegram.botToken!, config.telegram.apiBase);
+  const api = telegramApi!;
 
   buffers = new ChatBufferManager({ pool, logger });
   const recoveredBuffers = await buffers.recoverStalePending();
@@ -186,10 +197,10 @@ if (config.telegram) {
     logger.info("outbox recovery: sending → unknown", { count: recoveredSending });
   }
 
-  delivery = new DeliveryLoop({ pool, repo: outbox, api: telegramApi, logger });
+  delivery = new DeliveryLoop({ pool, repo: outbox, api, logger });
   poller = new TelegramPoller({
     pool,
-    api: telegramApi,
+    api,
     logger,
     onPendingEvent: (event) => buffers!.add(event),
   });

@@ -154,6 +154,8 @@ function handlerWith(model: CharacterModel | null) {
     workQueue: new WorkQueueRepo(pool),
     modelBudget: null,
     modelDailyCallsLimit: 100,
+    historyMessageLimit: 1000,
+    historyMaxChars: 200_000,
     logger: silentLogger,
   });
 }

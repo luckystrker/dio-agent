@@ -61,7 +61,15 @@ describe("loadConfig", () => {
       maxRetries: 1,
       maxOutputTokens: 1000,
       dailyCallsLimit: 100,
+      historyMessages: 1000,
+      historyMaxChars: 200_000,
     });
+  });
+
+  it("MODEL_HISTORY_* мусор отклоняется (8.1)", () => {
+    const env = { ...VALID_ENV, MODEL_ENDPOINT: "https://api.example/v1", MODEL_API_KEY: "sk", MODEL_MODEL: "m-1" };
+    expect(() => loadConfig({ ...env, MODEL_HISTORY_MESSAGES: "0" })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...env, MODEL_HISTORY_MAX_CHARS: "abc" })).toThrow(ConfigError);
   });
 
   it("частичный набор MODEL_* отклоняется с перечислением трёх переменных", () => {

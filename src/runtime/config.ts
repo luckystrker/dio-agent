@@ -12,6 +12,9 @@ export interface ModelSettings {
   maxOutputTokens: number;
   /** Дневной лимит модельных вызовов (§16, чек-лист 1.9). */
   dailyCallsLimit: number;
+  /** Недавний разговор в контексте (8.1): окно сообщений и потолок объёма. */
+  historyMessages: number;
+  historyMaxChars: number;
 }
 
 export interface TelegramSettings {
@@ -122,5 +125,7 @@ function parseModelSettings(env: NodeJS.ProcessEnv): ModelSettings | null {
     maxRetries: positiveInt(env["MODEL_MAX_RETRIES"], 1),
     maxOutputTokens: positiveInt(env["MODEL_MAX_OUTPUT_TOKENS"], 1000),
     dailyCallsLimit: positiveInt(env["MODEL_DAILY_CALLS_LIMIT"], 100),
+    historyMessages: positiveInt(env["MODEL_HISTORY_MESSAGES"], 1000),
+    historyMaxChars: positiveInt(env["MODEL_HISTORY_MAX_CHARS"], 200_000),
   };
 }

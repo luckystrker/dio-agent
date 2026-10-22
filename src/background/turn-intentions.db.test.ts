@@ -89,6 +89,8 @@ function handlerWith(model: CharacterModel) {
     workQueue: workRepo,
     modelBudget: null,
     modelDailyCallsLimit: 100,
+    historyMessageLimit: 1000,
+    historyMaxChars: 200_000,
     logger: silentLogger,
   });
 }

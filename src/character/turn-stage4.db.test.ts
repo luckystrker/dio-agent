@@ -32,6 +32,7 @@ import { withTransaction } from "../runtime/transactions.js";
 import { DeltaError } from "../runtime/deltas.js";
 import { WorkQueueRepo, type WorkItem } from "../runtime/work-queue.js";
 import { cleanMemoryTables, createTestPool } from "../test-support/db.js";
+import type { TypingPulse } from "../telegram/typing.js";
 import { cleanTelegramTables, getOutboxByTurn, silentLogger } from "../test-support/telegram-db.js";
 
 let pool: Pool;
@@ -193,6 +194,10 @@ class FakeApi implements TelegramApi {
     return { messageId: String(500_000 + this.sent.length) };
   }
 
+  async sendChatAction(): Promise<void> {
+    // typing вне зоны этих тестов
+  }
+
   async setMessageReaction(chatId: string, messageId: string, emoji: string, _signal: AbortSignal): Promise<void> {
     this.reactions.push({ chatId, messageId, emoji });
   }
@@ -200,7 +205,7 @@ class FakeApi implements TelegramApi {
 
 function handlerWith(
   model: CharacterModel | null,
-  options: { outboxRepo?: OutboxRepo; modelBudget?: BudgetRepo | null; dailyLimit?: number; promptTemplate?: string } = {},
+  options: { outboxRepo?: OutboxRepo; modelBudget?: BudgetRepo | null; dailyLimit?: number; promptTemplate?: string; typing?: TypingPulse; historyMessageLimit?: number; historyMaxChars?: number } = {},
 ) {
   return makeTurnHandler({
     pool,
@@ -215,6 +220,9 @@ function handlerWith(
     modelBudget: options.modelBudget ?? null,
     modelDailyCallsLimit: options.dailyLimit ?? 100,
     promptTemplate: options.promptTemplate,
+    typing: options.typing,
+    historyMessageLimit: options.historyMessageLimit ?? 1000,
+    historyMaxChars: options.historyMaxChars ?? 200_000,
     logger: silentLogger,
   });
 }
@@ -450,7 +458,11 @@ describe("история контекста: только ОТПРАВЛЕННЫ
     const second = await makeTurn("510", ["вопрос второй"]);
     await handlerWith(capture({ decision: "answer", messages: ["ок"], notes: [] }))(second.item, SIGNAL());
     expect(secondCtx).toHaveLength(1);
-    expect(secondCtx[0]!.messages).toEqual([{ role: "user", content: "вопрос второй" }]);
+    // 8.1: предыдущая реплика собеседника теперь в истории; текущая пачка не дублируется
+    expect(secondCtx[0]!.messages).toEqual([
+      { role: "user", content: "вопрос первый" },
+      { role: "user", content: "вопрос второй" },
+    ]);
 
     // доставка подтверждена → ответ стал фактом разговора
     await pool.query("UPDATE delivery_outbox SET status = 'sent' WHERE turn_id = $1", [first.turnId]);
@@ -458,11 +470,99 @@ describe("история контекста: только ОТПРАВЛЕННЫ
     await handlerWith(capture({ decision: "answer", messages: ["ок"], notes: [] }))(third.item, SIGNAL());
     expect(secondCtx).toHaveLength(2);
     expect(secondCtx[1]!.messages).toEqual([
+      { role: "user", content: "вопрос первый" },
       { role: "assistant", content: "мой ответ" },
+      { role: "user", content: "вопрос второй" },
       { role: "user", content: "вопрос третий" },
     ]);
   });
 });
+
+
+describe("typing на время вызова модели (8.4, §13.3)", () => {
+  it("start до вызова модели, stop после; чат — из payload", async () => {
+    const pulses: string[] = [];
+    const typing: TypingPulse = {
+      start: (chatId: string) => pulses.push(`start:${chatId}`),
+      stop: (chatId: string) => pulses.push(`stop:${chatId}`),
+    };
+    const { item } = await makeTurn("720", ["ну и задачка"], { actorName: "Галя" });
+    const model: CharacterModel = {
+      async runTurn(): Promise<TurnResult> {
+        pulses.push("model");
+        return { decision: "answer", messages: ["ответ"], notes: [], memory: [], intentions: [] };
+      },
+    };
+
+    await handlerWith(model, { typing })(item, SIGNAL());
+
+    expect(pulses).toEqual(["start:720", "model", "stop:720"]);
+  });
+
+  it("сбой модели — typing остановлен в finally (8.4, §13.3: прекращается при завершении ИЛИ отмене)", async () => {
+    const pulses: string[] = [];
+    const typing: TypingPulse = {
+      start: (chatId: string) => pulses.push(`start:${chatId}`),
+      stop: (chatId: string) => pulses.push(`stop:${chatId}`),
+    };
+    const { item } = await makeTurn("721", ["вопрос"], { actorName: "Дима" });
+    const model: CharacterModel = {
+      async runTurn(): Promise<TurnResult> {
+        pulses.push("модель-упала");
+        throw new Error("модель сбоит");
+      },
+    };
+
+    await expect(handlerWith(model, { typing })(item, SIGNAL())).rejects.toThrow("модель сбоит");
+    expect(pulses).toEqual(["start:721", "модель-упала", "stop:721"]);
+  });
+
+  it("replay сохранённого result_ready — typing не включается, модель не зовётся (8.4, §13.3)", async () => {
+    const flaky = new FlakyOutbox(pool);
+    const result: TurnResult = { decision: "answer", messages: ["сохранённый ответ"], notes: [], memory: [], intentions: [] };
+    const { model, calls } = countingModel(result);
+    const { item } = await makeTurn("722", ["вопрос"]);
+    flaky.failNextEnqueue = true;
+    await expect(handlerWith(model, { outboxRepo: flaky })(item, SIGNAL())).rejects.toThrow("инъекция сбоя");
+    expect(calls()).toBe(1);
+
+    const pulses: string[] = [];
+    const typing: TypingPulse = {
+      start: (chatId: string) => pulses.push(`start:${chatId}`),
+      stop: (chatId: string) => pulses.push(`stop:${chatId}`),
+    };
+    await workRepo.requeue(item.id);
+    const retry = (await workRepo.claimNext())!;
+    await handlerWith(model, { outboxRepo: flaky, typing })(retry, SIGNAL());
+
+    expect(calls()).toBe(1); // replay применяет сохранённое без LLM
+    expect(pulses).toEqual([]); // «печатает…» на replay не показывается
+  });
+
+  it("окно истории из конфига доезжает до хода (8.1: проводка historyMessageLimit)", async () => {
+    await pool.query(
+      `INSERT INTO social_events (telegram_update_id, chat_id, chat_type, kind, text, status, raw_update, occurred_at)
+       VALUES (910, 730, 'private', 'message', 'старая реплика 1', 'processed', '{}', now() - interval '60 minutes'),
+              (911, 730, 'private', 'kind'::text, 'старая реплика 2', 'processed', '{}', now() - interval '50 minutes')`.replace("'kind'::text", "'message'"),
+    );
+    const captured: ModelTurnContext[] = [];
+    const model: CharacterModel = {
+      async runTurn(input): Promise<TurnResult> {
+        captured.push(input.context);
+        return { decision: "answer", messages: ["ок"], notes: [], memory: [], intentions: [] };
+      },
+    };
+    const { item } = await makeTurn("730", ["новый вопрос"], { actorName: "Женя" });
+
+    await handlerWith(model, { historyMessageLimit: 1 })(item, SIGNAL());
+
+    expect(captured[0]!.messages).toEqual([
+      { role: "user", content: "старая реплика 2" },
+      { role: "user", content: "новый вопрос" },
+    ]);
+  });
+});
+
 
 describe("дневной бюджет модели (§16, чек-лист 1.9)", () => {
   it("MODEL_DAILY_CALLS_LIMIT=1: первый ход проходит с резервом model:{id}:{attempt}, второй — SkipWorkError без вызова", async () => {

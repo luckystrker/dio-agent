@@ -238,6 +238,8 @@ async function runTurnPipeline(options: {
       workQueue: workRepo,
       modelBudget,
       modelDailyCallsLimit: options.modelDailyCallsLimit,
+      historyMessageLimit: 1000,
+      historyMaxChars: 200_000,
       logger,
     });
     const handleIntention = makeIntentionHandler({

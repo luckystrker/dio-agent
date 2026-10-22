@@ -46,6 +46,10 @@ class FakeApi implements TelegramApi {
 
   constructor(private readonly script: SendBehavior[] = []) {}
 
+  async sendChatAction(): Promise<void> {
+    // typing вне зоны этих тестов
+  }
+
   async setMessageReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
     this.reactions.push({ chatId, messageId, emoji });
   }
