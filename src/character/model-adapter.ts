@@ -19,6 +19,8 @@ export interface ModelTurnContext {
 
 export interface ModelTurnInput {
   turnId: string;
+  /** Стабильный id разговора для x-opencode-session (кэш и роутинг провайдера). */
+  sessionId?: string;
   context: ModelTurnContext;
   constraints?: Record<string, unknown>;
   signal?: AbortSignal;
@@ -166,6 +168,11 @@ export class OpenAICompatModelAdapter implements CharacterModel {
             headers: {
               authorization: `Bearer ${this.apiKey}`,
               "content-type": "application/json",
+              // OpenCode Go требует стабильный id разговора и не любит
+              // generic user-agent; другим OpenAI-совместимым провайдерам
+              // лишние заголовки не мешают.
+              "x-opencode-session": input.sessionId ?? input.turnId,
+              "user-agent": "dio-agent/0.1",
             },
             body: JSON.stringify(body),
             signal,

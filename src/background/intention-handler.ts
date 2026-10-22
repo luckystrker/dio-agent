@@ -158,6 +158,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
 
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
+      sessionId: scopeId,
       context: {
         system: buildSystemPrompt(persona, extras, deps.promptTemplate) + `\n\n${EXPLORE_SYSTEM_ADDENDUM}`,
         messages: [{ role: "user", content: `Тема для размышления: ${intention.topic}. Причина: ${intention.reason}` }],
@@ -234,6 +235,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
 
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
+      sessionId: scopeId,
       context: {
         system: buildSystemPrompt(persona, extras, deps.promptTemplate) + `\n\n${INITIATIVE_SYSTEM_ADDENDUM}`,
         messages: [

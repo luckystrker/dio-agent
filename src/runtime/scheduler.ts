@@ -31,6 +31,8 @@ export class BackgroundScheduler {
   private timer?: NodeJS.Timeout;
   private stopped = false;
   private warnedInMemoryBudget = false;
+  /** День, в который уже предупредили об исчерпании бюджета из БД (анти-спам в journal). */
+  private warnedExhaustedDay: string | null = null;
   private memoryJobsToday = 0;
   private memoryBudgetDay = new Date().toDateString();
 
@@ -71,7 +73,7 @@ export class BackgroundScheduler {
     if (this.deps.budget) {
       const reserved = await this.deps.budget.reservedToday();
       if (reserved >= this.maxJobsPerDay) {
-        this.deps.logger.warn("дневной бюджет фоновых заданий исчерпан", {
+        this.warnExhaustedOnce("дневной бюджет фоновых заданий исчерпан", {
           reserved,
           maxJobsPerDay: this.maxJobsPerDay,
         });
@@ -81,7 +83,7 @@ export class BackgroundScheduler {
       this.warnInMemoryBudgetOnce();
       this.rolloverMemoryBudgetIfNewDay();
       if (this.memoryJobsToday >= this.maxJobsPerDay) {
-        this.deps.logger.warn("дневной бюджет фоновых заданий исчерпан (память)", {
+        this.warnExhaustedOnce("дневной бюджет фоновых заданий исчерпан (память)", {
           maxJobsPerDay: this.maxJobsPerDay,
         });
         return;
@@ -105,6 +107,14 @@ export class BackgroundScheduler {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  /** Предупреждает об исчерпании бюджета один раз за календарный день. */
+  private warnExhaustedOnce(message: string, extra: Record<string, unknown>): void {
+    const day = new Date().toDateString();
+    if (this.warnedExhaustedDay === day) return;
+    this.warnedExhaustedDay = day;
+    this.deps.logger.warn(message, extra);
   }
 
   private warnInMemoryBudgetOnce(): void {

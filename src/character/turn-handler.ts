@@ -120,6 +120,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
       try {
         result = await model.runTurn({
           turnId: turnId ?? item.id,
+          sessionId: scopeId,
           context,
           signal,
           onUsage: (value) => (usage = value),
