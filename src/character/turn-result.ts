@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // Кандидаты памяти (§10.1): модель предлагает, runtime валидирует
 // (validateMemoryCandidates) и назначает источники. Предел — 5 на ход.
-const memoryCandidateSchema = z
+const memoryCandidateObject = z
   .object({
     kind: z.enum(["claim", "experience", "thought", "preference"]),
     text: z.string().min(1).max(2000),
@@ -28,6 +28,20 @@ const memoryCandidateSchema = z
     (candidate) => candidate.kind === "claim" || candidate.confidence === undefined,
     { message: "confidence допустим только у claim", path: ["confidence"] },
   );
+
+// Модели любят ставить confidence всем кандидатам подряд, а не только claim.
+// Поле бессмысленно для experience/thought/preference — тихо снимаем его,
+// вместо того чтобы валить весь ход из-за одного лишнего поля.
+const memoryCandidateSchema = z.preprocess((raw) => {
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    if (record["kind"] !== "claim" && "confidence" in record) {
+      const { confidence: _confidence, ...rest } = record;
+      return rest;
+    }
+  }
+  return raw;
+}, memoryCandidateObject);
 
 // Изменение настроения за ход (§7.2): три параметра, ограничены на ход;
 // значимое изменение требует краткого основания. Runtime дополнительно
