@@ -41,6 +41,8 @@ export interface TurnHandlerDeps {
   /** Дневной бюджет модельных вызовов (§16, 1.9); null — не ограничивать */
   modelBudget: Budget | null;
   modelDailyCallsLimit: number;
+  /** Каркас системного промпта (config/system-prompt.md, §7.1); пусто — встроенный по умолчанию */
+  promptTemplate?: string;
   logger: Logger;
 }
 
@@ -330,7 +332,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
     }
 
     return {
-      system: buildSystemPrompt(persona, { moodLine, relationshipLine, memoryBlock }),
+      system: buildSystemPrompt(persona, { moodLine, relationshipLine, memoryBlock }, deps.promptTemplate),
       messages: [...history, ...batchTexts.map((text) => ({ role: "user" as const, content: text || "[сообщение без текста]" }))],
     };
   }
@@ -357,7 +359,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
           }))
       : [];
     return {
-      system: buildSystemPrompt(persona),
+      system: buildSystemPrompt(persona, {}, deps.promptTemplate),
       messages,
     };
   }

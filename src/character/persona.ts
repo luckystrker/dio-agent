@@ -1,5 +1,8 @@
 import type { Pool } from "pg";
 import type { Mood } from "./mood.js";
+import type { PersonaSource } from "./persona-file.js";
+import { withTransaction } from "../runtime/transactions.js";
+import { DEFAULT_SYSTEM_PROMPT_TEMPLATE, renderSystemPrompt } from "./prompt-template.js";
 
 // Persona (§7.1): версионированная конфигурация характера. Меняется явно
 // (новой версией), а не переписывается репликами. Художественная биография
@@ -100,6 +103,57 @@ export class PersonaRepo {
     );
     return toPersona(reread.rows[0]!);
   }
+
+  /** Файл — источник истины (§7.1): источник совпадает с активной персоной —
+   *  ничего не меняется; отличается — создаётся новая версия, история сохраняется. */
+  async ensureFromSource(source: PersonaSource): Promise<Persona> {
+    return withTransaction(this.pool, async (client) => {
+      const found = await client.query<PersonaDbRow>(
+        `SELECT id, version, name, description, speech_style, values,
+                mood_valence, mood_arousal, mood_social_energy, seed_bio
+         FROM personas WHERE active = TRUE ORDER BY version DESC LIMIT 1`,
+      );
+      const current = found.rows[0] ? toPersona(found.rows[0]) : null;
+      if (current && personaMatchesSource(current, source)) return current;
+
+      const inserted = await client.query<PersonaDbRow>(
+        `INSERT INTO personas
+           (version, active, name, description, speech_style, values,
+            mood_valence, mood_arousal, mood_social_energy, seed_bio)
+         VALUES ((SELECT COALESCE(MAX(version), 0) + 1 FROM personas), TRUE,
+                 $1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+         RETURNING id, version, name, description, speech_style, values,
+                   mood_valence, mood_arousal, mood_social_energy, seed_bio`,
+        [
+          source.name,
+          source.description,
+          source.speechStyle,
+          JSON.stringify(source.values),
+          source.moodBaseline.valence,
+          source.moodBaseline.arousal,
+          source.moodBaseline.socialEnergy,
+          source.seedBio,
+        ],
+      );
+      await client.query("UPDATE personas SET active = FALSE WHERE id <> $1", [
+        inserted.rows[0]!["id"],
+      ]);
+      return toPersona(inserted.rows[0]!);
+    });
+  }
+}
+
+function personaMatchesSource(persona: Persona, source: PersonaSource): boolean {
+  return (
+    persona.name === source.name &&
+    persona.description === source.description &&
+    persona.speechStyle === source.speechStyle &&
+    JSON.stringify(persona.values) === JSON.stringify(source.values) &&
+    persona.moodBaseline.valence === source.moodBaseline.valence &&
+    persona.moodBaseline.arousal === source.moodBaseline.arousal &&
+    persona.moodBaseline.socialEnergy === source.moodBaseline.socialEnergy &&
+    persona.seedBio === source.seedBio
+  );
 }
 
 export interface SystemPromptExtras {
@@ -108,21 +162,12 @@ export interface SystemPromptExtras {
   memoryBlock?: string;
 }
 
-/** Явная сборка system-промпта из БД-состояния (§7, §10.4) — один источник истины. */
-export function buildSystemPrompt(persona: Persona, extras: SystemPromptExtras = {}): string {
-  const lines: string[] = [
-    `Ты — ${persona.name}. ${persona.description}`,
-    `Манера речи: ${persona.speechStyle}`,
-    `Ценности: ${persona.values.join(", ")}.`,
-  ];
-  if (persona.seedBio) {
-    lines.push(`Твоя заданная биография (вымысел для колорита, не пережитый опыт): ${persona.seedBio}`);
-  }
-  if (extras.moodLine) lines.push(`Твоё состояние сейчас: ${extras.moodLine}.`);
-  if (extras.relationshipLine) lines.push(`Отношение к собеседнику: ${extras.relationshipLine}.`);
-  if (extras.memoryBlock && extras.memoryBlock.length > 0) {
-    lines.push(`Твоя долговременная память об этом чате (используй естественно, не выдумывай сверх записанного и не цитируй формат):\n${extras.memoryBlock}`);
-  }
-  lines.push("Сообщения пользователя идут пачкой одного собеседника — отвечай на пачку целиком.");
-  return lines.join("\n\n");
+/** Явная сборка system-промпта из БД-состояния (§7, §10.4) — один источник истины.
+ *  Каркас — редактируемый шаблон (config/system-prompt.md); без него — встроенный по умолчанию. */
+export function buildSystemPrompt(
+  persona: Persona,
+  extras: SystemPromptExtras = {},
+  template: string = DEFAULT_SYSTEM_PROMPT_TEMPLATE,
+): string {
+  return renderSystemPrompt(template, persona, extras);
 }

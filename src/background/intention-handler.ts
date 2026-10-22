@@ -39,6 +39,8 @@ export interface IntentionHandlerDeps {
   workQueue: WorkQueueRepo;
   modelBudget: Budget | null;
   modelDailyCallsLimit: number;
+  /** Каркас системного промпта (config/system-prompt.md, §7.1); пусто — встроенный по умолчанию */
+  promptTemplate?: string;
   logger: Logger;
 }
 
@@ -157,7 +159,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
       context: {
-        system: buildSystemPrompt(persona, extras) + `\n\n${EXPLORE_SYSTEM_ADDENDUM}`,
+        system: buildSystemPrompt(persona, extras, deps.promptTemplate) + `\n\n${EXPLORE_SYSTEM_ADDENDUM}`,
         messages: [{ role: "user", content: `Тема для размышления: ${intention.topic}. Причина: ${intention.reason}` }],
       },
       signal,
@@ -233,7 +235,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     const result = await activeModel.runTurn({
       turnId: `intention:${intentionId}`,
       context: {
-        system: buildSystemPrompt(persona, extras) + `\n\n${INITIATIVE_SYSTEM_ADDENDUM}`,
+        system: buildSystemPrompt(persona, extras, deps.promptTemplate) + `\n\n${INITIATIVE_SYSTEM_ADDENDUM}`,
         messages: [
           {
             role: "user",

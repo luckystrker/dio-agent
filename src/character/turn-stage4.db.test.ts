@@ -200,7 +200,7 @@ class FakeApi implements TelegramApi {
 
 function handlerWith(
   model: CharacterModel | null,
-  options: { outboxRepo?: OutboxRepo; modelBudget?: BudgetRepo | null; dailyLimit?: number } = {},
+  options: { outboxRepo?: OutboxRepo; modelBudget?: BudgetRepo | null; dailyLimit?: number; promptTemplate?: string } = {},
 ) {
   return makeTurnHandler({
     pool,
@@ -214,6 +214,7 @@ function handlerWith(
     workQueue: workRepo,
     modelBudget: options.modelBudget ?? null,
     modelDailyCallsLimit: options.dailyLimit ?? 100,
+    promptTemplate: options.promptTemplate,
     logger: silentLogger,
   });
 }
@@ -563,6 +564,26 @@ describe("лимиты строк ответа (§11.3, чек-лист 1.10)", 
     expect(captured).toHaveLength(1);
     expect(captured[0]!.system).toContain("Твоё состояние сейчас: в приподнятом настроении");
     expect(captured[0]!.system).toContain("Отношение к собеседнику: почти незнаком");
+  });
+
+  it("кастомный шаблон доходит до промпта хода (7.1: проводка promptTemplate, не встроенный каркас)", async () => {
+    const { item } = await makeTurn("701", ["привет"], { actorName: "Борис" });
+    const captured: Array<{ system: string }> = [];
+    const model: CharacterModel = {
+      async runTurn(input): Promise<TurnResult> {
+        captured.push({ system: input.context.system });
+        return { decision: "answer", messages: ["ок"], notes: [], memory: [], intentions: [] };
+      },
+    };
+
+    await handlerWith(model, { promptTemplate: "КАСТОМНЫЙ КАРКАС:\n{{persona}}\n\nХвост шаблона." })(
+      item,
+      SIGNAL(),
+    );
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.system).toContain("КАСТОМНЫЙ КАРКАС:");
+    expect(captured[0]!.system).toContain("Хвост шаблона.");
   });
 
 });

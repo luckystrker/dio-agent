@@ -16,10 +16,13 @@ import { IntentionRepo } from "./background/intentions.js";
 import { makeIntentionHandler } from "./background/intention-handler.js";
 import { InitiativeRepo } from "./character/initiative.js";
 import { PersonaRepo } from "./character/persona.js";
+import { parsePersonaFile } from "./character/persona-file.js";
+import { renderSystemPrompt } from "./character/prompt-template.js";
 import { MoodRepo } from "./character/mood.js";
 import { RelationshipRepo } from "./character/relationships.js";
 import { DryRunTelegramApi, HttpTelegramApi, type TelegramApi } from "./telegram/api.js";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { TelegramPoller } from "./telegram/polling.js";
 import { ChatBufferManager } from "./telegram/buffers.js";
 import { OutboxRepo } from "./telegram/outbox.js";
@@ -28,6 +31,23 @@ import { DeliveryLoop } from "./telegram/delivery.js";
 // Startup по §5.3: подключить БД → singleton → конфигурация → восстановить
 // незавершённую работу → запустить polling, worker, scheduler, delivery.
 // Recovery обязан работать и после SIGKILL: состояние берётся из базы.
+
+/** Файлы персонажа (§7.1): config/persona.md и config/system-prompt.md —
+ *  источник истины; правка файла + перезапуск применяются при старте. */
+function readCharacterFile(relative: string): string {
+  try {
+    return readFileSync(fileURLToPath(new URL(`../${relative}`, import.meta.url)), "utf8");
+  } catch (error) {
+    throw new Error(
+      `не удалось прочитать ${relative} (файл должен существовать в корне проекта): ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      { cause: error },
+    );
+  }
+}
+
+const promptTemplate = readCharacterFile("config/system-prompt.md");
 
 const config = loadConfig();
 const logger = createLogger(config.logLevel);
@@ -78,7 +98,13 @@ const model: CharacterModel | null = config.model
 
 const memory = new MemoryRepo(pool);
 const personaRepo = new PersonaRepo(pool);
-const persona = await personaRepo.active();
+// §7.1: файл личности — источник истины; отличие от активной записи
+// создаёт новую версию (история сохраняется). Ошибка в файле валит запуск.
+const persona = await personaRepo.ensureFromSource(parsePersonaFile(readCharacterFile("config/persona.md")));
+// Пробная сборка валидирует каркас при старте: опечатка в метке шаблона
+// валит запуск сразу, а не первый ход (7.1)
+renderSystemPrompt(promptTemplate, persona);
+logger.info("persona загружена", { version: persona.version, name: persona.name });
 const moodRepo = new MoodRepo(pool);
 const relationshipRepo = new RelationshipRepo(pool);
 const modelBudget = new BudgetRepo(pool);
@@ -96,6 +122,7 @@ const handleTurn = makeTurnHandler({
   workQueue: repo,
   modelBudget: config.model ? modelBudget : null,
   modelDailyCallsLimit: config.model?.dailyCallsLimit ?? 100,
+  promptTemplate,
   logger,
 });
 
@@ -127,6 +154,7 @@ const handlers: Record<string, WorkHandler> = {
     workQueue: repo,
     modelBudget: config.model ? modelBudget : null,
     modelDailyCallsLimit: config.model?.dailyCallsLimit ?? 100,
+    promptTemplate,
     logger,
   }),
 };
