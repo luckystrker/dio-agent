@@ -231,7 +231,7 @@ describe("DeliveryLoop: подтверждённые ошибки API (§13.2)",
 });
 
 describe("DeliveryLoop: устаревание (§13.3)", () => {
-  it("новые pending-события в чате после turn → оставшиеся пузыри отменяются, отправки нет", async () => {
+  it("новые pending-события в чате после turn → первый пузырь уходит, хвост отменяется", async () => {
     const turnId = await createTurnRow(pool, "500");
     await enqueueBubbles(turnId, "500", ["уже неактуально", "тоже отменяется"]);
     // пользователь написал снова, событие ещё не закрыто в turn
@@ -248,8 +248,8 @@ describe("DeliveryLoop: устаревание (§13.3)", () => {
     await loop.tick();
 
     const rows = await getOutboxByTurn(pool, turnId);
-    expect(rows.map((row) => row.status)).toEqual(["cancelled", "cancelled"]);
-    expect(api.calls).toHaveLength(0); // ни один пузырь не отправлен
+    expect(rows.map((row) => row.status)).toEqual(["sent", "cancelled"]);
+    expect(api.calls).toHaveLength(1); // первый пузырь не теряем
   });
 
   it("отправленный ранее пузырь не отзывается; устаревание отменяет только хвост", async () => {

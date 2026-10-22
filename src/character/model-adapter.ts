@@ -1,4 +1,5 @@
 import { TurnResultSchema, TURN_RESULT_JSON_SCHEMA, type TurnResult } from "./turn-result.js";
+import { parseToolArguments } from "./json-repair.js";
 import { withTimeout } from "../runtime/with-timeout.js";
 
 /**
@@ -135,30 +136,21 @@ export class OpenAICompatModelAdapter implements CharacterModel {
       ? `${input.context.system}\n\nОграничения: ${JSON.stringify(input.constraints)}`
       : input.context.system;
 
-    const body = {
-      model: this.model,
-      messages: [
-        { role: "system", content: systemMessage },
-        ...input.context.messages.map((message) => ({ role: message.role, content: message.content })),
-      ],
-      max_tokens: this.maxOutputTokens,
-      tools: [
-        {
-          type: "function",
-          function: {
-            name: "turn_result",
-            description:
-              "Зафиксировать решение хода: answer/ignore/defer, сообщения и заметки о состоянии.",
-            parameters: TURN_RESULT_JSON_SCHEMA,
-          },
-        },
-      ],
-      tool_choice: { type: "function", function: { name: "turn_result" } },
+    const tool = {
+      type: "function",
+      function: {
+        name: "turn_result",
+        description:
+          "Зафиксировать решение хода: answer/ignore/defer, сообщения и заметки о состоянии.",
+        parameters: TURN_RESULT_JSON_SCHEMA,
+      },
     };
 
     return withTimeout(async (timeoutSignal) => {
       const signal = combineSignals(input.signal, timeoutSignal);
       let lastError: ModelError = new ModelError("адаптер не выполнял запросов", false);
+      /** Провайдер иногда включает thinking, а он несовместим с forced tool_choice. */
+      let forceToolChoice = true;
 
       for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
         if (attempt > 0) {
@@ -166,6 +158,21 @@ export class OpenAICompatModelAdapter implements CharacterModel {
           // мгновенный повтор сжигает попытки при кратковременном 429
           await sleep(DEFAULTS.retryBaseMs * 2 ** (attempt - 1));
         }
+        const attemptSystem = forceToolChoice
+          ? systemMessage
+          : `${systemMessage}\n\nОбязательно верни ответ вызовом функции turn_result — без текста в ответе.`;
+        const body = {
+          model: this.model,
+          messages: [
+            { role: "system", content: attemptSystem },
+            ...input.context.messages.map((message) => ({ role: message.role, content: message.content })),
+          ],
+          max_tokens: this.maxOutputTokens,
+          tools: [tool],
+          ...(forceToolChoice
+            ? { tool_choice: { type: "function", function: { name: "turn_result" } } }
+            : {}),
+        };
         let response: Response;
         try {
           response = await this.transport(`${this.endpoint}/chat/completions`, {
@@ -192,6 +199,16 @@ export class OpenAICompatModelAdapter implements CharacterModel {
 
         if (!response.ok) {
           const text = await response.text().catch(() => "");
+          // Thinking-режим не принимает forced tool_choice: повторяем без
+          // форса и просим вызвать функцию текстом в системном промпте.
+          if (forceToolChoice && /Thinking mode does not support this tool_choice/i.test(text)) {
+            forceToolChoice = false;
+            lastError = new ModelError(
+              "провайдер включил thinking — повтор без forced tool_choice",
+              true,
+            );
+            continue;
+          }
           lastError = new ModelError(
             `HTTP ${response.status}: ${text.slice(0, 300)}`,
             response.status === 429 || response.status >= 500,
@@ -205,7 +222,7 @@ export class OpenAICompatModelAdapter implements CharacterModel {
         });
 
         try {
-          const argumentsJson: unknown = JSON.parse(extractToolCallArguments(json));
+          const argumentsJson: unknown = parseToolArguments(extractToolCallArguments(json));
           const parsed = TurnResultSchema.safeParse(argumentsJson);
           if (!parsed.success) {
             throw new ModelError(

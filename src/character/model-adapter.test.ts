@@ -147,6 +147,41 @@ describe("OpenAICompatModelAdapter", () => {
     expect(body.max_tokens).toBe(1000);
   });
 
+  it("битый JSON с двойным двоеточием чинится без повторного вызова", async () => {
+    const transport = vi.fn(async () =>
+      toolCallResponse(
+        '{"decision": "answer", "messages": ["ок"], "notes": [], "reason":: "тест"}',
+      ),
+    );
+    const adapter = makeAdapter(transport);
+    const result = await adapter.runTurn(INPUT);
+    expect(result.messages).toEqual(["ок"]);
+    expect(result.reason).toBe("тест");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+
+  it("400 «Thinking mode does not support this tool_choice» → повтор без forced tool_choice", async () => {
+    let calls = 0;
+    const transport = vi.fn(async (_url: string, init: { body: string }) => {
+      calls++;
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: { message: "Upstream request failed: Thinking mode does not support this tool_choice" },
+          }),
+          { status: 400 },
+        );
+      }
+      const body = JSON.parse(init.body) as { tool_choice?: unknown };
+      expect(body.tool_choice).toBeUndefined();
+      return toolCallResponse(VALID_ARGUMENTS);
+    });
+    const adapter = makeAdapter(transport);
+    const result = await adapter.runTurn(INPUT);
+    expect(result.decision).toBe("answer");
+    expect(calls).toBe(2);
+  });
+
   it("хвостовой слэш endpoint не дублируется", async () => {
     let url = "";
     const adapter = new OpenAICompatModelAdapter({
