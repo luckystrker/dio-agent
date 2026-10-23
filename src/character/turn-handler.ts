@@ -320,7 +320,7 @@ export function makeTurnHandler(deps: TurnHandlerDeps): WorkHandler {
   ): Promise<ModelTurnContext> {
     // Настроение с затуханием
     const moodNow = await mood.readDecayed(persona.moodBaseline);
-    const moodLine = describeMood(moodNow.mood);
+    const moodLine = describeMood(moodNow.mood, persona.moodBaseline);
 
     // Отношение к собеседнику
     let relationshipLine: string | undefined;

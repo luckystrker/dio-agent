@@ -58,18 +58,28 @@ export function clampMoodDelta(delta: Partial<Mood>): Partial<Mood> {
   return clamped;
 }
 
-/** Детерминированное текстовое представление (§7.2) — в контекст хода. */
-export function describeMood(mood: Mood): string {
+/** Детерминированное текстовое представление (§7.2) — в контекст хода.
+ *  Сравниваем с базовой линией persona, а не с нулём: у Дио baseline valence 0.1,
+ *  и абсолютные пороги прятали небольшие, но заметные сдвиги. */
+export function describeMood(
+  mood: Mood,
+  baseline: Mood = { valence: 0, arousal: 0.5, socialEnergy: 0.5 },
+): string {
   const parts: string[] = [];
-  if (mood.valence > 0.3) parts.push("в приподнятом настроении");
-  else if (mood.valence < -0.3) parts.push("в подавленном настроении");
+  const v = mood.valence - baseline.valence;
+  if (v > 0.4) parts.push("в приподнятом настроении");
+  else if (v > 0.12) parts.push("чуть оживлён");
+  else if (v < -0.4) parts.push("в подавленном настроении");
+  else if (v < -0.12) parts.push("не в духе");
   else parts.push("в ровном настроении");
 
-  if (mood.arousal > 0.65) parts.push("взволнован");
-  else if (mood.arousal < 0.3) parts.push("спокоен");
+  const a = mood.arousal - baseline.arousal;
+  if (a > 0.2) parts.push("взволнован");
+  else if (a < -0.15) parts.push("спокоен");
 
-  if (mood.socialEnergy < 0.3) parts.push("мало сил на общение");
-  else if (mood.socialEnergy > 0.7) parts.push("полон желания общаться");
+  const s = mood.socialEnergy - baseline.socialEnergy;
+  if (s < -0.2) parts.push("мало сил на общение");
+  else if (s > 0.15) parts.push("полон желания общаться");
 
   return parts.join(", ");
 }

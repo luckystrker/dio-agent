@@ -210,7 +210,7 @@ export const TURN_RESULT_JSON_SCHEMA = {
     defer_hours: { type: "number", minimum: 0.05, maximum: 168, description: "При decision=defer: через сколько часов вернуться к ответу" },
     mood_delta: {
       type: "object",
-      description: "Необязательное изменение твоего настроения этим ходом (маленькими шагами, с причиной)",
+      description: "Необязательное изменение твоего настроения этим ходом (до ±0.3 за параметр; при сильной эмоции не занижай — заметная дельта лучше, чем 0.05)",
       properties: {
         valence: { type: "number", minimum: -1, maximum: 1 },
         arousal: { type: "number", minimum: 0, maximum: 1 },
@@ -222,7 +222,7 @@ export const TURN_RESULT_JSON_SCHEMA = {
     },
     relationship_delta: {
       type: "object",
-      description: "Необязательное малое изменение отношения к собеседнику, с причиной",
+      description: "Необязательное изменение отношения к собеседнику, с причиной; можно и в минус, если человек перегнул",
       properties: {
         affinity: { type: "number", minimum: -1, maximum: 1 },
         trust: { type: "number", minimum: 0, maximum: 1 },

@@ -73,9 +73,9 @@ afterEach(async () => {
 async function seedChatEvent(
   chatId: string,
   chatType: "private" | "group",
-  // прошлое по умолчанию: гейт свежести (occurred_at > created_at) не срабатывает
-  // ложно из-за миллисекундного усечения JS Date (находка повторного прогона критика)
-  occurredAtSql = "now() - interval '1 minute'",
+  // по умолчанию чат «тихий»: гейт §14.3 не считает его активным,
+  // инициатива проходит. Тест на активный чат передаёт свежее время явно.
+  occurredAtSql = "now() - interval '2 hours'",
 ): Promise<void> {
   await pool.query(
     `INSERT INTO social_events
@@ -247,19 +247,19 @@ describe("истёкший срок и свежий контекст-гейт (�
     expect(await scalar("FROM delivery_outbox")).toBe(0);
   });
 
-  it("событие чата новее created_at → отмена «чат ушёл вперёд», без модели и отправки", async () => {
+  it("событие чата за последние 30 минут → отмена «чат активен», без модели и отправки", async () => {
     await seedChatEvent("3102", "private"); // старый контекст — основа намерения
     const { intentionId, item } = await queueIntention("share", "видео про горы", "3102", {
       backdateHours: 1,
     });
-    await seedChatEvent("3102", "private"); // собеседник писал ПОСЛЕ замысла
+    await seedChatEvent("3102", "private", "now() - interval '1 minute'"); // чат активен
     const { model, calls } = countingModel({ decision: "answer", messages: ["смотри"] });
 
     await handlerWith(model)(item, SIGNAL());
 
     const intention = await intentionRow(intentionId);
     expect(intention!.status).toBe("cancelled");
-    expect(intention!.reason).toContain("чат ушёл вперёд");
+    expect(intention!.reason).toContain("чат активен");
     expect(calls()).toBe(0);
     expect(await scalar("FROM turns")).toBe(0);
     expect(await scalar("FROM delivery_outbox")).toBe(0);

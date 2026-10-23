@@ -46,7 +46,8 @@ export interface IntentionHandlerDeps {
 
 const INITIATIVE_SYSTEM_ADDENDUM =
   "Ты сам решил написать первым (инициатива). Будь уместен и кратко: одна мысль, без дежурных извинений. " +
-  "Если за это время собеседник уже писал тебе на другую тему — лучше ignore.";
+  "Если за это время собеседник уже писал тебе на другую тему — лучше ignore. " +
+  "Новых намерений (intentions) в этом ходе не предлагай — инициатива уже случилась.";
 
 const EXPLORE_SYSTEM_ADDENDUM =
   "Ты изучаешь тему для себя (exploration). НИЧЕГО не отправляй собеседнику: " +
@@ -94,10 +95,13 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
       return;
     }
 
-    // Свежий контекст-гейт (§14.3): в чате есть события новее создания
-    // намерения — тема ушла вперёд, инициатива неуместна
-    if (await chatHasNewerEvents(intention)) {
-      await intentions.cancel(intentionId, "чат ушёл вперёд — намерение неактуально");
+    // Свежий контекст-гейт (§14.3): не лезем в чат, где собеседник активен.
+    // Раньше сравнивали с createdAt намерения — тогда любое сообщение после
+    // создания (даже за сутки до срока) убивало инициативу, и Дио не писал
+    // первым никогда. Теперь: если в чате тихо 30 минут — инициатива уместна.
+    // explore — внутреннее действие, чат не трогает: гейт ему не нужен.
+    if (intention.kind !== "explore" && (await chatIsActive(intention.targetChatId))) {
+      await intentions.cancel(intentionId, "чат активен — инициатива неуместна");
       await workQueue.complete(item.id);
       logger.info("намерение отменено: свежий контекст-гейт (§14.3)", { intentionId });
       return;
@@ -122,13 +126,13 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     return result.rows[0]?.["exists"] === true;
   }
 
-  async function chatHasNewerEvents(intention: IntentionRow): Promise<boolean> {
+  async function chatIsActive(chatId: string): Promise<boolean> {
     const result = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM social_events
-         WHERE chat_id = $1 AND occurred_at > $2
+         WHERE chat_id = $1 AND occurred_at > now() - interval '30 minutes'
        ) AS exists`,
-      [intention.targetChatId, intention.createdAt],
+      [chatId],
     );
     return result.rows[0]?.["exists"] === true;
   }
@@ -312,7 +316,7 @@ export function makeIntentionHandler(deps: IntentionHandlerDeps): WorkHandler {
     const extras: { moodLine?: string; relationshipLine?: string; memoryBlock?: string } = {};
     try {
       const moodNow = await deps.mood.readDecayed(persona.moodBaseline);
-      extras.moodLine = describeMood(moodNow.mood);
+      extras.moodLine = describeMood(moodNow.mood, persona.moodBaseline);
     } catch {
       // без настроения фоновый ход не срываем
     }

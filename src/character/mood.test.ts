@@ -71,6 +71,15 @@ describe("describeMood — детерминированный текст", () =>
     expect(describeMood(BASELINE)).toBe("в ровном настроении");
   });
 
+  it("сдвиг относительно базовой линии виден при небольшой дельте", () => {
+    expect(
+      describeMood(
+        { valence: -0.05, arousal: 0.4, socialEnergy: 0.6 },
+        { valence: 0.1, arousal: 0.4, socialEnergy: 0.6 },
+      ),
+    ).toBe("не в духе");
+  });
+
   it("приподнятое и взолнованное", () => {
     expect(describeMood({ valence: 0.7, arousal: 0.8, socialEnergy: 0.5 })).toBe(
       "в приподнятом настроении, взволнован",
