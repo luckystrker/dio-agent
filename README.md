@@ -1,7 +1,10 @@
 # dio-agent — Living Telegram Agent
 
 Постоянный AI-персонаж в Telegram: собеседник с характером, памятью, меняющимся
-отношением к людям и миру. Спецификация — [docs/ARCHITECTURE_v0.6-1.md](docs/ARCHITECTURE_v0.6-1.md).
+отношением к людям и миру. Спецификация — [docs/ARCHITECTURE_v0.7.md](docs/ARCHITECTURE_v0.7.md).
+
+> Идёт переезд с TypeScript на Go (этап 9 CHECKLIST.md): команды ниже описывают TS-версию
+> до завершения переезда; Go-версия собирается `go build ./cmd/agent`.
 
 ## Быстрый старт
 
