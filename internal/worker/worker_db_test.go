@@ -1,0 +1,267 @@
+//go:build db
+
+// БД-тесты когнитивного worker (§5.2, §12.2): приоритет прямого обращения
+// над группой, порядок внутри чата, ограниченный повтор с паузой после
+// транзитного сбоя и терминальный пропуск после исчерпания попыток.
+// Запуск:
+//
+//	go test -tags db ./internal/worker/
+//
+// против Postgres из docker-compose; TEST_DATABASE_URL переопределяет DSN
+// (на машине разработчика docker-compose занимает 5433 — см. 9.1).
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/character"
+	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/migrations"
+)
+
+const defaultTestDSN = "postgres://dio:dio@localhost:5432/dio?sslmode=disable"
+
+// fakeRunner — двойной исполнитель хода: пишет порядок вызовов, умеет падать
+// первые N раз.
+type fakeRunner struct {
+	pool    *pgxpool.Pool
+	mu      sync.Mutex
+	order   []int64
+	fails   map[int64]int // turn_id → сколько раз упасть
+	blocked chan struct{} // не nil — блокировать вызовы до закрытия
+}
+
+func (r *fakeRunner) Run(ctx context.Context, in character.Input) (character.Outcome, error) {
+	r.mu.Lock()
+	r.order = append(r.order, in.TurnID)
+	fails := r.fails[in.TurnID]
+	if fails > 0 {
+		r.fails[in.TurnID] = fails - 1
+	}
+	blocked := r.blocked
+	r.mu.Unlock()
+	if blocked != nil {
+		select {
+		case <-ctx.Done():
+			return character.Outcome{}, ctx.Err()
+		case <-blocked:
+		}
+	}
+	if fails > 0 {
+		return character.Outcome{}, errors.New("транзитный сбой двойного исполнителя")
+	}
+	// Продакшн-Runner применяет ход CAS-ом turns.status='applied' (§12.1);
+	// двойной исполнитель эмулирует это, иначе ход остаётся created и worker
+	// честно берёт его снова.
+	if _, err := r.pool.Exec(ctx, `UPDATE turns SET status = 'applied' WHERE id = $1`, in.TurnID); err != nil {
+		return character.Outcome{}, err
+	}
+	return character.Outcome{}, nil
+}
+
+func (r *fakeRunner) called() []int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]int64(nil), r.order...)
+}
+
+// seedTurn — ход в очереди с одним событием (чат, тип, текст).
+func seedTurn(t *testing.T, pool *pgxpool.Pool, chatID int64, chatType, text string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	var turnID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO turns (chat_id) VALUES ($1) RETURNING id`, chatID).Scan(&turnID); err != nil {
+		t.Fatalf("ход не создан: %v", err)
+	}
+	raw := fmt.Sprintf(`{"message":{"message_id":%d,"text":%q,"from":{"id":777}}}`, 4000+turnID, text)
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status, turn_id)
+		VALUES ($1, $2, $3, 777, 'Коля', 'message', $4, $5::jsonb, 'buffered', $6)`,
+		9_000_000+turnID, chatID, chatType, text, raw, turnID); err != nil {
+		t.Fatalf("событие не вставлено: %v", err)
+	}
+	return turnID
+}
+
+// newWorkerPool — чистая тестовая база с полной схемой §18
+// (копия помощника 9.2–9.6: пакеты не зависят от внутренностей чужих тестов).
+func newWorkerPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	ctx := context.Background()
+
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		dsn = defaultTestDSN
+	}
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Skipf("PostgreSQL недоступен по TEST_DATABASE_URL=%q — БД-тест пропущен: %v", dsn, err)
+	}
+	defer admin.Close(ctx)
+
+	dbName := fmt.Sprintf("dio_worker_test_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("тестовая база не создана: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP DATABASE "+dbName+" WITH (FORCE)")
+	})
+
+	testDSN, err := swapWorkerDSN(dsn, dbName)
+	if err != nil {
+		t.Fatalf("TEST_DATABASE_URL не разобран как URL: %v", err)
+	}
+	pool, err := runtime.NewPool(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("пул к тестовой базе не создан: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	result, err := runtime.Migrate(ctx, pool, migrations.FS)
+	if err != nil {
+		t.Fatalf("схема не применена: %v", err)
+	}
+	if result.Applied != 7 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 7/0", result.Applied, result.Skipped)
+	}
+	return pool
+}
+
+func swapWorkerDSN(dsn, dbName string) (string, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName), nil
+}
+
+// TestWorkerPrioritizesDirect — §5.2 приоритет 1: более поздний ход личного
+// чата обрабатывается раньше более раннего группового.
+func TestWorkerPrioritizesDirect(t *testing.T) {
+	pool := newWorkerPool(t)
+
+	// Групповой ход СТАРШЕ по id: без приоритета worker взял бы его первым.
+	groupTurn := seedTurn(t, pool, -3001, "group", "шум группы")
+	directTurn := seedTurn(t, pool, 3001, "private", "прямой вопрос")
+
+	runner := &fakeRunner{pool: pool}
+	w := New(Deps{Pool: pool, Runner: runner, Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(ctx) }()
+
+	eventually(t, "оба хода обработаны", func() bool {
+		return len(runner.called()) == 2
+	})
+	w.StopDrain()
+	<-w.Done()
+
+	order := runner.called()
+	if order[0] != directTurn || order[1] != groupTurn {
+		t.Fatalf("порядок нарушен: хочу [прямой %d, группа %d], получено %v", directTurn, groupTurn, order)
+	}
+	if !orderEqual(order, []int64{directTurn, groupTurn}) {
+		t.Fatalf("лишние обработки: %v", order)
+	}
+}
+
+// TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;
+// исчерпание попыток — терминальный пропуск (turn_skipped, инвариант 5).
+func TestWorkerRetriesThenSkips(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+
+	storage := runtime.NewPgStreamStorage(ctx, pool)
+	journal := character.NewTurnJournal(storage, nil)
+
+	turnID := seedTurn(t, pool, 3002, "private", "ход со сбоем исполнителя")
+
+	// Первые 2 попытки падают (лимит 3): третья — успех.
+	runner := &fakeRunner{pool: pool, fails: map[int64]int{turnID: 2}}
+	w := New(Deps{Pool: pool, Runner: runner, Journal: journal,
+		Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond, RetryBase: 20 * time.Millisecond, RetryMax: 100 * time.Millisecond})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(runCtx) }()
+
+	eventually(t, "ход выполнен с третьей попытки", func() bool {
+		return len(runner.called()) == 3
+	})
+	w.StopDrain()
+	<-w.Done()
+
+	// Пауза между попытками была: первые две попытки не подряд (retry_wait §12.1).
+	if !orderEqual(runner.called(), []int64{turnID, turnID, turnID}) {
+		t.Fatalf("неожиданная последовательность попыток: %v", runner.called())
+	}
+
+	// Сценарий исчерпания: ход, падающий всегда, — терминальный пропуск.
+	turnFail := seedTurn(t, pool, 3003, "private", "ход с постоянным сбоем")
+	runner2 := &fakeRunner{pool: pool, fails: map[int64]int{turnFail: 1 << 30}}
+	w2 := New(Deps{Pool: pool, Runner: runner2, Journal: journal,
+		Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond, RetryBase: 10 * time.Millisecond, RetryMax: 20 * time.Millisecond, MaxAttempts: 2})
+	go func() { _ = w2.Run(runCtx) }()
+
+	eventually(t, "исчерпание попыток зафиксировано пропуском", func() bool {
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnFail).Scan(&status); err != nil {
+			return false
+		}
+		return status == "skipped"
+	})
+	w2.StopDrain()
+	<-w2.Done()
+
+	// turn_skipped в журнале (инвариант 5: пропуск фиксируется явно).
+	evs, err := journal.History(ctx, turnFail)
+	if err != nil {
+		t.Fatalf("журнал не читается: %v", err)
+	}
+	skipped := false
+	for _, ev := range evs {
+		if ev.EventType() == "turn_skipped" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("turn_skipped нет в журнале хода %d", turnFail)
+	}
+}
+
+func orderEqual(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("условие не выполнено за 10 с: %s", what)
+}

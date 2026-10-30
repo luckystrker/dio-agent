@@ -178,8 +178,15 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	if n > 0 {
 		s.logInfo("фон: восстановление: %d незавершённых намерений возвращены в pending (продолжение с чекпоинта/WAL)", n)
 	}
+	// Модель может быть не настроена (поддерживаемое состояние: Tick не мыслит);
+	// значения map в Go вычисляются жадно — прямая запись в map паниковала бы
+	// на nil-модели (дефект 9.6, вскрыт сборкой приложения 9.7).
+	modelName := "не настроена"
+	if s.model != nil {
+		modelName = s.model.Model()
+	}
 	s.logInfo("планировщик фона запущен: такт %v..%v, модель %s",
-		s.opts.MinInterval, s.opts.MaxInterval, map[bool]string{true: s.model.Model(), false: "не настроена"}[s.model != nil])
+		s.opts.MinInterval, s.opts.MaxInterval, modelName)
 
 	for {
 		delay := s.nextDelay()
