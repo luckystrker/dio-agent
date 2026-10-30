@@ -12,8 +12,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"ago/config"
-	agotools "ago/tools"
+	"github.com/luckystrker/ago/config"
+	agotools "github.com/luckystrker/ago/tools"
 )
 
 // captureServer собирает тела POST-запросов chat/completions и отвечает

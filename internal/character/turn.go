@@ -26,11 +26,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"ago/agent"
-	agocontext "ago/context"
-	"ago/events"
-	agomiddleware "ago/middleware"
-	"ago/response"
+	"github.com/luckystrker/ago/agent"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/events"
+	agomiddleware "github.com/luckystrker/ago/middleware"
+	"github.com/luckystrker/ago/response"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"

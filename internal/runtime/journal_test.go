@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 )
 
 // События WAL должны проходить полный цикл сериализации через реестр ago/events:

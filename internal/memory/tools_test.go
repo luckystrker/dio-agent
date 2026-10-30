@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	agotools "ago/tools"
+	agotools "github.com/luckystrker/ago/tools"
 )
 
 func newTestToolset(t *testing.T, emb Embedder) *Toolset {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 )

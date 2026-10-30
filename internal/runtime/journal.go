@@ -24,8 +24,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"ago/events"
-	agostream "ago/stream"
+	"github.com/luckystrker/ago/events"
+	agostream "github.com/luckystrker/ago/stream"
 )
 
 // Ошибки адаптера журнала. Проверяются через errors.Is.

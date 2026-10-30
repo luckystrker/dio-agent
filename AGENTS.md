@@ -1,7 +1,7 @@
 # dio-agent — Living Telegram Agent
 
 Постоянный AI-персонаж в Telegram: память, настроение, отношения, избирательная инициатива.
-Go · PostgreSQL (+pgvector) · событийное ядро ago (`third_party/ago`) · один процесс (бинарник) на VPS · systemd.
+Go · PostgreSQL (+pgvector) · событийное ядро ago (github.com/luckystrker/ago, v0.6.0) · один процесс (бинарник) на VPS · systemd.
 
 ## Где что лежит (читай по необходимости, не всё сразу)
 

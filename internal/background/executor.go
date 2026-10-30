@@ -19,10 +19,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	agocontext "ago/context"
-	agostream "ago/stream"
-	agotask "ago/task"
-	agotools "ago/tools"
+	agocontext "github.com/luckystrker/ago/context"
+	agostream "github.com/luckystrker/ago/stream"
+	agotask "github.com/luckystrker/ago/task"
+	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"

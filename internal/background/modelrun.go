@@ -15,12 +15,12 @@ import (
 	"strings"
 	"sync"
 
-	"ago/agent"
-	agocontext "ago/context"
-	"ago/events"
-	agomiddleware "ago/middleware"
-	"ago/response"
-	agotools "ago/tools"
+	"github.com/luckystrker/ago/agent"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/events"
+	agomiddleware "github.com/luckystrker/ago/middleware"
+	"github.com/luckystrker/ago/response"
+	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"

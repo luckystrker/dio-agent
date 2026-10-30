@@ -14,9 +14,9 @@ import (
 	"strings"
 	"testing"
 
-	agocontext "ago/context"
-	"ago/events"
-	agostream "ago/stream"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/events"
+	agostream "github.com/luckystrker/ago/stream"
 )
 
 type toolResultJSON struct {

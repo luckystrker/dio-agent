@@ -12,9 +12,9 @@ import (
 	"reflect"
 	"testing"
 
-	agocontext "ago/context"
-	"ago/stream"
-	agotask "ago/task"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/stream"
+	agotask "github.com/luckystrker/ago/task"
 )
 
 // Чекпоинт round-trip (требование 9.2): записанное состояние читается тем же

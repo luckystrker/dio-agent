@@ -19,9 +19,9 @@ import (
 	"sync"
 	"time"
 
-	agocontext "ago/context"
-	"ago/events"
-	"ago/middleware"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/events"
+	"github.com/luckystrker/ago/middleware"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )

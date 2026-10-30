@@ -17,7 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	agotask "ago/task"
+	agotask "github.com/luckystrker/ago/task"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 )

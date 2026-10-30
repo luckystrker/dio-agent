@@ -15,7 +15,7 @@ package character
 import (
 	"encoding/json"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 )
 
 // Типы событий хода (колонка event_streams.type, §12.1).

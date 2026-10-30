@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"time"
 
-	agotools "ago/tools"
+	agotools "github.com/luckystrker/ago/tools"
 )
 
 // Имена инструментов памяти и ключ DI аудитории.

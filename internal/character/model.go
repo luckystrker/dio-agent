@@ -22,9 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"ago/config"
-	agocontext "ago/context"
-	"ago/events"
+	"github.com/luckystrker/ago/config"
+	agocontext "github.com/luckystrker/ago/context"
+	"github.com/luckystrker/ago/events"
 )
 
 // ChatConfig — модельный конфиг одного хода (config.ModelConfig). Один конфиг

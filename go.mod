@@ -3,8 +3,8 @@ module github.com/luckystrker/dio-agent
 go 1.24
 
 require (
-	ago v0.0.0
 	github.com/jackc/pgx/v5 v5.7.6
+	github.com/luckystrker/ago v0.6.0
 )
 
 require (
@@ -15,7 +15,3 @@ require (
 	golang.org/x/sync v0.13.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 )
-
-// Фреймворк ago — вендорная копия (см. AGENTS.md, спека §17): module path «ago»
-// не резолвится через прокси Go, поэтому подключён локально.
-replace ago => ./third_party/ago

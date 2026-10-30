@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"time"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 )
 
 // Типы событий WAL фоновых задач (колонка event_streams.type).

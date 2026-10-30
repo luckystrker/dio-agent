@@ -21,8 +21,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"ago/events"
-	agotest "ago/testing"
+	"github.com/luckystrker/ago/events"
+	agotest "github.com/luckystrker/ago/testing"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"

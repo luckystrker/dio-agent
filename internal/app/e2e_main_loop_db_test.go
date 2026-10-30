@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 )
 
 const (

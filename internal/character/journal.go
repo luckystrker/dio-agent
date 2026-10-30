@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"ago/events"
+	"github.com/luckystrker/ago/events"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"ago/events"
-	agostream "ago/stream"
+	"github.com/luckystrker/ago/events"
+	agostream "github.com/luckystrker/ago/stream"
 )
 
 // stamp фиксирует время события: replay должен сохранять его без изменений.
