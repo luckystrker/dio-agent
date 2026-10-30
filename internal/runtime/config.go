@@ -15,7 +15,10 @@
 package runtime
 
 import (
+	"time"
+
 	"fmt"
+	"github.com/luckystrker/dio-agent/internal/web"
 	"os"
 	"strconv"
 	"strings"
@@ -84,6 +87,20 @@ type Config struct {
 	Model       *ModelSettings
 	Telegram    *TelegramSettings
 	Embedding   *EmbeddingSettings
+	Web         *WebSettings
+}
+
+// WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
+// (off|ddg|tavily; off — веб выключен целиком, выражения «поиск выключен,
+// а fetch включён» не существует), fetch-слой всегда с guard-лимитами.
+type WebSettings struct {
+	Provider         string // off | ddg | tavily
+	APIKey           string // только tavily
+	MaxResults       int    // результатов поиска на вызов
+	FetchMaxBytes    int64  // потолок байт одного fetch
+	FetchTimeoutMs   int
+	MaxSearchPerTask int // бюджет поисков одной explore-задачи (§15/§16)
+	MaxFetchPerTask  int // бюджет загрузок одной explore-задачи
 }
 
 // Getenv — функция доступа к окружению; возвращает (значение, была-ли-задана).
@@ -130,6 +147,11 @@ func LoadConfig(env Getenv) (Config, error) {
 		return Config{}, err
 	}
 
+	web, err := parseWebSettings(env)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		DatabaseURL: databaseURL,
 		LogLevel:    logLevel,
@@ -137,6 +159,63 @@ func LoadConfig(env Getenv) (Config, error) {
 		Model:       model,
 		Telegram:    telegram,
 		Embedding:   embedding,
+		Web:         web,
+	}, nil
+}
+
+// parseWebSettings читает группу WEB_*: по умолчанию веб выключен (§15/§16 —
+// включение осознанное); ключ уместен только у провайдеров с ключами.
+func parseWebSettings(env Getenv) (*WebSettings, error) {
+	provider := strings.TrimSpace(lookupOrEmpty(env, "WEB_SEARCH_PROVIDER"))
+	if provider == "" {
+		provider = web.ProviderOff
+	}
+	apiKey := strings.TrimSpace(lookupOrEmpty(env, "WEB_SEARCH_API_KEY"))
+	maxResults, err := positiveInt(env, "WEB_SEARCH_MAX_RESULTS", 5)
+	if err != nil {
+		return nil, err
+	}
+	fetchBytes := int64(0)
+	if lookupOrEmpty(env, "WEB_FETCH_MAX_BYTES") != "" {
+		n, err := positiveInt(env, "WEB_FETCH_MAX_BYTES", int(web.DefaultMaxBytes))
+		if err != nil {
+			return nil, err
+		}
+		fetchBytes = int64(n)
+	}
+	fetchTimeoutMs, err := positiveInt(env, "WEB_FETCH_TIMEOUT_MS", int(web.DefaultTimeout/time.Millisecond))
+	if err != nil {
+		return nil, err
+	}
+	maxSearch, err := positiveInt(env, "WEB_MAX_SEARCH_PER_TASK", web.DefaultMaxSearchPerTask)
+	if err != nil {
+		return nil, err
+	}
+	maxFetch, err := positiveInt(env, "WEB_MAX_FETCH_PER_TASK", web.DefaultMaxFetchPerTask)
+	if err != nil {
+		return nil, err
+	}
+
+	switch provider {
+	case web.ProviderOff:
+		if apiKey != "" {
+			return nil, fmt.Errorf("WEB_SEARCH_API_KEY задан при выключенном вебе: поставь WEB_SEARCH_PROVIDER или убери ключ")
+		}
+	case web.ProviderDDG, web.ProviderTavily:
+		if provider == web.ProviderTavily && apiKey == "" {
+			return nil, fmt.Errorf("провайдер поиска tavily требует WEB_SEARCH_API_KEY")
+		}
+	default:
+		return nil, fmt.Errorf("WEB_SEARCH_PROVIDER=%q не из известных (off|ddg|tavily)", provider)
+	}
+	return &WebSettings{
+		Provider:         provider,
+		APIKey:           apiKey,
+		MaxResults:       maxResults,
+		FetchMaxBytes:    fetchBytes,
+		FetchTimeoutMs:   fetchTimeoutMs,
+		MaxSearchPerTask: maxSearch,
+		MaxFetchPerTask:  maxFetch,
 	}, nil
 }
 

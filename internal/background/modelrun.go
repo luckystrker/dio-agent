@@ -101,6 +101,11 @@ type turnModelRun struct {
 // tools — только инструменты памяти; scopeID — DI-аудитория (§9.2). На
 // инициативных ходах обращение к памяти не принуждается (§10.4).
 func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID string) (turnModelRun, error) {
+	return s.runTurnModelMW(ctx, operation, system, userText, tools, scopeID, nil)
+}
+
+// runTurnModelMW — то же с дополнительными middleware задачи (бюджеты веба §15).
+func (s *Scheduler) runTurnModelMW(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
 	cfg, err := s.model.Clone(nil)
 	if err != nil {
 		return turnModelRun{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
@@ -134,6 +139,9 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 	}
 	if len(tools) > 0 {
 		opts = append(opts, agent.WithTools(tools...))
+	}
+	if len(extraMW) > 0 {
+		opts = append(opts, agent.WithMiddleware(extraMW...))
 	}
 
 	ag := agent.New("dio-bg", system, opts...)

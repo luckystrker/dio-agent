@@ -18,6 +18,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
+	"github.com/luckystrker/dio-agent/internal/web"
 	"github.com/luckystrker/dio-agent/internal/worker"
 	"github.com/luckystrker/dio-agent/migrations"
 )
@@ -237,6 +238,23 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	// --- фон §14 ---
+	var webset *web.Toolset
+	if w := a.opts.Config.Web; w != nil && w.Provider != "off" {
+		fetchBytes := w.FetchMaxBytes
+		if fetchBytes <= 0 {
+			fetchBytes = web.DefaultMaxBytes
+		}
+		ws, werr := web.NewToolset(
+			web.NewClient(fetchBytes, time.Duration(w.FetchTimeoutMs)*time.Millisecond),
+			w.Provider, w.APIKey, w.MaxResults)
+		if werr != nil {
+			return a.stopFailed(werr)
+		}
+		webset = ws
+		a.logger.Printf("веб-инструменты включены: поиск %s (лимиты %d/%d на задачу, §15/§16)",
+			w.Provider, w.MaxSearchPerTask, w.MaxFetchPerTask)
+	}
+
 	sched, err := background.New(background.Deps{
 		Pool:            pool,
 		Journal:         a.journal,
@@ -244,6 +262,9 @@ func (a *App) Start(ctx context.Context) error {
 		Checkpoints:     runtime.NewPgCheckpointStore(ctx, pool),
 		Budget:          runtime.NewBudgetStore(pool),
 		Memory:          toolset,
+		Web:             webset,
+		WebMaxSearch:    webSearchLimit(a.opts.Config),
+		WebMaxFetch:     webFetchLimit(a.opts.Config),
 		Persona:         persona,
 		PromptTemplate:  template,
 		Model:           model,
@@ -485,6 +506,20 @@ func dailyCallsLimit(cfg runtime.Config) int64 {
 		return 0
 	}
 	return int64(cfg.Model.DailyCallsLimit)
+}
+
+func webSearchLimit(cfg runtime.Config) int {
+	if cfg.Web == nil || cfg.Web.MaxSearchPerTask <= 0 {
+		return web.DefaultMaxSearchPerTask
+	}
+	return cfg.Web.MaxSearchPerTask
+}
+
+func webFetchLimit(cfg runtime.Config) int {
+	if cfg.Web == nil || cfg.Web.MaxFetchPerTask <= 0 {
+		return web.DefaultMaxFetchPerTask
+	}
+	return cfg.Web.MaxFetchPerTask
 }
 
 func toolCallsLimit(cfg runtime.Config) int {

@@ -20,6 +20,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/web"
 )
 
 // Границы такта §14.2 («ориентировочно каждые 15–30 секунд с jitter»).
@@ -67,6 +68,9 @@ type Deps struct {
 	Checkpoints     *runtime.PgCheckpointStore // чекпоинты задач (task_checkpoints)
 	Budget          *runtime.BudgetStore       // резерв бюджета (§16, пул background)
 	Memory          *memory.Toolset            // инструменты памяти (§10.4); nil — без инструментов
+	Web             *web.Toolset               // веб-инструменты exploration (§15); nil или выключен — без веба
+	WebMaxSearch    int                        // бюджет поисков одной explore-задачи (§15/§16); 0 — дефолт
+	WebMaxFetch     int                        // бюджет загрузок одной explore-задачи; 0 — дефолт
 	Persona         character.Persona          // активная персона (§7.1)
 	PromptTemplate  string                     // каркас системного промпта (§7.1); пусто — встроенный
 	Model           *character.ChatConfig      // nil — модель не настроена: фон не мыслит
@@ -81,22 +85,25 @@ type Deps struct {
 // Модельные задачи исполняются последовательно в такте: один когнитивный
 // worker (§5.2) — планировщик не создаёт параллельной когниции.
 type Scheduler struct {
-	pool        *pgxpool.Pool
-	journal     *character.TurnJournal
-	wal         *runtime.TaskWAL
-	checkpoints *runtime.PgCheckpointStore
-	budget      *runtime.BudgetStore
-	memory      *memory.Toolset
-	persona     character.Persona
-	prompt      string
-	model       *character.ChatConfig
-	dailyLimit  int64
-	toolLimit   int
-	logger      *log.Logger
-	now         func() time.Time
-	rnd         *rand.Rand
-	intentions  *IntentionRepo
-	opts        Options
+	pool         *pgxpool.Pool
+	journal      *character.TurnJournal
+	wal          *runtime.TaskWAL
+	checkpoints  *runtime.PgCheckpointStore
+	budget       *runtime.BudgetStore
+	memory       *memory.Toolset
+	web          *web.Toolset
+	webMaxSearch int
+	webMaxFetch  int
+	persona      character.Persona
+	prompt       string
+	model        *character.ChatConfig
+	dailyLimit   int64
+	toolLimit    int
+	logger       *log.Logger
+	now          func() time.Time
+	rnd          *rand.Rand
+	intentions   *IntentionRepo
+	opts         Options
 
 	// Наблюдаемость роста очереди (§20): между тактами.
 	mu           sync.Mutex
@@ -132,22 +139,25 @@ func New(deps Deps, opts Options) (*Scheduler, error) {
 		rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	return &Scheduler{
-		pool:        deps.Pool,
-		journal:     deps.Journal,
-		wal:         deps.WAL,
-		checkpoints: deps.Checkpoints,
-		budget:      deps.Budget,
-		memory:      deps.Memory,
-		persona:     deps.Persona,
-		prompt:      deps.PromptTemplate,
-		model:       deps.Model,
-		dailyLimit:  deps.DailyCallsLimit,
-		toolLimit:   deps.ToolCallsLimit,
-		logger:      logger,
-		now:         now,
-		rnd:         rnd,
-		intentions:  NewIntentionRepo(deps.Pool),
-		opts:        opts.withDefaults(),
+		pool:         deps.Pool,
+		journal:      deps.Journal,
+		wal:          deps.WAL,
+		checkpoints:  deps.Checkpoints,
+		budget:       deps.Budget,
+		memory:       deps.Memory,
+		web:          deps.Web,
+		webMaxSearch: deps.WebMaxSearch,
+		webMaxFetch:  deps.WebMaxFetch,
+		persona:      deps.Persona,
+		prompt:       deps.PromptTemplate,
+		model:        deps.Model,
+		dailyLimit:   deps.DailyCallsLimit,
+		toolLimit:    deps.ToolCallsLimit,
+		logger:       logger,
+		now:          now,
+		rnd:          rnd,
+		intentions:   NewIntentionRepo(deps.Pool),
+		opts:         opts.withDefaults(),
 	}, nil
 }
 
