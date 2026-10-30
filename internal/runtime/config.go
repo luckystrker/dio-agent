@@ -2,8 +2,9 @@
 //
 // Список переменных сверён с .env.example и TS-источником (src/runtime/config.ts,
 // поведение-справочник этапа 8): обязательный DATABASE_URL; перечислимые
-// LOG_LEVEL/NODE_ENV; Telegram (токен/dry-run/api base) и модель (endpoint,
-// ключ, имя + числовые лимиты) — группами.
+// LOG_LEVEL/NODE_ENV; Telegram (токен/dry-run/api base), модель (endpoint,
+// ключ, имя + числовые лимиты) и векторизатор (EMBEDDING_*: endpoint, ключ,
+// имя) — группами.
 //
 // Валидация при старте строгая (требование 9.1): неизвестное значение
 // перечислимой переменной, невалидное число или противоречивая комбинация —
@@ -53,6 +54,17 @@ type ModelSettings struct {
 	HistoryMaxChars int // потолок суммарного объёма истории
 }
 
+// EmbeddingSettings — векторизатор для семантического поиска памяти
+// (§10.4 п.4): OpenAI-совместимый endpoint (POST {endpoint}/embeddings).
+// Все три поля обязательны вместе: векторизатор либо настроен целиком,
+// либо семантический поиск выключен (full-text остаётся).
+type EmbeddingSettings struct {
+	Endpoint  string
+	APIKey    string
+	Model     string
+	TimeoutMs int
+}
+
 // TelegramSettings — доступ к Bot API. Telegram включён, если задан токен
 // (живой режим) или dry-run (локальная отладка без токена).
 type TelegramSettings struct {
@@ -63,13 +75,14 @@ type TelegramSettings struct {
 
 // Config — конфигурация приложения. Model == nil — модель не настроена
 // (ходы помечаются пропуском с причиной); Telegram == nil — polling и
-// доставка выключены.
+// доставка выключены; Embedding == nil — семантический поиск памяти выключен.
 type Config struct {
 	DatabaseURL string
 	LogLevel    LogLevel
 	NodeEnv     NodeEnv
 	Model       *ModelSettings
 	Telegram    *TelegramSettings
+	Embedding   *EmbeddingSettings
 }
 
 // Getenv — функция доступа к окружению; возвращает (значение, была-ли-задана).
@@ -111,12 +124,52 @@ func LoadConfig(env Getenv) (Config, error) {
 		return Config{}, err
 	}
 
+	embedding, err := parseEmbeddingSettings(env)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		DatabaseURL: databaseURL,
 		LogLevel:    logLevel,
 		NodeEnv:     nodeEnv,
 		Model:       model,
 		Telegram:    telegram,
+		Embedding:   embedding,
+	}, nil
+}
+
+// parseEmbeddingSettings читает группу EMBEDDING_*: три переменные вместе или
+// ни одной (паритет с модельной группой); таймаут — отдельная числовая.
+func parseEmbeddingSettings(env Getenv) (*EmbeddingSettings, error) {
+	endpoint := strings.TrimSpace(lookupOrEmpty(env, "EMBEDDING_ENDPOINT"))
+	apiKey := strings.TrimSpace(lookupOrEmpty(env, "EMBEDDING_API_KEY"))
+	model := strings.TrimSpace(lookupOrEmpty(env, "EMBEDDING_MODEL"))
+
+	present := 0
+	for _, v := range []string{endpoint, apiKey, model} {
+		if v != "" {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil, nil // векторизатор не настроен — семантический поиск выключен
+	}
+	if present < 3 {
+		return nil, fmt.Errorf(
+			"векторизатор настроен частично (%d из 3): нужны EMBEDDING_ENDPOINT, EMBEDDING_API_KEY и EMBEDDING_MODEL вместе — или уберите все три", present)
+	}
+
+	timeoutMs, err := positiveInt(env, "EMBEDDING_TIMEOUT_MS", 30_000)
+	if err != nil {
+		return nil, err
+	}
+
+	return &EmbeddingSettings{
+		Endpoint:  endpoint,
+		APIKey:    apiKey,
+		Model:     model,
+		TimeoutMs: timeoutMs,
 	}, nil
 }
 

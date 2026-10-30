@@ -229,3 +229,79 @@ func TestLoadConfigModel(t *testing.T) {
 		}
 	})
 }
+
+// Векторизатор семантического поиска (этап 9.3, §10.4): группа EMBEDDING_*
+// включается только целиком; не настроен — семантика выключена.
+func TestLoadConfigEmbedding(t *testing.T) {
+	full := map[string]string{
+		"DATABASE_URL":       "x",
+		"EMBEDDING_ENDPOINT": "https://api.example.com/v1",
+		"EMBEDDING_API_KEY":  "key",
+		"EMBEDDING_MODEL":    "text-embedding-3-small",
+	}
+
+	t.Run("полная настройка с таймаутом", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		env["EMBEDDING_TIMEOUT_MS"] = "5000"
+		cfg, err := LoadConfig(envOf(env))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.Embedding == nil {
+			t.Fatal("векторизатор должен быть настроен")
+		}
+		if cfg.Embedding.Endpoint != "https://api.example.com/v1" || cfg.Embedding.Model != "text-embedding-3-small" || cfg.Embedding.TimeoutMs != 5000 {
+			t.Errorf("значения не применились: %+v", cfg.Embedding)
+		}
+	})
+
+	t.Run("умолчание таймаута", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		cfg, err := LoadConfig(envOf(env))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.Embedding.TimeoutMs != 30_000 {
+			t.Errorf("таймаут по умолчанию = %d, хочу 30000", cfg.Embedding.TimeoutMs)
+		}
+	})
+
+	t.Run("не настроен — семантика выключена", func(t *testing.T) {
+		cfg, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x"}))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.Embedding != nil {
+			t.Errorf("без EMBEDDING_* векторизатор должен быть выключен, получено %+v", cfg.Embedding)
+		}
+	})
+
+	t.Run("частичная настройка — ошибка", func(t *testing.T) {
+		_, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL":       "x",
+			"EMBEDDING_ENDPOINT": "https://x",
+			"EMBEDDING_API_KEY":  "k",
+		}))
+		if err == nil || !strings.Contains(err.Error(), "векторизатор настроен частично (2 из 3)") {
+			t.Fatalf("ожидаю ошибку частичной настройки, получено: %v", err)
+		}
+	})
+
+	t.Run("невалидный таймаут — ошибка с именем переменной", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		env["EMBEDDING_TIMEOUT_MS"] = "ноль"
+		_, err := LoadConfig(envOf(env))
+		if err == nil || !strings.Contains(err.Error(), "EMBEDDING_TIMEOUT_MS") {
+			t.Fatalf("ожидаю ошибку с именем переменной, получено: %v", err)
+		}
+	})
+}

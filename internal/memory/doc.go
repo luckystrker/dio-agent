@@ -1,5 +1,11 @@
-// Package memory — единая память (§4, §8–§10): entities, memory items,
-// связи, stances, provenance, retrieval, консолидация.
+// Package memory — единая память (спека §4, §8–§10): entities, memory items,
+// связи, stances, provenance, retrieval.
 //
-// Этап 9.3; в 9.1 пакет только фиксирует границы модуля.
+// 9.3: репозитории таблиц памяти (миграции 9.1), поиск — exact/alias,
+// full-text (tsvector), семантический (pgvector, векторизатор через
+// OpenAI-совместимый endpoint из конфигурации EMBEDDING_*), retrieval как
+// ago-инструменты только для чтения с фильтром приватности §9.2 до выдачи
+// и forced-маркером на memory_search (проводку на прямом обращении делает
+// модуль хода 9.4). Запись памяти кандидатами хода и консолидация — этапы
+// 9.4/9.6 поверх этих репозиториев.
 package memory
