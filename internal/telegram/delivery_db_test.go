@@ -216,8 +216,8 @@ func TestDeliveryLoopTimeoutBecomesUnknownAndCancelsDependents(t *testing.T) {
 }
 
 func TestDeliveryLoopStalenessCancelsBubbles(t *testing.T) {
-	// §13.3: новые события чата после создания turn делают продолжение
-	// неуместным — оставшиеся bubbles отменяются.
+	// §13.3: новые события чата делают хвостовые bubbles неуместными —
+	// отменяются; первый пузырь (позиция 0) уже ушёл как прямой ответ.
 	pool := newTestPool(t)
 	ctx := context.Background()
 	stub := &telegramStub{}
@@ -231,7 +231,8 @@ func TestDeliveryLoopStalenessCancelsBubbles(t *testing.T) {
 		VALUES (9001, 42, 'private', 'message', '{}', 'pending')`); err != nil {
 		t.Fatalf("pending-событие не вставлено: %v", err)
 	}
-	insertOutbox(t, pool, 140, 42, 0, `{"kind":"message","text":"уже неуместно"}`)
+	insertOutboxSent(t, pool, 140, 42, 0, `{"kind":"message","text":"прямой ответ"}`)
+	insertOutbox(t, pool, 140, 42, 1, `{"kind":"message","text":"уже неуместно"}`)
 
 	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{})
 	if err := loop.Tick(ctx); err != nil {
@@ -241,14 +242,51 @@ func TestDeliveryLoopStalenessCancelsBubbles(t *testing.T) {
 	var status string
 	var lastError *string
 	if err := pool.QueryRow(ctx,
-		`SELECT status, last_error FROM delivery_outbox WHERE turn_id = 140`).Scan(&status, &lastError); err != nil {
+		`SELECT status, last_error FROM delivery_outbox WHERE turn_id = 140 AND position = 1`).
+		Scan(&status, &lastError); err != nil {
 		t.Fatalf("строка не читается: %v", err)
 	}
 	if status != "cancelled" || lastError == nil {
-		t.Fatalf("устаревший пузырь должен быть отменён: %s %v", status, lastError)
+		t.Fatalf("устаревший хвостовой пузырь должен быть отменён: %s %v", status, lastError)
 	}
 	if len(stub.sentMessages()) != 0 {
 		t.Fatalf("устаревшее не должно было уйти в сеть")
+	}
+}
+
+// TestDeliveryLoopStalenessKeepsFirstBubble — первый пузырь (позиция 0) —
+// прямой ответ, ради которого ход состоялся: уходит всегда, даже если чат
+// ушёл вперёд (портировано из TS-линии c0a986d, 2026-10-31).
+func TestDeliveryLoopStalenessKeepsFirstBubble(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+	repo := NewOutboxRepo(pool)
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, kind, raw_update, status)
+		VALUES (9101, 42, 'private', 'message', '{}', 'pending')`); err != nil {
+		t.Fatalf("pending-событие не вставлено: %v", err)
+	}
+	insertOutbox(t, pool, 141, 42, 0, `{"kind":"message","text":"прямой ответ"}`)
+
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM delivery_outbox WHERE turn_id = 141 AND position = 0`).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("первый пузырь должен уйти при устаревании чата, статус %s", status)
+	}
+	if len(stub.sentMessages()) != 1 {
+		t.Fatalf("первый пузырь не дошёл до сети: %v", stub.sentMessages())
 	}
 }
 

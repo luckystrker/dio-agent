@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -112,7 +113,18 @@ func ParseTurnResult(raw []byte) (TurnResult, error) {
 	dec.DisallowUnknownFields()
 	var r TurnResult
 	if err := dec.Decode(&r); err != nil {
-		return TurnResult{}, fmt.Errorf("turnresult: %w", err)
+		// Модель иногда отдаёт почти-JSON: двойное двоеточие после ключа
+		// ({"messages":: ...}) — чиним известный изъян и пробуем снова;
+		// строгая валидация полей всё равно впереди (TS-линия c0a986d).
+		fixed := doubleColonRe.ReplaceAllString(string(raw), `":`)
+		if fixed == string(raw) {
+			return TurnResult{}, fmt.Errorf("turnresult: %w", err)
+		}
+		dec = json.NewDecoder(bytes.NewReader([]byte(fixed)))
+		dec.DisallowUnknownFields()
+		if err = dec.Decode(&r); err != nil {
+			return TurnResult{}, fmt.Errorf("turnresult: %w", err)
+		}
 	}
 	if dec.More() {
 		return TurnResult{}, fmt.Errorf("turnresult: после JSON-объекта есть лишний текст")
@@ -258,6 +270,10 @@ func (r TurnResult) Validate() error {
 	}
 	return nil
 }
+
+// doubleColonRe — известный изъян аргументов/ответов: двойное двоеточие после
+// ключа ({"messages":: ...}).
+var doubleColonRe = regexp.MustCompile(`"\s*::`)
 
 // stripInertContradictions вычищает поля без эффекта при выбранном decision
 // (§11.3: runtime может мягко подавить часть результата): мусор в необязательных

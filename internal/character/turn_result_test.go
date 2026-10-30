@@ -109,6 +109,39 @@ func TestTurnResultStripsConfidenceOffClaim(t *testing.T) {
 	}
 }
 
+// TestParseTurnResultDoubleColonRepair — известный изъян модели: двойное
+// двоеточие после ключа чинится до валидации (TS-линия c0a986d).
+func TestParseTurnResultDoubleColonRepair(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":: ["ок"]}`))
+	if err != nil {
+		t.Fatalf("двойное двоеточие не отремонтировано: %v", err)
+	}
+	if len(r.Messages) != 1 || r.Messages[0] != "ок" {
+		t.Fatalf("после ремонта поля прочитаны неверно: %+v", r)
+	}
+	// Обычный битый JSON по-прежнему ошибка.
+	if _, err := ParseTurnResult([]byte(`{"decision":`)); err == nil {
+		t.Fatal("обрыв JSON должен оставаться ошибкой")
+	}
+}
+
+// TestWantForcedTool — force: прямой ход, память есть, первая попытка
+// (повторы без forced — thinking-режимы, c0a986d).
+func TestWantForcedTool(t *testing.T) {
+	if !wantForcedTool(Input{Direct: true, Attempt: 1}, true) {
+		t.Fatal("прямой ход, попытка 1 — force нужен")
+	}
+	if wantForcedTool(Input{Direct: true, Attempt: 2}, true) {
+		t.Fatal("повторная попытка — без force")
+	}
+	if wantForcedTool(Input{Direct: false, Attempt: 1}, true) {
+		t.Fatal("фон — без force")
+	}
+	if wantForcedTool(Input{Direct: true, Attempt: 1}, false) {
+		t.Fatal("без инструментов памяти force не имеет смысла")
+	}
+}
+
 // TestTurnResultAnswerWithReaction — необязательная reaction при answer
 // допустима (§11.2: «speak содержит 1–4 сообщения; необязательная reaction
 // разрешена»); правило «только при react» из TS-реализации противоречило

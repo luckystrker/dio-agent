@@ -26,6 +26,19 @@ func insertOutbox(t *testing.T, pool *pgxpool.Pool, turnID, chatID int64, positi
 	return id
 }
 
+// insertOutboxSent — уже доставленная строка (позиция 0 первого пузыря).
+func insertOutboxSent(t *testing.T, pool *pgxpool.Pool, turnID, chatID int64, position int, payload string) int64 {
+	t.Helper()
+	var id int64
+	if err := pool.QueryRow(context.Background(),
+		`INSERT INTO delivery_outbox (turn_id, position, chat_id, payload, status, telegram_message_id)
+		 VALUES ($1, $2, $3, $4::jsonb, 'sent', 500) RETURNING id`,
+		turnID, position, chatID, payload).Scan(&id); err != nil {
+		t.Fatalf("sent-outbox-строка не вставлена: %v", err)
+	}
+	return id
+}
+
 // mustClaim захватывает очередь, роняя тест при ошибке.
 func mustClaim(t *testing.T, repo *OutboxRepo, limit int) []OutboxItem {
 	t.Helper()

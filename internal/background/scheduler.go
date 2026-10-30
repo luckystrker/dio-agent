@@ -60,6 +60,12 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// InitiativeQuietWindow — окно тишины: инициатива не лезет в чат, где
+// собеседник активен последние 30 минут (§14.3; решение TS-линии 132807e,
+// портировано 2026-10-31 — прежнее сравнение с createdAt намерения убивало
+// проактивность от любого сообщения за часы до срока).
+const InitiativeQuietWindow = 30 * time.Minute
+
 // Deps — зависимости планировщика.
 type Deps struct {
 	Pool            *pgxpool.Pool
@@ -106,10 +112,11 @@ type Scheduler struct {
 	opts         Options
 
 	// Наблюдаемость роста очереди (§20): между тактами.
-	mu           sync.Mutex
-	lastPending  int
-	growthStreak int
-	growthWarned bool
+	lastBudgetWarn time.Time // варн об исчерпании бюджета — не чаще раза в сутки
+	mu             sync.Mutex
+	lastPending    int
+	growthStreak   int
+	growthWarned   bool
 }
 
 // New строит планировщик.

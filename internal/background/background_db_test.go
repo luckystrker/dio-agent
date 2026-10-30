@@ -143,13 +143,48 @@ func TestIntentionGates(t *testing.T) {
 
 	t.Run("чат ушёл вперёд — намерение неактуально", func(t *testing.T) {
 		id := f.createIntention(t, ctx, KindReplyLater, "старая тема", -6, bgChatID)
-		// Новое событие чата после создания намерения: тема ушла (§14.3).
+		// Событие минуту назад: чат активен, инициатива неуместна (§14.3).
 		f.seedPrivateChat(t, ctx, "уже другая тема!", f.now.Add(time.Minute))
 		if err := f.sched.Tick(ctx); err != nil {
 			t.Fatalf("такт не удался: %v", err)
 		}
 		if st := f.intentionStatus(t, ctx, id); st != "cancelled" {
-			t.Fatalf("намерение по ушедшей теме должно быть cancelled, статус %s", st)
+			t.Fatalf("инициатива в активном чате должна быть cancelled, статус %s", st)
+		}
+	})
+
+	// Портировано из TS-линии 132807e (2026-10-31): сравнение с createdAt
+	// намерения убивало проактивность от любого сообщения за часы до срока.
+	// Теперь инициатива жива, если в чате тихо InitiativeQuietWindow (30 мин).
+	t.Run("сообщение старше окна тишины не убивает инициативу", func(t *testing.T) {
+		f2, ctx2 := newFixture(t)
+		f2.withModel(t,
+			&events.ModelResponse{Message: &events.ModelMessage{Content: initiativeTurnJSON}})
+		// Намерение создано 6 часов назад; сообщение пришло 2 часа назад —
+		// после создания, но за пределами 30-минутного окна тишины.
+		f2.seedPrivateChat(t, ctx2, "кидай как соберёшь", f2.now.Add(-2*time.Hour))
+		id := f2.createIntention(t, ctx2, KindReplyLater, "давно не общались про сборку", -6, bgChatID)
+		if err := f2.sched.Tick(ctx2); err != nil {
+			t.Fatalf("такт не удался: %v", err)
+		}
+		if st := f2.intentionStatus(t, ctx2, id); st != "completed" {
+			t.Fatalf("инициатива при тишине 2 часа должна исполниться, статус %s", st)
+		}
+	})
+
+	t.Run("explore не глядит на активность чата", func(t *testing.T) {
+		f3, ctx3 := newFixture(t)
+		f3.withModel(t,
+			&events.ModelResponse{Message: &events.ModelMessage{Content: exploreTurnJSON}})
+		// Свежее сообщение минуту назад: для инициативы это отмена, explore —
+		// внутреннее действие, чат не трогает.
+		f3.seedPrivateChat(t, ctx3, "а вот ещё новость", f3.now.Add(time.Minute))
+		id := f3.createIntention(t, ctx3, KindExplore, "тема про термояд", -1, bgChatID)
+		if err := f3.sched.Tick(ctx3); err != nil {
+			t.Fatalf("такт не удался: %v", err)
+		}
+		if st := f3.intentionStatus(t, ctx3, id); st == "cancelled" {
+			t.Fatal("explore не должен отменяться гейтом активности чата (132807e)")
 		}
 	})
 }
@@ -431,11 +466,13 @@ func TestDeferOnDirectWork(t *testing.T) {
 		t.Fatalf("намерение должно остаться в pending (фон отложен), статус %s", st)
 	}
 
-	// Прямой ход применён — фон снова может работать.
+	// Прямой ход применён — фон снова может работать. Часы прокручиваются за
+	// окно тишины (§14.3): прямой ход только что был, инициатива ждёт тишины.
 	if _, err := f.pool.Exec(ctx,
 		`UPDATE turns SET status = 'applied', applied_at = now() WHERE id = $1`, turnID); err != nil {
 		t.Fatalf("прямой ход не применён: %v", err)
 	}
+	f.setNow(f.now.Add(InitiativeQuietWindow + time.Minute))
 	if err := f.sched.Tick(ctx); err != nil {
 		t.Fatalf("такт после прямого обращения не удался: %v", err)
 	}

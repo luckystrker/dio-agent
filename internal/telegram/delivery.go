@@ -138,16 +138,18 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		return
 	}
 
-	// §13.3: перед отправкой — устаревание. Новые события чата после создания
-	// turn делают продолжение неуместным: оставшиеся bubbles отменяются.
-	// При сомнении — остановить последовательность и обработать свежий контекст.
+	// §13.3: перед отправкой — устаревание. Новые события чата делают
+	// продолжение неуместным: хвостовые bubbles отменяются. Первый пузырь —
+	// прямой ответ, ради которого ход состоялся: уходит всегда, даже если
+	// следом пришло новое — ответить позже лучше, чем не ответить вовсе
+	// (портировано из TS-линии c0a986d, 2026-10-31).
 	stale, err := l.chatHasNewPendingEvents(ctx, row.ChatID)
 	if err != nil {
 		l.logger.Printf("delivery: устаревание не проверяется (строка %d остаётся в sending до recovery): %v",
 			row.ID, err)
 		return
 	}
-	if stale {
+	if stale && row.Position > 0 {
 		cancelled, cerr := l.repo.CancelTurnFrom(ctx, row.TurnID, row.Position, "чат ушёл вперёд — пузыри устарели")
 		if cerr != nil {
 			l.logger.Printf("delivery: отмена устаревших пузырей turn %d не удалась: %v", row.TurnID, cerr)

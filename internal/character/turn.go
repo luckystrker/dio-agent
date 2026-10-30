@@ -46,6 +46,14 @@ func sessionForChat(chatID int64) string {
 	return fmt.Sprintf("dio-%016x", h.Sum64())
 }
 
+// wantForcedTool — принуждение первого вызова памяти: только прямой ход и
+// только первая попытка. Повторы идут без forced tool_choice: thinking-режимы
+// части провайдеров с ним несовместимы, а повторная генерация уже аварийная
+// (портировано из TS-линии c0a986d, 2026-10-31).
+func wantForcedTool(in Input, hasMemory bool) bool {
+	return in.Direct && hasMemory && in.Attempt <= 1
+}
+
 // ErrModelNotConfigured — модель не настроена: ход не выполняется и не
 // помечается терминальным пропуском (конфигурация приходит — ход повторится).
 var ErrModelNotConfigured = errors.New("модель не настроена (MODEL_ENDPOINT/API_KEY/MODEL)")
@@ -207,7 +215,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
 	// получает обычный вызов и может ответить финальным TurnResult.
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
-	if in.Direct && r.Memory != nil {
+	if wantForcedTool(in, r.Memory != nil) {
 		// Forced tool-calling на прямом обращении (§10.4): первый вызов модели
 		// обязан обратиться к forced-инструменту памяти — гарантия «прямой
 		// вопрос всегда получает нужную память» держится механикой провайдера.

@@ -61,27 +61,37 @@ func ClampMoodDelta(delta MoodDelta) MoodDelta {
 	return out
 }
 
-// DescribeMood — детерминированное текстовое представление (§7.2) для контекста хода.
-func DescribeMood(mood Mood) string {
+// DescribeMood — детерминированное текстовое представление (§7.2) для контекста
+// хода. Сравнивается с базовой линией persona, а не с нулём: у Дио baseline
+// valence 0.1, и абсолютные пороги прятали небольшие, но заметные сдвиги
+// (портировано из TS-линии 132807e, 2026-10-31).
+func DescribeMood(mood, baseline Mood) string {
 	var parts []string
+	v := mood.Valence - baseline.Valence
 	switch {
-	case mood.Valence > 0.3:
+	case v > 0.4:
 		parts = append(parts, "в приподнятом настроении")
-	case mood.Valence < -0.3:
+	case v > 0.12:
+		parts = append(parts, "чуть оживлён")
+	case v < -0.4:
 		parts = append(parts, "в подавленном настроении")
+	case v < -0.12:
+		parts = append(parts, "не в духе")
 	default:
 		parts = append(parts, "в ровном настроении")
 	}
+	a := mood.Arousal - baseline.Arousal
 	switch {
-	case mood.Arousal > 0.65:
+	case a > 0.2:
 		parts = append(parts, "взволнован")
-	case mood.Arousal < 0.3:
+	case a < -0.15:
 		parts = append(parts, "спокоен")
 	}
+	se := mood.SocialEnergy - baseline.SocialEnergy
 	switch {
-	case mood.SocialEnergy < 0.3:
+	case se < -0.2:
 		parts = append(parts, "мало сил на общение")
-	case mood.SocialEnergy > 0.7:
+	case se > 0.15:
 		parts = append(parts, "полон желания общаться")
 	}
 	out := ""

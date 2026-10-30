@@ -423,14 +423,19 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 		}
 	}
 
-	// «Чат ушёл вперёд» (§14.1: тема закрылась / ответ уже дан): свежие события
-	// или отправленные доставки новее создания намерения.
-	moved, err := s.intentions.ChatMoved(ctx, it.TargetChatID, it.CreatedAt)
-	if err != nil {
-		return false, "", err
-	}
-	if moved {
-		return true, "чат ушёл вперёд — намерение неактуально (§14.3)", nil
+	// «Не лезем в активный чат» (§14.3; портировано из TS-линии 132807e,
+	// 2026-10-31): инициатива уместна, когда в чате тихо InitiativeQuietWindow.
+	// Прежнее сравнение с createdAt намерения убивало инициативу от любого
+	// сообщения за часы до срока — Дио не писал первым никогда. explore —
+	// внутреннее действие, чат не трогает: гейт ему не нужен.
+	if it.Kind != KindExplore {
+		moved, err := s.intentions.ChatMoved(ctx, it.TargetChatID, now.Add(-InitiativeQuietWindow))
+		if err != nil {
+			return false, "", err
+		}
+		if moved {
+			return true, "чат активен — инициатива неуместна (§14.3)", nil
+		}
 	}
 	return false, "", nil
 }
@@ -455,7 +460,8 @@ func (s *Scheduler) generateInitiative(ctx context.Context, it Intention, op, sc
 	if err != nil {
 		return turnModelRun{}, err
 	}
-	userText := fmt.Sprintf("Твоё отложенное намерение: %s по теме «%s» (причина: %s). Напиши собеседнику, если уместно.",
+	userText := fmt.Sprintf("Твоё отложенное намерение: %s по теме «%s» (причина: %s). Напиши собеседнику, если уместно. "+
+		"Новых намерений (intentions) в этом ходе не предлагай — инициатива уже случилась.",
 		it.Kind, it.Topic, it.Reason)
 	return s.runTurnModel(ctx, op, system, userText, s.memoryTools(), scope, sessionForChat(it.TargetChatID), nil)
 }
@@ -490,7 +496,7 @@ func (s *Scheduler) stateContext(ctx context.Context, chatID int64, scope, adden
 	if err != nil {
 		return "", fmt.Errorf("фон: настроение не читается: %w", err)
 	}
-	extras := character.PromptExtras{MoodLine: character.DescribeMood(moodNow)}
+	extras := character.PromptExtras{MoodLine: character.DescribeMood(moodNow, s.persona.MoodBaseline)}
 
 	var actorID *int64
 	var actorName *string

@@ -137,9 +137,9 @@ func TestBehaviorDirectQuestionBeatsSuppressedInitiative(t *testing.T) {
 		t.Fatalf("прямой вопрос без ответа: %q", got)
 	}
 
-	// Отложенная инициатива по той же теме, срок уже пришёл. Чат ушёл вперёд:
-	// событие и отправленный ответ новее создания намерения — гейт гасит её
-	// без сообщения пользователю (§14.3).
+	// Отложенная инициатива по той же теме, срок уже пришёл. Чат активен
+	// (вопрос и ответ — минуты назад): гейт тишины гасит её без сообщения
+	// пользователю (§14.3; семантика TS-линии 132807e).
 	provenanceID, err := (memory.SourceRepo{}).EnsureProvenance(context.Background(), h.pool,
 		memory.SourceJournalEvent, "turn:0", []string{memory.ChatScope("200804")})
 	if err != nil {
@@ -156,14 +156,14 @@ func TestBehaviorDirectQuestionBeatsSuppressedInitiative(t *testing.T) {
 
 	// Инициатива погашена гейтом — второго сообщения о теме нет (§21.2: повторы
 	// темы подавляются независимо от доступности памяти).
-	eventually(t, "инициатива погашена гейтом актуальности", func() bool {
+	eventually(t, "инициатива погашена гейтом тишины", func() bool {
 		st, ok := queryStringOK(h, `SELECT status FROM intentions WHERE kind = 'check_in' AND target_chat_id = $1`, chat)
 		return ok && (st == "cancelled" || st == "failed")
 	})
 	if n := len(h.api.callsOf("sendMessage")); n != 1 {
 		t.Fatalf("инициатива написала поверх свежего ответа: %d sendMessage, хочу 1", n)
 	}
-	if reason := queryString(h, `SELECT coalesce(reason,'') FROM intentions WHERE kind = 'check_in' AND target_chat_id = $1`, chat); !strings.Contains(reason, "чат ушёл вперёд") {
+	if reason := queryString(h, `SELECT coalesce(reason,'') FROM intentions WHERE kind = 'check_in' AND target_chat_id = $1`, chat); !strings.Contains(reason, "чат активен") {
 		t.Fatalf("инициатива погашена не по «чат ушёл вперёд»: %q", reason)
 	}
 }

@@ -71,7 +71,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	if err != nil {
 		return BaseContext{}, fmt.Errorf("контекст: настроение: %w", err)
 	}
-	out.MoodLine = DescribeMood(moodNow)
+	out.MoodLine = DescribeMood(moodNow, persona.MoodBaseline)
 
 	// --- актор пачки: карточка человека (§7.3), сущность в scope чата ---
 	actor, err := a.resolveActor(ctx, db, batch, scopeID)

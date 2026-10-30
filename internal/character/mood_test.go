@@ -67,17 +67,36 @@ func TestClampMoodDeltaKeepsNil(t *testing.T) {
 }
 
 func TestDescribeMoodDeterministicBands(t *testing.T) {
+	zero := Mood{} // нулевая базовая линия: абсолютные пороги
 	cases := []struct {
+		mood     Mood
+		baseline Mood
+		want     string
+	}{
+		{Mood{Valence: 0.5, Arousal: 0.7, SocialEnergy: 0.8}, zero, "в приподнятом настроении, взволнован, полон желания общаться"},
+		{Mood{Valence: -0.5, Arousal: -0.3, SocialEnergy: -0.3}, zero, "в подавленном настроении, спокоен, мало сил на общение"},
+		{Mood{}, zero, "в ровном настроении"}, // настроение равно базовой линии
+	}
+	for _, tc := range cases {
+		if got := DescribeMood(tc.mood, tc.baseline); got != tc.want {
+			t.Fatalf("DescribeMood(%+v, %+v) = %q, хочу %q", tc.mood, tc.baseline, got, tc.want)
+		}
+	}
+
+	// Относительно базовой линии Дио (0.1/0.7/0.9): абсолютные пороги прятали
+	// небольшие, но заметные сдвиги (132807e).
+	base := Mood{Valence: 0.1, Arousal: 0.7, SocialEnergy: 0.9}
+	rel := []struct {
 		mood Mood
 		want string
 	}{
-		{Mood{Valence: 0.5, Arousal: 0.7, SocialEnergy: 0.8}, "в приподнятом настроении, взволнован, полон желания общаться"},
-		{Mood{Valence: -0.5, Arousal: 0.2, SocialEnergy: 0.2}, "в подавленном настроении, спокоен, мало сил на общение"},
-		{Mood{Valence: 0, Arousal: 0.5, SocialEnergy: 0.5}, "в ровном настроении"},
+		{Mood{Valence: 0.25, Arousal: 0.95, SocialEnergy: 0.9}, "чуть оживлён, взволнован"},
+		{Mood{Valence: -0.05, Arousal: 0.7, SocialEnergy: 0.9}, "не в духе"},
+		{Mood{Valence: 0.1, Arousal: 0.7, SocialEnergy: 0.9}, "в ровном настроении"},
 	}
-	for _, tc := range cases {
-		if got := DescribeMood(tc.mood); got != tc.want {
-			t.Fatalf("DescribeMood(%+v) = %q, хочу %q", tc.mood, got, tc.want)
+	for _, tc := range rel {
+		if got := DescribeMood(tc.mood, base); got != tc.want {
+			t.Fatalf("DescribeMood(%+v, base) = %q, хочу %q", tc.mood, got, tc.want)
 		}
 	}
 }
