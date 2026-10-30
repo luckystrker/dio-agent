@@ -30,6 +30,21 @@ func TestRenderPersonaBlock(t *testing.T) {
 	}
 }
 
+func TestRenderPersonaBlockInterests(t *testing.T) {
+	// Интересы (§7.1, решение 2026-10-31): с секцией — строка тем; без —
+	// сироты-строки нет.
+	withInterests := testPersona()
+	withInterests.Interests = []string{"старое железо", "море"}
+	block := RenderPersonaBlock(withInterests)
+	if !strings.Contains(block, "Темы, о которых тебе интересно говорить: старое железо, море.") {
+		t.Fatalf("интересы не в персона-блоке:\n%s", block)
+	}
+	without := RenderPersonaBlock(testPersona())
+	if strings.Contains(without, "интересно говорить") {
+		t.Fatalf("без интересов строка тем не должна рендериться:\n%s", without)
+	}
+}
+
 func TestRenderSystemPromptEmptyLabelDropsParagraph(t *testing.T) {
 	// {{relationship}} пуст — весь абзац про отношение исчезает.
 	template := "{{persona}}\n\nОтношение к собеседнику: {{relationship}}.\n\nТвоё состояние: {{mood}}."

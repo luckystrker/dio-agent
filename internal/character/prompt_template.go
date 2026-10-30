@@ -37,12 +37,15 @@ type PromptExtras struct {
 }
 
 // RenderPersonaBlock — текстовая персона-блок: кто я, манера речи, ценности,
-// заданная биография.
+// интересы, заданная биография.
 func RenderPersonaBlock(p Persona) string {
 	lines := []string{
 		fmt.Sprintf("Ты — %s. %s", p.Name, p.Description),
 		fmt.Sprintf("Манера речи: %s", p.SpeechStyle),
 		fmt.Sprintf("Ценности: %s.", strings.Join(p.Values, ", ")),
+	}
+	if len(p.Interests) > 0 {
+		lines = append(lines, fmt.Sprintf("Темы, о которых тебе интересно говорить: %s.", strings.Join(p.Interests, ", ")))
 	}
 	if p.SeedBio != nil {
 		lines = append(lines, fmt.Sprintf("Твоя биография: %s", *p.SeedBio))

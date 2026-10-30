@@ -187,9 +187,65 @@ func TestClientChatActionAndReaction(t *testing.T) {
 		calls[1] != "/botTESTTOKEN/setMessageReaction" {
 		t.Fatalf("пути: %v", calls)
 	}
-	if bodies[0]["action"] != "typing" || bodies[1]["emoji"] != "🔥" || bodies[1]["message_id"].(float64) != 777 {
+	if bodies[0]["action"] != "typing" || bodies[1]["message_id"].(float64) != 777 {
 		t.Fatalf("payload: %v", bodies)
 	}
+	// Контракт Bot API: reaction — список ReactionTypeEmoji (в JSON-теле —
+	// настоящий массив). Параметр «emoji» Telegram молча игнорирует —
+	// реакция «доставлена» по outbox и не видна в чате (находка приёмки Р).
+	reactionList, ok := bodies[1]["reaction"].([]any)
+	if !ok || len(reactionList) != 1 {
+		t.Fatalf("payload реакции — список из одного: %v", bodies[1]["reaction"])
+	}
+	reaction, ok := reactionList[0].(map[string]any)
+	if !ok || reaction["type"] != "emoji" || reaction["emoji"] != "🔥" {
+		t.Fatalf("ReactionTypeEmoji: %v", reactionList[0])
+	}
+	if _, leak := bodies[1]["emoji"]; leak {
+		t.Fatalf("параметр emoji не должен отправляться: %v", bodies[1])
+	}
+}
+
+// TestClientErrorHidesToken — ошибки транспорта не светят токен в журнале:
+// URL вида /bot<token>/… попадает в текст url.Error (находка приёмки Р:
+// токен лежал в journald открытым текстом). errors.Is сохраняется —
+// классификация доставки §13.2 различает таймаут и обрыв.
+func TestClientErrorHidesToken(t *testing.T) {
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+	})
+	client.sendTimeout = 50 * time.Millisecond
+
+	_, err := client.SendMessage(context.Background(), 1, "x")
+	if err == nil {
+		t.Fatal("таймаут должен давать ошибку")
+	}
+	if strings.Contains(err.Error(), "TESTTOKEN") {
+		t.Fatalf("токен в тексте ошибки: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "[токен]") {
+		t.Fatalf("токен не помечен как скрытый: %q", err.Error())
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("классификация таймаута потеряна: %v", err)
+	}
+}
+
+// TestDefaultTransportDialsTCP4 — дефолтный транспорт клиента набирает tcp4
+// независимо от запрошенной сети (инцидент 2026-10-31: IPv6-флап провайдера —
+// TCP устанавливался, данные висели в send-Q). Проверка: dial с явной сетью
+// tcp6 на адрес 127.0.0.1 (IPv6 там невозможен) должен удаться — значит,
+// сеть переписана на tcp4.
+func TestDefaultTransportDialsTCP4(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+
+	conn, err := defaultTransport().DialContext(context.Background(), "tcp6", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("tcp4 не применился: %v", err)
+	}
+	_ = conn.Close()
 }
 
 func TestClientSendChatActionFitsCharacterPulse(t *testing.T) {

@@ -81,8 +81,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("первое применение миграций: %v", err)
 	}
-	if first.Applied != 7 || first.Skipped != 0 {
-		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 7/0", first.Applied, first.Skipped)
+	if first.Applied != 8 || first.Skipped != 0 {
+		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 8/0", first.Applied, first.Skipped)
 	}
 
 	// 2. Повторное применение: идемпотентно, без ошибок и без записей.
@@ -90,8 +90,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("второе применение миграций (идемпотентность): %v", err)
 	}
-	if second.Applied != 0 || second.Skipped != 7 {
-		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/7", second.Applied, second.Skipped)
+	if second.Applied != 0 || second.Skipped != 8 {
+		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/8", second.Applied, second.Skipped)
 	}
 
 	// Все миграции отмечены в schema_migrations.
@@ -99,8 +99,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&appliedCount); err != nil {
 		t.Fatalf("schema_migrations не читается: %v", err)
 	}
-	if appliedCount != 7 {
-		t.Errorf("записей в schema_migrations = %d, хочу 7", appliedCount)
+	if appliedCount != 8 {
+		t.Errorf("записей в schema_migrations = %d, хочу 8", appliedCount)
 	}
 
 	// Полная схема §18 на месте.

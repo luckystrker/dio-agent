@@ -314,8 +314,17 @@ func TestDeliveryLoopReaction(t *testing.T) {
 	if status != "sent" || telegramID != nil {
 		t.Fatalf("реакция: status=%s id=%v", status, telegramID)
 	}
-	if len(stub.reactions) != 1 || stub.reactions[0]["emoji"] != "🔥" || stub.reactions[0]["message_id"].(float64) != 7 {
+	// reaction — список ReactionType (параметр «emoji» Bot API игнорирует).
+	if len(stub.reactions) != 1 || stub.reactions[0]["message_id"].(float64) != 7 {
 		t.Fatalf("setMessageReaction не дошёл: %v", stub.reactions)
+	}
+	reactionList, ok := stub.reactions[0]["reaction"].([]any)
+	if !ok || len(reactionList) != 1 {
+		t.Fatalf("reaction должен быть списком из одного: %v", stub.reactions[0]["reaction"])
+	}
+	reaction, ok := reactionList[0].(map[string]any)
+	if !ok || reaction["type"] != "emoji" || reaction["emoji"] != "🔥" {
+		t.Fatalf("ReactionTypeEmoji: %v", reactionList[0])
 	}
 }
 

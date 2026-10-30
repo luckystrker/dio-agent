@@ -114,7 +114,7 @@ func (c *Client) downloadFile(ctx context.Context, filePath string) ([]byte, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, c.redact(err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // тело уже прочитано
 	if resp.StatusCode != http.StatusOK {

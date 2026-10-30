@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -42,7 +43,10 @@ func (e *APIError) Error() string {
 // совпадает по сигнатуре с character.ChatActionSender (typing-пульс §13.3).
 type Client struct {
 	base string
-	http *http.Client
+	// token — только для затирания в текстах ошибок (журнал не должен
+	// получать токен открытым текстом, см. redact).
+	token string
+	http  *http.Client
 	// sendTimeout — sendMessage/setMessageReaction (сверен с TS delivery 10s).
 	sendTimeout time.Duration
 	// actionTimeout — sendChatAction «печатает…» (5s, TS).
@@ -52,19 +56,53 @@ type Client struct {
 }
 
 // NewClient строит клиент: base = apiBase/bot<token>. httpClient nil —
-// стандартный транспорт (таймауты держит контекст вызова); тесты подставляют
-// свой, чтобы крутить таймауты и транспорт.
+// дефолтный транспорт с жёстким tcp4 (инцидент 2026-10-31: IPv6-флап
+// провайдера — TCP устанавливался, данные висели в send-Q; Bot API доступен
+// по IPv4 всегда); тесты подставляют свой, чтобы крутить таймауты и транспорт.
 func NewClient(botToken, apiBase string, httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{Transport: defaultTransport()}
 	}
 	return &Client{
 		base:          strings.TrimRight(apiBase, "/") + "/bot" + botToken,
+		token:         botToken,
 		http:          httpClient,
 		sendTimeout:   10 * time.Second,
 		actionTimeout: 5 * time.Second,
 		updatesGrace:  5 * time.Second,
 	}
+}
+
+// defaultTransport — транспорт, всегда набирающий IPv4. Меняет запрошенную
+// сеть «tcp»/«tcp6» на «tcp4» независимо от адреса.
+func defaultTransport() *http.Transport {
+	dialer := &net.Dialer{}
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", addr)
+		},
+	}
+}
+
+// redactedError — ошибка с затёртым токеном в тексте. Unwrap сохраняет
+// errors.Is/As: классификация доставки §13.2 различает таймаут и обрыв.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
+// redact прячет токен в тексте ошибки (URL запроса вида /bot<token>/… попадает
+// в url.Error, а он — в журнал; инцидент 2026-10-31: токен лежал в journald
+// открытым текстом).
+func (c *Client) redact(err error) error {
+	if err == nil || c.token == "" || !strings.Contains(err.Error(), c.token) {
+		return err
+	}
+	return &redactedError{msg: strings.ReplaceAll(err.Error(), c.token, "[токен]"), err: err}
 }
 
 // API — интерфейс Telegram-слоя для poller и delivery (подменяется в тестах).
@@ -139,11 +177,15 @@ func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string
 }
 
 // SetMessageReaction ставит реакцию на сообщение (§11.2 decision=react).
+// Контракт Bot API: параметр reaction — список ReactionType; в JSON-теле он
+// идёт настоящим массивом. Параметр «emoji» Telegram игнорирует как
+// неизвестный и отвечает ok, не поставив ничего (находка приёмки Р).
 func (c *Client) SetMessageReaction(ctx context.Context, chatID int64, messageID int64, emoji string) error {
 	ctx, cancel := context.WithTimeout(ctx, c.sendTimeout)
 	defer cancel()
 	_, err := c.call(ctx, "setMessageReaction", map[string]any{
-		"chat_id": chatID, "message_id": messageID, "emoji": emoji,
+		"chat_id": chatID, "message_id": messageID,
+		"reaction": []map[string]string{{"type": "emoji", "emoji": emoji}},
 	}, maxSmallBody)
 	return err
 }
@@ -182,7 +224,7 @@ func (c *Client) call(ctx context.Context, method string, payload any, maxBody i
 	if err != nil {
 		// Ответа нет: исход запроса неизвестен — ошибка уходит как есть,
 		// политика доставки классифицирует её как unknown (§13.2).
-		return nil, fmt.Errorf("%s: %w", method, err)
+		return nil, fmt.Errorf("%s: %w", method, c.redact(err))
 	}
 	defer resp.Body.Close() //nolint:errcheck // чтение тела ниже, закрытие не влияет на результат
 

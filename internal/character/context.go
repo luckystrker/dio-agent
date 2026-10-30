@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/telegram"
 )
 
 // BatchEvent — входное событие пачки, попавшее в ход.
@@ -97,14 +98,8 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	}
 	out.History = FitHistory(history, a.HistoryMaxChars)
 
-	// --- пачка: пустой текст не теряется, помечается плейсхолдером (TS-паритет) ---
-	for _, ev := range batch {
-		if strings.TrimSpace(ev.Text) != "" {
-			out.Batch = append(out.Batch, ev.Text)
-		} else {
-			out.Batch = append(out.Batch, "[сообщение без текста]")
-		}
-	}
+	// --- пачка: тексты с плейсхолдерами для пустых ---
+	out.Batch = batchTexts(batch)
 
 	// --- системный промпт из шаблона (§7.1) ---
 	system, err := BuildSystemPrompt(persona, PromptExtras{
@@ -117,6 +112,25 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	out.System = system
 	out.Constraints = constraintsSection(batch)
 	return out, nil
+}
+
+// batchTexts — тексты пачки для контекста: пустой текст не теряется, а
+// помечается плейсхолдером (TS-паритет); фото без подписи помечается как фото —
+// картинка уходит частями Ask, плейсхолдер объясняет, почему «без текста»
+// (находка приёмки Р).
+func batchTexts(batch []BatchEvent) []string {
+	out := make([]string, 0, len(batch))
+	for _, ev := range batch {
+		switch {
+		case strings.TrimSpace(ev.Text) != "":
+			out = append(out, ev.Text)
+		case telegram.PhotoFileIDFromUpdate(ev.Raw) != "":
+			out = append(out, "[фото без подписи]")
+		default:
+			out = append(out, "[сообщение без текста]")
+		}
+	}
+	return out
 }
 
 // resolveActor находит или создаёт сущность человека-актора (первый актор

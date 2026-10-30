@@ -10,6 +10,7 @@ package telegram
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ChatType — тип чата события (§6.2 различает окна лички и группы).
@@ -27,6 +28,7 @@ const (
 	KindMessage EventKind = "message"
 	KindPhoto   EventKind = "photo"
 	KindReply   EventKind = "reply"
+	KindSticker EventKind = "sticker"
 	KindMention EventKind = "mention"
 	KindCommand EventKind = "command"
 	KindEdited  EventKind = "edited"
@@ -65,9 +67,19 @@ type telegramMessage struct {
 	Text           *string             `json:"text"`
 	Caption        *string             `json:"caption"`
 	Photo          []telegramPhotoSize `json:"photo"`
+	Sticker        *telegramSticker    `json:"sticker"`
 	Entities       []telegramEntity    `json:"entities"`
-	ReplyToMessage json.RawMessage     `json:"reply_to_message"`
+	ReplyToMessage *telegramMessage    `json:"reply_to_message"`
 	Chat           *telegramChat       `json:"chat"`
+}
+
+// telegramSticker — минимальный хвост стикера: эмодзи как текст события
+// (находка приёмки Р: стикер приходил «сообщением без текста»). Сама картинка
+// стикера модели не показывается (см. бэклог чек-листа).
+type telegramSticker struct {
+	Emoji      string `json:"emoji"`
+	IsVideo    bool   `json:"is_video"`
+	IsAnimated bool   `json:"is_animated"`
 }
 
 // telegramPhotoSize — один размер из массива photo (Telegram отдаёт по возрастанию).
@@ -124,7 +136,7 @@ func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 		ActorID:          actorIDOf(message),
 		ActorName:        actorNameOf(message.From),
 		Kind:             detectKind(message, edited),
-		Text:             messageText(message),
+		Text:             eventText(message),
 		Supported:        true,
 	}, nil
 }
@@ -155,14 +167,78 @@ func messageText(m *telegramMessage) *string {
 	return nil
 }
 
-// detectKind — порядок проверки как в TS-справочнике: правка, reply,
-// bot_command, mention, иначе сообщение.
+// replyQuoteLimit — потолок цитаты реплая в рунах: достаточно для смысла,
+// не раздувает ход и историю.
+const replyQuoteLimit = 200
+
+// eventText — текст события для хода и истории: собственный текст/подпись;
+// у стикера — эмодзи; у реплая — цитата сообщения, на которое ответили
+// (находка приёмки Р: без неё модель слепа, когда исходное вне окна недавнего
+// разговора). nil — текста нет.
+func eventText(m *telegramMessage) *string {
+	base := ""
+	switch {
+	case m.Sticker != nil:
+		if m.Sticker.Emoji != "" {
+			base = "[стикер " + m.Sticker.Emoji + "]"
+		} else {
+			// Стикер без эмодзи не должен превращаться в «сообщение без
+			// текста» в пачке хода (замечание приёмки 13).
+			base = "[стикер]"
+		}
+	default:
+		if t := messageText(m); t != nil {
+			base = *t
+		}
+	}
+	if m.ReplyToMessage != nil {
+		base = replyPrefix(m.ReplyToMessage) + base
+	}
+	if base == "" {
+		return nil
+	}
+	return &base
+}
+
+// replyPrefix — метка-цитата «в ответ на …»: имя автора и потолок текста.
+func replyPrefix(quoted *telegramMessage) string {
+	inner := quotedContent(quoted)
+	if name := actorNameOf(quoted.From); name != nil {
+		return "[в ответ на " + *name + ": " + inner + "] "
+	}
+	return "[в ответ на " + inner + "] "
+}
+
+// quotedContent — что именно цитируется: текст (обрезанный), фото, стикер
+// или честное «без текста».
+func quotedContent(quoted *telegramMessage) string {
+	if t := messageText(quoted); t != nil && strings.TrimSpace(*t) != "" {
+		runes := []rune(strings.TrimSpace(*t))
+		if len(runes) > replyQuoteLimit {
+			return "«" + string(runes[:replyQuoteLimit]) + "…»"
+		}
+		return "«" + string(runes) + "»"
+	}
+	if len(quoted.Photo) > 0 {
+		return "(фото)"
+	}
+	if quoted.Sticker != nil {
+		return "(стикер)"
+	}
+	return "(без текста)"
+}
+
+// detectKind — порядок проверки: правка, reply, стикер, фото, bot_command,
+// mention, иначе сообщение.
 func detectKind(message *telegramMessage, edited bool) EventKind {
 	if edited {
 		return KindEdited
 	}
-	if len(message.ReplyToMessage) > 0 && string(message.ReplyToMessage) != "null" {
+	if message.ReplyToMessage != nil {
 		return KindReply
+	}
+	if message.Sticker != nil {
+		return KindSticker
 	}
 	if len(message.Photo) > 0 {
 		return KindPhoto

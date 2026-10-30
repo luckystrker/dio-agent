@@ -260,7 +260,9 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	opts = append(opts, agent.WithDependencies(map[string]any{memory.ScopeDependency: in.ScopeID}))
 
 	a := agent.New("dio", bctx.System, opts...)
-	reply, err := a.Ask(ctx, userText)
+	// Части Ask: текст пачки + фото BinaryInput (находка приёмки Р: фото
+	// скачивалось, но в вызов модели уходил только текст).
+	reply, err := a.Ask(ctx, askMsgs(userText, photos)...)
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), err
 	}

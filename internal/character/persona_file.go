@@ -16,7 +16,7 @@ import (
 // Обязательные и известные секции persona-файла (§7.1).
 var (
 	personaRequiredSections = []string{"Имя", "Описание", "Манера речи", "Ценности", "Настроение (базовое)"}
-	personaKnownSections    = append(append([]string{}, personaRequiredSections...), "Биография")
+	personaKnownSections    = append(append([]string{}, personaRequiredSections...), "Биография", "Интересы")
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
@@ -38,6 +38,10 @@ type PersonaSource struct {
 	// SeedBio — принятая биография (persona_seed; подаётся как прожитая —
 	// философия №4, решение 2026-10-31); nil — секции нет.
 	SeedBio *string
+	// Interests — темы, о которых персонаж говорит охотно (§7.1, решение
+	// 2026-10-31: биография — фон, интересы — другой содержательный кусок);
+	// nil — секции нет.
+	Interests []string
 }
 
 // splitSections разбирает текст на секции по заголовкам «## …». Первое
@@ -156,6 +160,21 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		seedBio = &bio
 	}
 
+	// интересы необязательны; секция есть — заполняй списком, как «Ценности»
+	var interests []string
+	if raw, ok := sections["Интересы"]; ok {
+		for _, line := range strings.Split(raw, "\n") {
+			line = strings.TrimSpace(dashPrefix.ReplaceAllString(strings.TrimSpace(line), ""))
+			if line != "" {
+				interests = append(interests, line)
+			}
+		}
+		if len(interests) == 0 {
+			return PersonaSource{}, fmt.Errorf(
+				"persona-файл: секция «Интересы» пуста — нужен хотя бы один пункт списком (- пункт) или удалите секцию")
+		}
+	}
+
 	return PersonaSource{
 		Name:         name,
 		Description:  description,
@@ -163,5 +182,6 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		Values:       values,
 		MoodBaseline: Mood{Valence: valence, Arousal: arousal, SocialEnergy: socialEnergy},
 		SeedBio:      seedBio,
+		Interests:    interests,
 	}, nil
 }

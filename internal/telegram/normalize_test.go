@@ -5,6 +5,8 @@ package telegram
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -90,6 +92,102 @@ func TestNormalizeUnsupportedUpdate(t *testing.T) {
 	}
 	if event.ChatID != 0 || event.Kind != KindOther || event.ChatType != ChatGroup {
 		t.Fatalf("неподдерживаемое под фиктивным чатом: %+v", event)
+	}
+}
+
+func TestNormalizeReplyQuotesTarget(t *testing.T) {
+	// Реплай в группе: модель обязана видеть, на что отвечают, даже когда
+	// исходное сообщение вне окна недавнего разговора (находка приёмки Р).
+	event := mustNormalize(t, `{
+		"update_id": 10,
+		"message": {
+			"message_id": 11,
+			"from": {"id": 42, "first_name": "Коля"},
+			"chat": {"id": -5, "type": "group"},
+			"reply_to_message": {
+				"message_id": 9,
+				"from": {"id": 7, "first_name": "Яна"},
+				"text": "а поехали в субботу на море"
+			},
+			"text": "я за"
+		}
+	}`)
+	if event.Kind != KindReply {
+		t.Fatalf("kind = %s, хочу reply", event.Kind)
+	}
+	if event.Text == nil || *event.Text != "[в ответ на Яна: «а поехали в субботу на море»] я за" {
+		t.Fatalf("цитата не в тексте события: %+v", event.Text)
+	}
+}
+
+func TestNormalizeReplyQuoteFallbacks(t *testing.T) {
+	// Цитируемое без автора.
+	noName := mustNormalize(t, `{"update_id":1,"message":{"message_id":2,"chat":{"id":1,"type":"private"},
+		"reply_to_message":{"message_id":1,"text":"тишина"},"text":"ок"}}`)
+	if noName.Text == nil || *noName.Text != "[в ответ на «тишина»] ок" {
+		t.Fatalf("цитата без автора: %+v", noName.Text)
+	}
+	// Цитируемое фото: подписи нет.
+	photo := mustNormalize(t, `{"update_id":2,"message":{"message_id":3,"chat":{"id":1,"type":"private"},
+		"reply_to_message":{"message_id":2,"photo":[{"file_id":"t","width":10,"height":10}]},"text":"это что?"}}`)
+	if photo.Text == nil || *photo.Text != "[в ответ на (фото)] это что?" {
+		t.Fatalf("цитата фото: %+v", photo.Text)
+	}
+	// Цитируемое без всего: пометка вместо пустоты.
+	empty := mustNormalize(t, `{"update_id":3,"message":{"message_id":4,"chat":{"id":1,"type":"private"},
+		"reply_to_message":{"message_id":3},"text":"?"}}`)
+	if empty.Text == nil || *empty.Text != "[в ответ на (без текста)] ?" {
+		t.Fatalf("цитата без текста: %+v", empty.Text)
+	}
+	// Реплай без собственного текста: событие не превращается в «без текста».
+	onlyQuote := mustNormalize(t, `{"update_id":4,"message":{"message_id":5,"chat":{"id":1,"type":"private"},
+		"reply_to_message":{"message_id":4,"from":{"id":7,"first_name":"Яна"},"text":"ты тут?"}}}`)
+	if onlyQuote.Text == nil || *onlyQuote.Text != "[в ответ на Яна: «ты тут?»] " {
+		t.Fatalf("только цитата: %+v", onlyQuote.Text)
+	}
+}
+
+func TestNormalizeReplyQuoteCapped(t *testing.T) {
+	long := strings.Repeat("ы", 500)
+	event := mustNormalize(t, fmt.Sprintf(`{"update_id":1,"message":{"message_id":2,"chat":{"id":1,"type":"private"},
+		"reply_to_message":{"message_id":1,"from":{"id":7,"first_name":"Яна"},"text":%q}},"text":"ага"}`, long))
+	if event.Text == nil {
+		t.Fatal("текст события пуст")
+	}
+	if got := []rune(*event.Text); len(got) > 200+50 {
+		t.Fatalf("цитата не обрезана: %d рун", len(got))
+	}
+	if !strings.Contains(*event.Text, "…") {
+		t.Fatalf("обрезанная цитата без многоточия: %q", *event.Text)
+	}
+}
+
+func TestNormalizeSticker(t *testing.T) {
+	// Стикер — не «сообщение без текста»: модель видит эмодзи (находка приёмки Р).
+	event := mustNormalize(t, `{
+		"update_id": 20,
+		"message": {
+			"message_id": 21,
+			"from": {"id": 42, "first_name": "Коля"},
+			"chat": {"id": 42, "type": "private"},
+			"sticker": {"emoji": "😂", "is_video": false, "set_name": "UtyaDuck"}
+		}
+	}`)
+	if !event.Supported || event.ChatID != 42 {
+		t.Fatalf("стикер должен поддерживаться в своём чате: %+v", event)
+	}
+	if event.Kind != KindSticker {
+		t.Fatalf("kind = %s, хочу sticker", event.Kind)
+	}
+	if event.Text == nil || *event.Text != "[стикер 😂]" {
+		t.Fatalf("эмодзи стикера не в тексте события: %+v", event.Text)
+	}
+	// Стикер без эмодзи (бывает у наборов): остаётся стикером для пачки,
+	// а не «сообщением без текста».
+	bare := mustNormalize(t, `{"update_id":22,"message":{"message_id":23,"chat":{"id":42,"type":"private"},
+		"sticker":{"is_animated":true}}}`)
+	if !bare.Supported || bare.Text == nil || *bare.Text != "[стикер]" {
+		t.Fatalf("стикер без эмодзи: %+v", bare)
 	}
 }
 

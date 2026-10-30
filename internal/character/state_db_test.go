@@ -106,6 +106,36 @@ func TestPersonaSeedBioNilVsEmpty(t *testing.T) {
 	}
 }
 
+// TestPersonaInterestsRoundTrip — секция «Интересы» доезжает в БД и обратно
+// (§7.1, решение 2026-10-31): появление создаёт версию, совпадение — нет.
+func TestPersonaInterestsRoundTrip(t *testing.T) {
+	f, ctx := newFixture(t)
+	repo := NewPersonaRepo()
+	base := PersonaSource{
+		Name: "Dio", Description: "d", SpeechStyle: "s", Values: []string{"v"},
+		MoodBaseline: Mood{},
+	}
+	if _, changed, err := repo.EnsureFromSource(ctx, f.pool, base); err != nil || !changed {
+		t.Fatalf("первая версия: %v %v", changed, err)
+	}
+	withInterests := base
+	withInterests.Interests = []string{"старое железо", "море"}
+	p, changed, err := repo.EnsureFromSource(ctx, f.pool, withInterests)
+	if err != nil || !changed {
+		t.Fatalf("появление интересов не создало версию: %v %v", changed, err)
+	}
+	if len(p.Interests) != 2 || p.Interests[0] != "старое железо" || p.Interests[1] != "море" {
+		t.Fatalf("интересы не прочитались из БД: %v", p.Interests)
+	}
+	if _, changed, _ := repo.EnsureFromSource(ctx, f.pool, withInterests); changed {
+		t.Fatalf("тот же источник с интересами создал версию")
+	}
+	p, err = repo.Active(ctx, f.pool)
+	if err != nil || len(p.Interests) != 2 {
+		t.Fatalf("активная персона без интересов: %v %v", p.Interests, err)
+	}
+}
+
 // TestMoodReadDecayedAndApplyDelta — чтение затухает к baseline, дельта ложится
 // на затухнувшую базу и сжимается до лимита (§7.2).
 func TestMoodReadDecayedAndApplyDelta(t *testing.T) {

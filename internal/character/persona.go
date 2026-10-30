@@ -24,6 +24,7 @@ type Persona struct {
 	Values       []string
 	MoodBaseline Mood
 	SeedBio      *string
+	Interests    []string
 	CreatedAt    time.Time
 }
 
@@ -39,17 +40,24 @@ type personaRow struct {
 	Arousal     float64
 	Social      float64
 	SeedBio     *string
+	Interests   []byte
 	CreatedAt   time.Time
 }
 
 const personaColumns = `id, version, name, description, speech_style, values,
-	mood_valence, mood_arousal, mood_social_energy, seed_bio, created_at`
+	mood_valence, mood_arousal, mood_social_energy, seed_bio, interests, created_at`
 
 func toPersona(row personaRow) (Persona, error) {
 	var values []string
 	if len(row.Values) > 0 {
 		if err := json.Unmarshal(row.Values, &values); err != nil {
 			return Persona{}, fmt.Errorf("persona: values не читаются: %w", err)
+		}
+	}
+	var interests []string
+	if len(row.Interests) > 0 {
+		if err := json.Unmarshal(row.Interests, &interests); err != nil {
+			return Persona{}, fmt.Errorf("persona: interests не читаются: %w", err)
 		}
 	}
 	return Persona{
@@ -61,6 +69,7 @@ func toPersona(row personaRow) (Persona, error) {
 		Values:       values,
 		MoodBaseline: Mood{Valence: row.Valence, Arousal: row.Arousal, SocialEnergy: row.Social},
 		SeedBio:      row.SeedBio,
+		Interests:    interests,
 		CreatedAt:    row.CreatedAt,
 	}, nil
 }
@@ -76,7 +85,8 @@ var DefaultPersona = PersonaSource{
 		Arousal:      0.4,
 		SocialEnergy: 0.6,
 	},
-	SeedBio: strPtr("Вырос в портовом городе; запах дождя и старые пластинки — твоё. Подача — как прожитая жизнь (решение 2026-10-31)."),
+	SeedBio:   strPtr("Вырос в портовом городе; запах дождя и старые пластинки — твоё. Подача — как прожитая жизнь (решение 2026-10-31)."),
+	Interests: []string{"старые пластинки", "порт и море", "разобраться, как что-то устроено"},
 }
 
 func strPtr(s string) *string { return &s }
@@ -101,11 +111,12 @@ func (r *PersonaRepo) Active(ctx context.Context, db DBTX) (Persona, error) {
 	source := DefaultPersona
 	tag, err := db.Exec(ctx, `INSERT INTO personas
 		  (version, active, name, description, speech_style, values,
-		   mood_valence, mood_arousal, mood_social_energy, seed_bio)
-		 VALUES (1, TRUE, $1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+		   mood_valence, mood_arousal, mood_social_energy, seed_bio, interests)
+		 VALUES (1, TRUE, $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb)
 		 ON CONFLICT (version) DO NOTHING`,
 		source.Name, source.Description, source.SpeechStyle, marshalValues(source.Values),
-		source.MoodBaseline.Valence, source.MoodBaseline.Arousal, source.MoodBaseline.SocialEnergy, source.SeedBio)
+		source.MoodBaseline.Valence, source.MoodBaseline.Arousal, source.MoodBaseline.SocialEnergy, source.SeedBio,
+		marshalValues(source.Interests))
 	if err != nil {
 		return Persona{}, fmt.Errorf("persona: версия по умолчанию не создана: %w", err)
 	}
@@ -122,7 +133,7 @@ func (r *PersonaRepo) readActive(ctx context.Context, db DBTX) (Persona, error) 
 	err := db.QueryRow(ctx,
 		`SELECT `+personaColumns+` FROM personas WHERE active = TRUE ORDER BY version DESC LIMIT 1`,
 	).Scan(&row.ID, &row.Version, &row.Name, &row.Description, &row.SpeechStyle,
-		&row.Values, &row.Valence, &row.Arousal, &row.Social, &row.SeedBio, &row.CreatedAt)
+		&row.Values, &row.Valence, &row.Arousal, &row.Social, &row.SeedBio, &row.Interests, &row.CreatedAt)
 	if err != nil {
 		return Persona{}, err
 	}
@@ -148,15 +159,15 @@ func (r *PersonaRepo) EnsureFromSource(ctx context.Context, db DBTX, source Pers
 	var row personaRow
 	err = db.QueryRow(ctx, `INSERT INTO personas
 		  (version, active, name, description, speech_style, values,
-		   mood_valence, mood_arousal, mood_social_energy, seed_bio)
+		   mood_valence, mood_arousal, mood_social_energy, seed_bio, interests)
 		 VALUES ((SELECT COALESCE(MAX(version), 0) + 1 FROM personas), TRUE,
-		         $1, $2, $3, $4::jsonb, $5, $6, $7, $8)
+		         $1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9::jsonb)
 		 RETURNING `+personaColumns,
 		source.Name, source.Description, source.SpeechStyle, marshalValues(source.Values),
 		source.MoodBaseline.Valence, source.MoodBaseline.Arousal, source.MoodBaseline.SocialEnergy,
-		source.SeedBio,
+		source.SeedBio, marshalValues(source.Interests),
 	).Scan(&row.ID, &row.Version, &row.Name, &row.Description, &row.SpeechStyle,
-		&row.Values, &row.Valence, &row.Arousal, &row.Social, &row.SeedBio, &row.CreatedAt)
+		&row.Values, &row.Valence, &row.Arousal, &row.Social, &row.SeedBio, &row.Interests, &row.CreatedAt)
 	if err != nil {
 		return Persona{}, false, fmt.Errorf("persona: новая версия не создана: %w", err)
 	}
@@ -200,6 +211,14 @@ func personaMatchesSource(p Persona, source PersonaSource) bool {
 	}
 	if p.SeedBio != nil && *p.SeedBio != *source.SeedBio {
 		return false
+	}
+	if len(p.Interests) != len(source.Interests) {
+		return false
+	}
+	for i := range p.Interests {
+		if p.Interests[i] != source.Interests[i] {
+			return false
+		}
 	}
 	return true
 }

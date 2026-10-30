@@ -58,4 +58,25 @@ func TestVisionPhotoTurn(t *testing.T) {
 	if got := h.api.callsOf("sendMessage")[0].Text; !strings.Contains(got, "закат") {
 		t.Fatalf("ответ не про фото: %q", got)
 	}
+
+	// Стык «скачал → передал»: BinaryInput обязан быть в частях модельного
+	// запроса (находка приёмки Р: фото скачивалось и выбрасывалось — в Ask
+	// уходил только текст).
+	eventually(t, "модель получила BinaryInput", func() bool {
+		for _, call := range h.script.Calls() {
+			for _, ev := range call {
+				req, ok := ev.(*events.ModelRequest)
+				if !ok {
+					continue
+				}
+				for _, part := range req.Parts {
+					if bin, ok := part.(*events.BinaryInput); ok &&
+						bin.Kind == events.BinaryImage && string(bin.Data) == "hello" {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	})
 }

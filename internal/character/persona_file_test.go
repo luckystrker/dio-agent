@@ -141,6 +141,38 @@ func TestParsePersonaFileNoBio(t *testing.T) {
 	}
 }
 
+func TestParsePersonaFileInterests(t *testing.T) {
+	// Секция «Интересы» необязательна (§7.1, решение 2026-10-31): список
+	// как в «Ценностях».
+	withInterests := strings.Replace(validPersonaText(),
+		"## Настроение (базовое)",
+		"## Интересы\n- старое железо\n- море и порты\n\n## Настроение (базовое)", 1)
+	src, err := ParsePersonaFile(withInterests)
+	if err != nil {
+		t.Fatalf("файл с интересами отвергнут: %v", err)
+	}
+	if len(src.Interests) != 2 || src.Interests[0] != "старое железо" || src.Interests[1] != "море и порты" {
+		t.Fatalf("интересы прочитаны неверно: %v", src.Interests)
+	}
+
+	// Без секции — nil (как биография).
+	src, err = ParsePersonaFile(validPersonaText())
+	if err != nil {
+		t.Fatalf("файл без интересов отвергнут: %v", err)
+	}
+	if src.Interests != nil {
+		t.Fatalf("интересов быть не должно: %v", src.Interests)
+	}
+
+	// Пустая секция — ошибка, а не молчаливое «нет».
+	empty := strings.Replace(validPersonaText(),
+		"## Настроение (базовое)", "## Интересы\n\n## Настроение (базовое)", 1)
+	_, err = ParsePersonaFile(empty)
+	if err == nil || !strings.Contains(err.Error(), "Интересы» пуста") {
+		t.Fatalf("хочу ошибку про пустые интересы, получено: %v", err)
+	}
+}
+
 func TestParsePersonaFileFirstHeaderWins(t *testing.T) {
 	// Повтор заголовка: первое вхождение выигрывает (паритет Map TS).
 	text := strings.Replace(validPersonaText(), "## Имя\nDio\n", "## Имя\nDio\n\n## Имя\nДругое\n", 1)
