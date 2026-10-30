@@ -27,6 +27,11 @@ func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 // исполнимое намерение имеет expiresAt; паритет INTENTION_TTL_HOURS TS).
 const intentionTTLHours = 72
 
+// ErrApplyAborted — хук Extra транзакции применения отменил применение
+// (например CAS намерения проиграл гонку: исполнение уже сделано другим).
+// Применение отвечает Applied=false без изменений (транзакция откатывается).
+var ErrApplyAborted = errors.New("применение отменено хуком транзакции")
+
 // ApplyResult — что именно применилось (для события deltas_applied и лога §20).
 type ApplyResult struct {
 	Applied         bool // false — ход уже был применён (повтор отклонён)
@@ -47,6 +52,13 @@ type ApplyOptions struct {
 	PersonaBaseline Mood
 	// Journal — пишет deltas_applied + delivery_queued в этой же транзакции.
 	Journal *TurnJournal
+	// Extra — дополнительная работа ВНУТРИ транзакции применения: вызывается
+	// после CAS хода и до записи журнала (§12.1: «либо всё, либо ничего»
+	// распространяется и на связанное состояние, например CAS намерения §14.3 —
+	// нужно фону 9.6, чтобы статус намерения и его доставка менялись атомарно).
+	// Ошибка, оборачивающая ErrApplyAborted, откатывает транзакцию и возвращает
+	// Applied=false (применение уже сделано другим победителем).
+	Extra func(ctx context.Context, tx pgx.Tx) error
 }
 
 // ApplyTurn применяет валидированный результат в одной транзакции.
@@ -72,6 +84,17 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 	if _, err := tx.Exec(ctx,
 		`UPDATE social_events SET status = 'processed' WHERE turn_id = $1`, opts.TurnID); err != nil {
 		return ApplyResult{}, fmt.Errorf("применение: события не закрыты: %w", err)
+	}
+
+	// --- хук транзакции: связанная работа тем же «всё или ничего» ---
+	if opts.Extra != nil {
+		if err := opts.Extra(ctx, tx); err != nil {
+			if errors.Is(err, ErrApplyAborted) {
+				// Гонку выиграл другой: всё откатывается, включая CAS хода выше.
+				return ApplyResult{Applied: false}, nil
+			}
+			return ApplyResult{}, fmt.Errorf("применение: хук транзакции: %w", err)
+		}
 	}
 
 	res := ApplyResult{Applied: true}
@@ -321,6 +344,34 @@ type intentionRow struct {
 	reason        string
 	delayHours    float64
 	relatedTurnID int64
+}
+
+// IntentionParams — экспортированные параметры создания намерения (§14.1):
+// нужны фону (9.6), который тоже создаёт намерения (share по находке §15).
+type IntentionParams struct {
+	Kind          string // reply_later | check_in | share | explore
+	ChatID        int64  // целевой чат
+	ScopeID       string
+	Topic         string
+	Reason        string
+	DelayHours    float64 // notBefore = now + delayHours; expiresAt = notBefore + 72ч
+	RelatedTurnID int64
+}
+
+// CreateIntentionTx создаёт намерение внутри чужой транзакции с dedupe по
+// (kind, topic, chat) — перефразировки не размножают действие (§14.1).
+// Разрешение (provenance) назначает runtime по источнику хода (§9.1).
+// created=false — дубликат: намерение с таким dedupe-ключом уже есть.
+func CreateIntentionTx(ctx context.Context, tx pgx.Tx, p IntentionParams) (id int64, created bool, err error) {
+	return createIntention(ctx, tx, intentionRow{
+		kind:          p.Kind,
+		chatID:        p.ChatID,
+		scopeID:       p.ScopeID,
+		topic:         p.Topic,
+		reason:        p.Reason,
+		delayHours:    p.DelayHours,
+		relatedTurnID: p.RelatedTurnID,
+	})
 }
 
 // createIntention вставляет намерение с dedupe по (kind, topic, chat) —

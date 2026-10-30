@@ -47,14 +47,21 @@ type BudgetMiddleware struct {
 }
 
 // NewBudgetMiddleware строит middleware бюджета. operation — префикс вида
-// "model:turn:42:0"; лимит 0 = не ограничивать.
+// "model:turn:42:0"; лимит 0 = не ограничивать; пул — conversation (§16).
 func NewBudgetMiddleware(store *runtime.BudgetStore, operation string, limit int64, logger *log.Logger) *BudgetMiddleware {
+	return NewBudgetMiddlewarePool(store, operation, limit, runtime.BudgetPoolConversation, logger)
+}
+
+// NewBudgetMiddlewarePool — то же с явным пулом бюджета (§16: conversation |
+// background | maintenance). Нужен фону (9.6): исследование не должно
+// расходовать бюджет, оставленный на прямые разговоры.
+func NewBudgetMiddlewarePool(store *runtime.BudgetStore, operation string, limit int64, pool string, logger *log.Logger) *BudgetMiddleware {
 	if logger == nil {
 		logger = discardLogger()
 	}
 	return &BudgetMiddleware{
 		store:     store,
-		pool:      runtime.BudgetPoolConversation,
+		pool:      pool,
 		operation: operation,
 		limit:     limit,
 		logger:    logger,
