@@ -287,3 +287,22 @@ journalctl -u dio-agent -n 20   # старт без ошибок = файл пр
 вхождение (дубль молча игнорируется — проверь файл, если правка «не применилась»).
 Опечатка в метке шаблона обнаруживается при старте: процесс не поднимется,
 в журнале будет имя метки.
+
+## Поведенческие эвалы (§21.2)
+
+Офлайн (скриптовая модель, детерминированный гейт — гоняется в БД-тестах):
+
+```bash
+TEST_DATABASE_URL="postgres://dio:dio@localhost:5433/dio?sslmode=disable"   go test -tags "db,eval" ./internal/app/ -run TestEvalSuiteOffline
+```
+
+Живой (реальная модель; Telegram — заглушка; отчёт — `evals/results/live.json`):
+
+```bash
+TEST_DATABASE_URL="postgres://dio:dio@localhost:5433/dio?sslmode=disable"   MODEL_MODEL=nvidia/nemotron-3.5-super-vl:free   EVAL_MIN_PASS_RATE=0.5   go test -tags "db,eval,live" ./internal/app/ -run TestEvalSuiteLive -v -timeout 30m
+```
+
+Набор кейсов — `evals/behavior_suite.jsonl` (эталоны docs/BEHAVIOR_SCENARIOS.md);
+одна строка — кейс: посев мира, реплики актора, критерии успеха. После правок
+персоны/шаблона прогоняй живой набор и сравнивай pass_rate.
+

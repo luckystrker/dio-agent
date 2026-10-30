@@ -340,7 +340,9 @@ func (w *Worker) loadBatch(ctx context.Context, turnID int64) ([]character.Batch
 // (инвариант 5: событие не теряется, пропуск фиксируется явно).
 func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 	if turn.Attempt >= w.opts.MaxAttempts {
-		reason := fmt.Sprintf("превышен лимит попыток (%d): %v", turn.Attempt, runErr)
+		// Причина — для журнала и наблюдаемости: текст ошибки провайдера может
+		// быть простынёй (429-блобы OpenRouter), в логах достаточно хвоста.
+		reason := fmt.Sprintf("превышен лимит попыток (%d): %v", turn.Attempt, truncateRunes(fmt.Sprint(runErr), 300))
 		if w.journal != nil {
 			if jerr := w.journal.WriteTurnSkipped(ctx, turn.ID, "worker", reason); jerr != nil {
 				w.logger.Printf("ход %d: turn_skipped не записан: %v", turn.ID, jerr)
@@ -372,4 +374,13 @@ func (w *Worker) backoff(attempt int) time.Duration {
 		pause = w.opts.RetryMax
 	}
 	return pause
+}
+
+// truncateRunes обрезает строку до n символов (без разрыва рун).
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

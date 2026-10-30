@@ -5,3 +5,4 @@
 # локальная сборка без -o (go build ./cmd/agent)
 agent
 agent.exe
+evals/results/
