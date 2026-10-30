@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 /**
  * Quality gate before `git commit` (PreToolUse hook, matcher: Bash).
- * Generic and stack-probing: safe to copy into any project.
+ * Go edition (этап 9.1): package.json больше не источник гейтов.
  *
  * - Reads the hook payload from stdin; only acts when the Bash command is a `git commit`.
- * - If package.json exists: runs `npm run --if-present lint|typecheck|test`.
- * - No package.json / no scripts: passes silently (nothing to gate yet).
+ * - If go.mod exists: runs the Go gates in order:
+ *     1. `gofmt -l .`      — пустой вывод (пути из node_modules не в счёт: это мусор npm, не наш код);
+ *     2. `go vet ./...`    — без замечаний;
+ *     3. `go test ./...`   — юнит-тесты БЕЗ живой БД (БД-тесты — под тегом db,
+ *       отдельным прогоном против Postgres из docker-compose, вне коммит-гейта).
+ * - No go.mod: passes silently (nothing to gate yet).
  * - Exit 0 = pass, 2 = block the commit, other non-zero = hook error.
  */
 import { spawnSync } from "node:child_process";
@@ -37,40 +41,63 @@ function isGitCommit(raw) {
   return /\bgit\b[^\n|;&]*\bcommit\b/.test(command) && !/--help/.test(command);
 }
 
-function run(script) {
-  const res = spawnSync("npm", ["run", "--if-present", script], {
+/** Запуск гейта; stdout+stderr вместе — gofmt пишет туда, куда удобнее. */
+function runGate(cmd, args) {
+  const res = spawnSync(cmd, args, {
     cwd: repoDir,
     encoding: "utf8",
     shell: process.platform === "win32",
   });
-  return { script, ok: res.status === 0, output: (res.stdout || "") + (res.stderr || "") };
+  return {
+    ok: res.status === 0,
+    output: ((res.stdout || "") + (res.stderr || "")).trim(),
+  };
+}
+
+/** gofmt -l . : «плохие» файлы построчно; node_modules — мусор npm, не наш код. */
+function unformattedGoFiles() {
+  const { ok, output } = runGate("gofmt", ["-l", "."]);
+  if (!ok && output === "") {
+    return { error: "gofmt не запустился (нет go? установлен ли Go?)", files: [] };
+  }
+  const files = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .filter((line) => !line.replace(/\\/g, "/").startsWith("node_modules/"));
+  return { error: null, files };
 }
 
 function main() {
   if (!isGitCommit(readStdin())) process.exit(0);
 
-  const pkgPath = join(repoDir, "package.json");
-  if (!existsSync(pkgPath)) process.exit(0); // no toolchain yet: nothing to gate
-
-  let scripts = {};
-  try {
-    scripts = JSON.parse(readFileSync(pkgPath, "utf8")).scripts ?? {};
-  } catch {
-    console.error("pre-commit-gate: package.json is not valid JSON; refusing to gate blind.");
-    process.exit(2);
-  }
-
-  const gates = ["lint", "typecheck", "test"].filter((s) => scripts[s]);
-  if (gates.length === 0) process.exit(0);
+  if (!existsSync(join(repoDir, "go.mod"))) process.exit(0); // no toolchain yet: nothing to gate
 
   const failed = [];
-  for (const g of gates) {
-    const r = run(g);
-    if (!r.ok) {
-      failed.push(r.script);
-      console.error(`\n[pre-commit-gate] \`npm run ${r.script}\` failed:\n${r.output.slice(-4000)}`);
-    }
+
+  const fmt = unformattedGoFiles();
+  if (fmt.error) {
+    failed.push("gofmt");
+    console.error(`\n[pre-commit-gate] gofmt: ${fmt.error}`);
+  } else if (fmt.files.length > 0) {
+    failed.push("gofmt");
+    console.error(
+      `\n[pre-commit-gate] gofmt -l . нашёл неформатированные файлы:\n${fmt.files.join("\n")}\nПрогони: gofmt -w <файлы>`,
+    );
   }
+
+  const vet = runGate("go", ["vet", "./..."]);
+  if (!vet.ok) {
+    failed.push("go vet");
+    console.error(`\n[pre-commit-gate] \`go vet ./...\` failed:\n${vet.output.slice(-4000)}`);
+  }
+
+  const test = runGate("go", ["test", "./..."]);
+  if (!test.ok) {
+    failed.push("go test");
+    console.error(`\n[pre-commit-gate] \`go test ./...\` failed:\n${test.output.slice(-4000)}`);
+  }
+
   if (failed.length > 0) {
     console.error(`\n[pre-commit-gate] Commit blocked: failed gate(s): ${failed.join(", ")}.`);
     process.exit(2);
