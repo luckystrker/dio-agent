@@ -120,7 +120,7 @@ func ParseTurnResult(raw []byte) (TurnResult, error) {
 	if err := r.Validate(); err != nil {
 		return TurnResult{}, err
 	}
-	return r, nil
+	return stripInertContradictions(r), nil
 }
 
 func rangeErr(what string, v, min, max float64) error {
@@ -253,16 +253,24 @@ func (r TurnResult) Validate() error {
 			return fmt.Errorf("turnresult: ignore/defer не содержат отправляемых сообщений")
 		}
 	}
-	if (r.Decision == DecisionIgnore || r.Decision == DecisionDefer) && r.Reaction != "" {
-		return fmt.Errorf("turnresult: reaction недопустим при ignore/defer")
-	}
 	if r.Decision == DecisionDefer && r.DeferHours == nil {
 		return fmt.Errorf("turnresult: defer требует defer_hours (reply_later с notBefore, §11.2)")
 	}
-	if r.Decision != DecisionDefer && r.DeferHours != nil {
-		return fmt.Errorf("turnresult: defer_hours допустим только при decision=defer")
-	}
 	return nil
+}
+
+// stripInertContradictions вычищает поля без эффекта при выбранном decision
+// (§11.3: runtime может мягко подавить часть результата): мусор в необязательных
+// полях не меняет смысла результата, а слабые модели кладут его стабильно
+// (живой смоук 2026-10-30). Содержательные нарушения Validate — терминальны.
+func stripInertContradictions(r TurnResult) TurnResult {
+	if r.Decision != DecisionDefer {
+		r.DeferHours = nil
+	}
+	if r.Decision != DecisionReact && r.Decision != DecisionAnswer {
+		r.Reaction = ""
+	}
+	return r
 }
 
 var (

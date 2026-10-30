@@ -49,9 +49,6 @@ func TestTurnResultDecisionRules(t *testing.T) {
 		{"ignore с сообщениями", `{"decision":"ignore","messages":["текст"]}`, "не содержат отправляемых сообщений"},
 		{"defer с сообщениями", `{"decision":"defer","defer_hours":1,"messages":["текст"]}`, "не содержат отправляемых сообщений"},
 		{"defer без часов", `{"decision":"defer"}`, "defer требует defer_hours"},
-		{"reaction без react", `{"decision":"ignore","reaction":"👍"}`, "reaction недопустим при ignore/defer"},
-		{"defer с реакцией", `{"decision":"defer","defer_hours":1,"reaction":"👍"}`, "reaction недопустим при ignore/defer"},
-		{"defer_hours без defer", `{"decision":"ignore","defer_hours":1}`, "только при decision=defer"},
 		{"неизвестный decision", `{"decision":"shout"}`, "неизвестное decision"},
 	}
 	for _, tc := range cases {
@@ -61,6 +58,34 @@ func TestTurnResultDecisionRules(t *testing.T) {
 				t.Fatalf("хочу ошибку %q, получено: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// TestTurnResultStripsInertContradictions — инертные противоречия (поля без
+// эффекта при выбранном decision) вычищаются, а не роняют ход (§11.3: runtime
+// может мягко подавить часть результата): модели слабых провайдеров стабильно
+// кладут мусор в необязательные поля — вскрыто живым смоуком 2026-10-30.
+func TestTurnResultStripsInertContradictions(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["Ага"],"defer_hours":2}`))
+	if err != nil {
+		t.Fatalf("answer с посторонним defer_hours отвергнут: %v", err)
+	}
+	if r.DeferHours != nil {
+		t.Fatalf("defer_hours при answer должен вычищаться: %+v", r.DeferHours)
+	}
+	r, err = ParseTurnResult([]byte(`{"decision":"ignore","reaction":"👍"}`))
+	if err != nil {
+		t.Fatalf("ignore с посторонней реакцией отвергнут: %v", err)
+	}
+	if r.Reaction != "" {
+		t.Fatalf("reaction при ignore должен вычищаться: %+v", r.Reaction)
+	}
+	r, err = ParseTurnResult([]byte(`{"decision":"defer","defer_hours":1,"reaction":"👍"}`))
+	if err != nil {
+		t.Fatalf("defer с посторонней реакцией отвергнут: %v", err)
+	}
+	if r.Reaction != "" || r.DeferHours == nil {
+		t.Fatalf("нормализация defer неверна: %+v", r)
 	}
 }
 

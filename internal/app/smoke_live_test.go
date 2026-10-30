@@ -49,7 +49,7 @@ func newLiveHarness(t *testing.T) *harness {
 
 	dsn := newTestDB(t)
 	return newHarnessDSNTuned(t, dsn, func(o *Options) {
-		o.Model = character.NewChatConfig(endpoint, apiKey, model, 1000, 90_000, retries)
+		o.Model = character.NewChatConfig(endpoint, apiKey, model, 4000, 90_000, retries)
 		o.Logger = log.New(os.Stderr, "live ", log.LstdFlags)
 		o.Config.LogLevel = runtime.LogLevelInfo
 		// Дневной бюджет §16: смоуку хватает небольшого пула.
