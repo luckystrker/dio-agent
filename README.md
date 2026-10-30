@@ -3,7 +3,7 @@
 Постоянный AI-персонаж в Telegram: собеседник с характером, памятью, меняющимся
 отношением к людям и миру. Спецификация — [docs/ARCHITECTURE_v0.7.md](docs/ARCHITECTURE_v0.7.md).
 
-Go · PostgreSQL (+pgvector) · событийное ядро ago (`third_party/ago`) · один процесс (бинарник).
+Go · PostgreSQL (+pgvector) · событийное ядро ago (github.com/luckystrker/ago, v0.6.0) · один процесс (бинарник).
 
 ## Быстрый старт
 

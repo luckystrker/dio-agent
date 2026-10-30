@@ -12,7 +12,7 @@ Go · PostgreSQL (+pgvector) · событийное ядро ago (github.com/lu
 | С какими приоритетами сверяются решения | `docs/PHILOSOPHY.md` |
 | Что делаем сейчас и что уже принято | `CHECKLIST.md` |
 | Референс подхода к работе с агентами | `docs/references/yt-summary-uY1bTL1i2DM.md` |
-| Структура кода | `cmd/`, `internal/<модуль>/` — app, telegram, character, memory, background, runtime, worker; миграции — `migrations/` (встраиваются embed'ом); фреймворк — `third_party/ago` (вендорная копия, replace-директива) |
+| Структура кода | `cmd/`, `internal/<модуль>/` — app, telegram, character, memory, background, runtime, worker; миграции — `migrations/` (встраиваются embed'ом); фреймворк ago — зависимость `github.com/luckystrker/ago` (справочник — docs upstream и `go doc`) |
 
 ## Как работаем (пайплайн)
 
