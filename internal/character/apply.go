@@ -114,6 +114,28 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 			res.OutboxIDs = append(res.OutboxIDs, id)
 			delivery.Outbox = append(delivery.Outbox, QueuedDelivery{ID: id, Position: i, Kind: "message", Text: text})
 		}
+		// Необязательная reaction при answer (§11.2): цель недоступна —
+		// реакция пропускается без дополнительного вызова модели.
+		if opts.Result.Reaction != "" {
+			target, err := reactionTarget(ctx, tx, opts.TurnID)
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			if target == 0 {
+				res.SkippedReaction = true
+			} else {
+				id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, len(opts.Result.Messages), map[string]any{
+					"kind":              "reaction",
+					"reaction":          opts.Result.Reaction,
+					"target_message_id": target,
+				})
+				if err != nil {
+					return ApplyResult{}, err
+				}
+				res.OutboxIDs = append(res.OutboxIDs, id)
+				delivery.Outbox = append(delivery.Outbox, QueuedDelivery{ID: id, Position: len(opts.Result.Messages), Kind: "reaction", Reaction: opts.Result.Reaction})
+			}
+		}
 	case DecisionReact:
 		target, err := reactionTarget(ctx, tx, opts.TurnID)
 		if err != nil {

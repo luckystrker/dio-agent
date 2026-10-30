@@ -58,7 +58,7 @@ func TurnResultJSONSchema() map[string]any {
 			},
 			"reaction": map[string]any{
 				"type": "string", "minLength": 1, "maxLength": maxReactionLen,
-				"description": "Эмодзи-реакция на последнее сообщение (только при decision=react)",
+				"description": "Эмодзи-реакция на последнее сообщение: при decision=react — сама реакция, при decision=answer — необязательное дополнение к тексту",
 			},
 			"intentions": map[string]any{
 				"type":     "array",

@@ -49,7 +49,8 @@ func TestTurnResultDecisionRules(t *testing.T) {
 		{"ignore с сообщениями", `{"decision":"ignore","messages":["текст"]}`, "не содержат отправляемых сообщений"},
 		{"defer с сообщениями", `{"decision":"defer","defer_hours":1,"messages":["текст"]}`, "не содержат отправляемых сообщений"},
 		{"defer без часов", `{"decision":"defer"}`, "defer требует defer_hours"},
-		{"reaction без react", `{"decision":"ignore","reaction":"👍"}`, "только при decision=react"},
+		{"reaction без react", `{"decision":"ignore","reaction":"👍"}`, "reaction недопустим при ignore/defer"},
+		{"defer с реакцией", `{"decision":"defer","defer_hours":1,"reaction":"👍"}`, "reaction недопустим при ignore/defer"},
 		{"defer_hours без defer", `{"decision":"ignore","defer_hours":1}`, "только при decision=defer"},
 		{"неизвестный decision", `{"decision":"shout"}`, "неизвестное decision"},
 	}
@@ -60,6 +61,20 @@ func TestTurnResultDecisionRules(t *testing.T) {
 				t.Fatalf("хочу ошибку %q, получено: %v", tc.want, err)
 			}
 		})
+	}
+}
+
+// TestTurnResultAnswerWithReaction — необязательная reaction при answer
+// допустима (§11.2: «speak содержит 1–4 сообщения; необязательная reaction
+// разрешена»); правило «только при react» из TS-реализации противоречило
+// спеке — вскрыто живым смоуком 2026-10-30.
+func TestTurnResultAnswerWithReaction(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["Ага, понятно"],"reaction":"😂"}`))
+	if err != nil {
+		t.Fatalf("answer с реакцией отвергнут: %v", err)
+	}
+	if r.Decision != DecisionAnswer || r.Reaction != "😂" || len(r.Messages) != 1 {
+		t.Fatalf("поля прочитаны неверно: %+v", r)
 	}
 }
 

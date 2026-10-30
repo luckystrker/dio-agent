@@ -253,8 +253,8 @@ func (r TurnResult) Validate() error {
 			return fmt.Errorf("turnresult: ignore/defer не содержат отправляемых сообщений")
 		}
 	}
-	if r.Decision != DecisionReact && r.Reaction != "" {
-		return fmt.Errorf("turnresult: reaction допустим только при decision=react")
+	if (r.Decision == DecisionIgnore || r.Decision == DecisionDefer) && r.Reaction != "" {
+		return fmt.Errorf("turnresult: reaction недопустим при ignore/defer")
 	}
 	if r.Decision == DecisionDefer && r.DeferHours == nil {
 		return fmt.Errorf("turnresult: defer требует defer_hours (reply_later с notBefore, §11.2)")

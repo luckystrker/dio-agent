@@ -566,6 +566,74 @@ func TestTurnStartedWrittenOnce(t *testing.T) {
 	}
 }
 
+// TestTurnAnswerWithReaction — answer с необязательной реакцией (§11.2):
+// в outbox ложатся и сообщения, и реакция на последнее сообщение пачки.
+func TestTurnAnswerWithReaction(t *testing.T) {
+	f, ctx := newFixture(t)
+	turnID := int64(111)
+	// Событие с message.message_id в raw_update: цель реакции доступна.
+	if _, err := f.runner.Pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status, turn_id)
+		VALUES (2000001, $1, 'private', 777, 'Коля', 'message', 'ну и новость',
+		        '{"message":{"message_id":555}}'::jsonb, 'buffered', $2)`,
+		testChatID, turnID); err != nil {
+		t.Fatalf("событие не вставлено: %v", err)
+	}
+	if _, err := f.runner.Pool.Exec(ctx,
+		`INSERT INTO turns (id, chat_id, status) VALUES ($1, $2, 'created')`, turnID, testChatID); err != nil {
+		t.Fatalf("turn не вставлен: %v", err)
+	}
+
+	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["Ха, согласен","Держи реакцию"],"reaction":"😂"}`}})
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, Text: "ну и новость"}}})
+	if err != nil {
+		t.Fatalf("answer-ход с реакцией упал: %v", err)
+	}
+	if out.Apply.SkippedReaction {
+		t.Fatalf("реакция при доступной цели не должна пропускаться: %+v", out)
+	}
+	if len(out.Apply.OutboxIDs) != 3 {
+		t.Fatalf("в outbox должно быть 3 строки (2 сообщения + реакция), стало %d", len(out.Apply.OutboxIDs))
+	}
+	type row struct {
+		position int
+		kind     string
+	}
+	var rows []row
+	rsets, err := f.runner.Pool.Query(ctx,
+		`SELECT position, payload->>'kind' FROM delivery_outbox WHERE turn_id = $1 ORDER BY position`, turnID)
+	if err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	for rsets.Next() {
+		var r row
+		if err := rsets.Scan(&r.position, &r.kind); err != nil {
+			t.Fatalf("строка outbox не читается: %v", err)
+		}
+		rows = append(rows, r)
+	}
+	rsets.Close()
+	want := []row{{0, "message"}, {1, "message"}, {2, "reaction"}}
+	if len(rows) != len(want) {
+		t.Fatalf("строки outbox: %+v, хочу %+v", rows, want)
+	}
+	for i := range want {
+		if rows[i] != want[i] {
+			t.Fatalf("строка %d: %+v, хочу %+v", i, rows[i], want[i])
+		}
+	}
+	var reaction, target string
+	if err := f.runner.Pool.QueryRow(ctx,
+		`SELECT payload->>'reaction', payload->>'target_message_id' FROM delivery_outbox WHERE turn_id = $1 AND payload->>'kind' = 'reaction'`,
+		turnID).Scan(&reaction, &target); err != nil {
+		t.Fatalf("реакция не читается: %v", err)
+	}
+	if reaction != "😂" || target != "555" {
+		t.Fatalf("реакция payload: reaction=%q target=%s, хочу 😂/555", reaction, target)
+	}
+}
+
 // TestTurnReactionTargetMissing — react без целевого сообщения: реакция
 // пропущена, валидные дельты применяются (§11.2).
 func TestTurnReactionTargetMissing(t *testing.T) {
