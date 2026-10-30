@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"strings"
 
@@ -35,6 +36,15 @@ import (
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
+
+// sessionForChat — стабильный идентификатор разговора для провайдера: FNV-1a
+// chat id, чтобы OpenCode Go маршрутизировал и кэшировал промпты одного чата
+// вместе (сам chat id наружу не уходит, §17: id — только исполнение).
+func sessionForChat(chatID int64) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(fmt.Sprintf("dio-chat-%d", chatID)))
+	return fmt.Sprintf("dio-%016x", h.Sum64())
+}
 
 // ErrModelNotConfigured — модель не настроена: ход не выполняется и не
 // помечается терминальным пропуском (конфигурация приходит — ход повторится).
@@ -196,7 +206,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
 	// получает обычный вызов и может ответить финальным TurnResult.
-	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner}
+	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
 	if in.Direct && r.Memory != nil {
 		// Forced tool-calling на прямом обращении (§10.4): первый вызов модели
 		// обязан обратиться к forced-инструменту памяти — гарантия «прямой

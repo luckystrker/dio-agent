@@ -187,15 +187,31 @@ func (r *evalRun) collect() {
 	r.out.Decision, _ = queryStringOK(r.h,
 		`SELECT payload->'result'->>'decision' FROM event_streams WHERE type = 'model_output'
 		 ORDER BY created_at DESC LIMIT 1`)
-	if names, err := r.h.pool.Query(context.Background(),
-		`SELECT payload->>'tool' FROM event_streams WHERE type = 'tool_call' ORDER BY created_at`); err == nil {
-		defer names.Close()
-		for names.Next() {
-			var name string
-			if err := names.Scan(&name); err == nil {
-				r.out.ToolCalls = append(r.out.ToolCalls, eval.ToolCall{Name: name})
+	// Вызовы инструментов с аргументами; результаты подмешиваются по call_id.
+	results := map[string]string{}
+	if res, err := r.h.pool.Query(context.Background(),
+		`SELECT payload->>'call_id', coalesce(payload->>'result', payload->>'error')
+		 FROM event_streams WHERE type = 'tool_result' ORDER BY created_at`); err == nil {
+		for res.Next() {
+			var id, resText string
+			if err := res.Scan(&id, &resText); err == nil {
+				results[id] = resText
 			}
 		}
+		res.Close()
+	}
+	if calls, err := r.h.pool.Query(context.Background(),
+		`SELECT payload->>'tool', payload->>'arguments', payload->>'call_id'
+		 FROM event_streams WHERE type = 'tool_call' ORDER BY created_at`); err == nil {
+		for calls.Next() {
+			var name, args, id string
+			if err := calls.Scan(&name, &args, &id); err == nil {
+				r.out.ToolCalls = append(r.out.ToolCalls, eval.ToolCall{
+					Name: name, Arguments: args, Result: cut(results[id], 400),
+				})
+			}
+		}
+		calls.Close()
 	}
 	if status, ok := queryStringOK(r.h, `SELECT status FROM turns ORDER BY id DESC LIMIT 1`); ok && status == "skipped" {
 		r.out.Skipped = true
@@ -266,6 +282,9 @@ func runEvalCases(t *testing.T, mode string, cases []evalsuite.Case,
 			passed++
 		}
 		t.Logf("eval %-28s %s  выход=%q %s", c.Name, passFail(cr.Passed), cr.Output, cr.Detail)
+		for _, tc := range r.out.ToolCalls {
+			t.Logf("    tool %s args=%s результат=%s", tc.Name, tc.Arguments, tc.Result)
+		}
 		reports = append(reports, cr)
 	}
 
@@ -305,6 +324,15 @@ func evalSuite(t *testing.T) []evalsuite.Case {
 		t.Fatalf("набор %s пуст", evalSuitePath)
 	}
 	return cases
+}
+
+// cut — хвост результата для отчёта (целый лежит в журнале).
+func cut(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func passFail(b bool) string {

@@ -30,7 +30,7 @@ valence: 0,1
 arousal: 0.4
 socialEnergy: 0.6
 
-## Биография (вымысел)
+## Биография
 Вырос в портовом городе.
 `
 }
@@ -131,7 +131,7 @@ func TestParsePersonaFileMoodBounds(t *testing.T) {
 }
 
 func TestParsePersonaFileNoBio(t *testing.T) {
-	text := strings.Replace(validPersonaText(), "\n## Биография (вымысел)\nВырос в портовом городе.\n", "", 1)
+	text := strings.Replace(validPersonaText(), "\n## Биография\nВырос в портовом городе.\n", "", 1)
 	src, err := ParsePersonaFile(text)
 	if err != nil {
 		t.Fatalf("файл без биографии отвергнут: %v", err)

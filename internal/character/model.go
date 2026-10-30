@@ -37,6 +37,10 @@ type ChatConfig struct {
 	// ForcedTool — имя инструмента, чей вызов провайдер требует первым
 	// (tool_choice). Пусто — обычный режим, модель решает сама.
 	ForcedTool string
+	// SessionID — стабильный идентификатор разговора для провайдера
+	// (x-opencode-session, OpenCode Go: маршрутизация и кэш промптов).
+	// Пусто — заголовок не ставится.
+	SessionID string
 
 	mu    sync.Mutex
 	calls int
@@ -102,9 +106,15 @@ func (c *ChatConfig) nextCall() (force bool, tool string) {
 // выполняться. Клон получает собственный счётчик вызовов (это отдельный ход).
 // Поддерживается ключ forced_tool.
 func (c *ChatConfig) Clone(overrides map[string]any) (config.ModelConfig, error) {
-	cp := &ChatConfig{params: c.params, inner: c.inner, ForcedTool: c.ForcedTool}
+	cp := &ChatConfig{params: c.params, inner: c.inner, ForcedTool: c.ForcedTool, SessionID: c.SessionID}
 	for k, v := range overrides {
 		switch k {
+		case "session_id":
+			str, ok := v.(string)
+			if !ok {
+				return nil, fmt.Errorf("character: override session_id: want string, got %T", v)
+			}
+			cp.SessionID = str
 		case "forced_tool":
 			s, ok := v.(string)
 			if !ok {
@@ -136,6 +146,13 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 				"function": map[string]any{"name": tool},
 			},
 		}
+	}
+	if c.cfg.SessionID != "" {
+		if params.ExtraHeaders == nil {
+			params.ExtraHeaders = map[string]string{}
+		}
+		params.ExtraHeaders["x-opencode-session"] = c.cfg.SessionID
+		params.ExtraHeaders["User-Agent"] = "dio-agent/0.1 (living telegram character)"
 	}
 	return config.RunChatCompat(ctx, params, messages, conv, opts)
 }

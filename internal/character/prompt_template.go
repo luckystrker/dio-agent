@@ -45,7 +45,7 @@ func RenderPersonaBlock(p Persona) string {
 		fmt.Sprintf("Ценности: %s.", strings.Join(p.Values, ", ")),
 	}
 	if p.SeedBio != nil {
-		lines = append(lines, fmt.Sprintf("Твоя заданная биография (вымысел для колорита, не пережитый опыт): %s", *p.SeedBio))
+		lines = append(lines, fmt.Sprintf("Твоя биография: %s", *p.SeedBio))
 	}
 	return strings.Join(lines, "\n\n")
 }

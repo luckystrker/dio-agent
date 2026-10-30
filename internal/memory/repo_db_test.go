@@ -60,6 +60,31 @@ func seedItem(t *testing.T, ctx context.Context, db DBTX, scopeID, text string, 
 	return item
 }
 
+// TestSearchFTSOrSemantics — слова запрос «коллекционирует клавиатуры грибы» (2 совпадения у первой, 1 у второй)а соединяются ИЛИ (§10.4, философия
+// №8): websearch-AND обнулял выдачу от одного неподходящего термина — запрос «коллекционирует клавиатуры грибы» (2 совпадения у первой, 1 у второй)
+// «коллекционирует коллекция собирает» не находил запись про клавиатуры
+// (живой прогон эвалов 2026-10-30). Релевантность — покрытие запрос «коллекционирует клавиатуры грибы» (2 совпадения у первой, 1 у второй)а сначала,
+// затем salience.
+func TestSearchFTSOrSemantics(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	keyboards := seedItem(t, ctx, pool, scopeA,
+		"Коля коллекционирует механические клавиатуры и предпочитает тактильные свитчи",
+		seedOpts{salience: 0.5})
+	seedItem(t, ctx, pool, scopeA, "Коля собирает грибы тихими утрами", seedOpts{salience: 0.5})
+
+	got, err := (Items{}).SearchFTS(ctx, pool, scopeA, "коллекционирует клавиатуры грибы", 5)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(got) < 2 {
+		t.Fatalf("OR-поиск должен находить обе записи по одному совпавшему слову, найдено %d", len(got))
+	}
+	if got[0].ID != keyboards.ID {
+		t.Fatalf("запись с двумя совпавшими словами должна быть первой: got[0]=%d хочу %d", got[0].ID, keyboards.ID)
+	}
+}
+
 // seedRawProvenance сеет provenance с произвольными (в т.ч. битыми) скоупами
 // напрямую в SQL: репозиторий битые скоупы отклоняет, а чтение обязано
 // устоять перед таким рядком (defense in depth §9.1).

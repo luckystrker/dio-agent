@@ -6,6 +6,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -142,6 +143,19 @@ func scanItem(row pgxRow) (Item, error) {
 		return Item{}, err
 	}
 	return it, nil
+}
+
+// orTsQuery собирает tsquery с OR-семантикой из слов запроса; символы вне
+// слов отбрасываются — синтаксис to_tsquery из пользовательского ввода не
+// собирается. Пусто — искать нечего.
+var orQueryWordRe = regexp.MustCompile(`[\p{L}\p{N}_-]+`)
+
+func orTsQuery(query string) string {
+	words := orQueryWordRe.FindAllString(query, -1)
+	if len(words) == 0 {
+		return ""
+	}
+	return strings.Join(words, " | ")
 }
 
 // visCond — SQL-эквивалент ItemVisible (§9.2: фильтр ДО извлечения текста и
@@ -301,14 +315,16 @@ func (Items) Get(ctx context.Context, db DBTX, id int64, audience string) (Item,
 	return it, nil
 }
 
-// SearchFTS — полнотекстовый поиск (§10.4 п.4) по русской морфологии
-// (websearch_to_tsquery), ранжирование salience DESC, recorded_at DESC.
+// SearchFTS — полнотекстовый поиск (§10.4 п.4) по русской морфологии,
+// слова запроса соединяются ИЛИ (§10.4, философия №8: websearch-AND обнулял
+// выдачу от одного неподходящего термина — живой прогон эвалов 2026-10-30).
+// Ранжирование: покрытие запроса (ts_rank), затем salience, recorded_at.
 // Фильтр видимости в WHERE — до ранжирования.
 func (Items) SearchFTS(ctx context.Context, db DBTX, audience, query string, limit int) ([]Item, error) {
 	if !IsValidScope(audience) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidScope, audience)
 	}
-	q := strings.TrimSpace(query)
+	q := orTsQuery(query)
 	if q == "" {
 		return nil, nil
 	}
@@ -321,8 +337,9 @@ func (Items) SearchFTS(ctx context.Context, db DBTX, audience, query string, lim
 		 LEFT JOIN provenance p ON p.id = m.provenance_id
 		 WHERE m.status = 'active'
 		   AND `+visCond("m", 1)+`
-		   AND to_tsvector('russian', m.text) @@ websearch_to_tsquery('russian', $2)
-		 ORDER BY m.salience DESC, m.recorded_at DESC
+		   AND to_tsvector('russian', m.text) @@ to_tsquery('russian', $2)
+		 ORDER BY ts_rank(to_tsvector('russian', m.text), to_tsquery('russian', $2)) DESC,
+		          m.salience DESC, m.recorded_at DESC
 		 LIMIT $3`,
 		audience, q, limit)
 	if err != nil {

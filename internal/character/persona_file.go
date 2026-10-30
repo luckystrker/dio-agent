@@ -16,7 +16,7 @@ import (
 // Обязательные и известные секции persona-файла (§7.1).
 var (
 	personaRequiredSections = []string{"Имя", "Описание", "Манера речи", "Ценности", "Настроение (базовое)"}
-	personaKnownSections    = append(append([]string{}, personaRequiredSections...), "Биография (вымысел)")
+	personaKnownSections    = append(append([]string{}, personaRequiredSections...), "Биография")
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
@@ -35,7 +35,8 @@ type PersonaSource struct {
 	SpeechStyle  string
 	Values       []string
 	MoodBaseline Mood
-	// SeedBio — художественная биография (persona_seed, вымысел); nil — секции нет.
+	// SeedBio — принятая биография (persona_seed; подаётся как прожитая —
+	// философия №4, решение 2026-10-31); nil — секции нет.
 	SeedBio *string
 }
 
@@ -150,7 +151,7 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 
 	// биография необязательна; пустая секция = нет биографии
 	var seedBio *string
-	if raw := sections["Биография (вымысел)"]; strings.TrimSpace(raw) != "" {
+	if raw := sections["Биография"]; strings.TrimSpace(raw) != "" {
 		bio := raw
 		seedBio = &bio
 	}

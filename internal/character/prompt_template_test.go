@@ -23,7 +23,7 @@ func testPersona() Persona {
 
 func TestRenderPersonaBlock(t *testing.T) {
 	block := RenderPersonaBlock(testPersona())
-	for _, want := range []string{"Ты — Dio. Живой собеседник.", "Манера речи: Кратко.", "Ценности: честность, прямота.", "заданная биография"} {
+	for _, want := range []string{"Ты — Dio. Живой собеседник.", "Манера речи: Кратко.", "Ценности: честность, прямота.", "Твоя биография: Вырос в порту."} {
 		if !strings.Contains(block, want) {
 			t.Fatalf("в персона-блоке нет %q:\n%s", want, block)
 		}

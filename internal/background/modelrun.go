@@ -100,13 +100,15 @@ type turnModelRun struct {
 // repair-retry (§11.3), резерв бюджета до вызова (§16, пул background).
 // tools — только инструменты памяти; scopeID — DI-аудитория (§9.2). На
 // инициативных ходах обращение к памяти не принуждается (§10.4).
-func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID string) (turnModelRun, error) {
-	return s.runTurnModelMW(ctx, operation, system, userText, tools, scopeID, nil)
-}
-
-// runTurnModelMW — то же с дополнительными middleware задачи (бюджеты веба §15).
-func (s *Scheduler) runTurnModelMW(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
-	cfg, err := s.model.Clone(nil)
+// runTurnModel — модельный ход фоновой задачи: строгий TurnResult, один
+// repair-retry (§11.3), резерв бюджета до вызова (§16, пул background), сессия
+// провайдера по чату (x-opencode-session). sessionID пуст — заголовка нет.
+func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
+	overrides := map[string]any(nil)
+	if sessionID != "" {
+		overrides = map[string]any{"session_id": sessionID}
+	}
+	cfg, err := s.model.Clone(overrides)
 	if err != nil {
 		return turnModelRun{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
 	}
