@@ -5,7 +5,7 @@
  *
  * - Reads the hook payload from stdin; only acts when the Bash command is a `git commit`.
  * - If go.mod exists: runs the Go gates in order:
- *     1. `gofmt -l .`      — пустой вывод (пути из node_modules не в счёт: это мусор npm, не наш код);
+ *     1. `gofmt -l .`      — пустой вывод;
  *     2. `go vet ./...`    — без замечаний;
  *     3. `go test ./...`   — юнит-тесты БЕЗ живой БД (БД-тесты — под тегом db,
  *       отдельным прогоном против Postgres из docker-compose, вне коммит-гейта).
@@ -54,7 +54,7 @@ function runGate(cmd, args) {
   };
 }
 
-/** gofmt -l . : «плохие» файлы построчно; node_modules — мусор npm, не наш код. */
+/** gofmt -l . : «плохие» файлы построчно. */
 function unformattedGoFiles() {
   const { ok, output } = runGate("gofmt", ["-l", "."]);
   if (!ok && output === "") {
@@ -63,8 +63,7 @@ function unformattedGoFiles() {
   const files = output
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .filter((line) => !line.replace(/\\/g, "/").startsWith("node_modules/"));
+    .filter((line) => line !== "");
   return { error: null, files };
 }
 

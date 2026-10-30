@@ -12,7 +12,7 @@ Go · PostgreSQL (+pgvector) · событийное ядро ago (`third_party/
 | С какими приоритетами сверяются решения | `docs/PHILOSOPHY.md` |
 | Что делаем сейчас и что уже принято | `CHECKLIST.md` |
 | Референс подхода к работе с агентами | `docs/references/yt-summary-uY1bTL1i2DM.md` |
-| Структура кода | `cmd/`, `internal/<модуль>/` — telegram, character, memory, background, runtime; фреймворк — `third_party/ago` (вендорная копия, replace-директива) |
+| Структура кода | `cmd/`, `internal/<модуль>/` — app, telegram, character, memory, background, runtime, worker; миграции — `migrations/` (встраиваются embed'ом); фреймворк — `third_party/ago` (вендорная копия, replace-директива) |
 
 ## Как работаем (пайплайн)
 
@@ -21,7 +21,7 @@ Go · PostgreSQL (+pgvector) · событийное ядро ago (`third_party/
 3. **Перед реализацией** → убедиться, что решение не противоречит `PHILOSOPHY.md`, термины совпадают со словарём. Пункт должен идти тест-первым — скилл `tdd`.
 4. **Нужно что-то изучить** → скилл `research` (фоновый агент, находки со ссылками в `docs/research/`).
 5. **После реализации** → скилл `acceptance` (тестировщик → критик → гейт), только затем commit. Ревью большого диффа/ветки от точки — скилл `code-review`.
-6. **Коммит** → хук-гейт `.zcode/hooks/pre-commit-gate.mjs` прогоняет lint/typecheck/test; коммит блокируется при красном.
+6. **Коммит** → хук-гейт `.zcode/hooks/pre-commit-gate.mjs` прогоняет gofmt/go vet/go test (юниты); коммит блокируется при красном.
 7. **Конец сессии** → скилл `handoff`.
 
 ## Немного правил (весь список)
@@ -34,4 +34,4 @@ Go · PostgreSQL (+pgvector) · событийное ядро ago (`third_party/
 
 ## Статус
 
-Этапы 0–8 реализованы на TypeScript (спека v0.6, история в git). Идёт этап 9: переезд на Go с событийным ядром ago (спека v0.7); TS-код служит справочником и удаляется в 9.8.
+Переезд на Go завершён (этап 9, спека v0.7): TS-код удалён в 9.8, этапы 0–8 остались историей в git. Вперёд — ручная приёмка Р: живой диалог с персонажем на VPS по docs/RUNBOOK.md (настройка MODEL_*/TELEGRAM_* — Р-критерий 9.3/9.4).

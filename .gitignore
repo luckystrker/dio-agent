@@ -1,11 +1,7 @@
-node_modules/
-dist/
-build/
-coverage/
-*.log
 .env
 .env.*
 !.env.example
-.dry-run-updates.jsonl
 .DS_Store
-.mutation-report.json
+# локальная сборка без -o (go build ./cmd/agent)
+agent
+agent.exe

@@ -5,7 +5,8 @@ systemd с автоперезапуском, миграции схемы, бэк
 процедура восстановления, таймауты модели в конфигурации.
 
 Ожидаемая машина: VPS с Ubuntu 22.04/24.04, 1–2 vCPU, 2 ГБ RAM, 20 ГБ диска.
-Один процесс приложения; PostgreSQL на той же машине. Docker не обязателен.
+Один процесс приложения (Go-бинарник); PostgreSQL на той же машине. Docker
+не обязателен.
 
 ## 1. Подготовка сервера
 
@@ -14,9 +15,11 @@ systemd с автоперезапуском, миграции схемы, бэк
 apt update && apt upgrade -y
 apt install -y git curl
 
-# Node.js 22 (проект требует >=22)
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-apt install -y nodejs
+# Go (сборка на сервере; версия — см. go.mod в репозитории)
+GO_VERSION=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)
+curl -fsSL "https://go.dev/dl/${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz
+rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
+ln -sf /usr/local/go/bin/go /usr/local/bin/go
 
 # PostgreSQL 16 + pgvector из репозитория PGDG
 apt install -y curl ca-certificates
@@ -28,9 +31,9 @@ apt install -y postgresql-16 postgresql-16-pgvector
 systemctl enable --now postgresql
 ```
 
-Альтернатива: PostgreSQL можно не ставить нативно, а поднять тем же
-`docker compose up -d` из репозитория (образ `pgvector/pgvector:pg17`) —
-тогда на VPS нужен Docker, а пункт 2 пропускается.
+Альтернатива сборке на сервере: собрать бинарник на рабочей машине и залить
+его (шаг 3, вариант Б) — тогда Go на VPS не нужен, только git для обновления
+файлов `config/`.
 
 ## 2. База данных
 
@@ -45,19 +48,34 @@ SQL
 
 Пароль придумай и сохрани в менеджере секретов — он пойдёт в `.env`.
 
-## 3. Код и сборка (Linux)
+## 3. Код и сборка Linux
+
+Вариант А — собрать на сервере:
 
 ```bash
 adduser --system --group --home /opt/dio-agent dio
 sudo -u dio git clone <репозиторий> /opt/dio-agent
 cd /opt/dio-agent
-sudo -u dio npm ci            # зависимости
-sudo -u dio npm run build     # tsc → dist/
+sudo -u dio go build -o dio-agent ./cmd/agent   # зависимости скачивает сам
 ```
+
+Вариант Б — кросс-сборка на рабочей машине и заливка (Go — без CGO,
+бинарник статический):
+
+```bash
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dio-agent ./cmd/agent
+scp dio-agent vps:/opt/dio-agent/dio-agent   # затем каждый релиз
+```
+
+На сервере обязательно должны лежать `config/persona.md` и
+`config/system-prompt.md` — процесс читает их относительно рабочего
+каталога (systemd `WorkingDirectory`).
 
 ## 4. Переменные окружения
 
-Файл `/opt/dio-agent/.env` (права 600, владелец dio; в git не попадает):
+Файл `/opt/dio-agent/.env` (права 600, владелец dio; в git не попадает).
+Бинарник сам читает `.env` из рабочего каталога; переменные окружения
+(например от systemd) сильнее файла:
 
 ```ini
 DATABASE_URL=postgres://dio:ПАРОЛЬ@127.0.0.1:5432/dio
@@ -66,31 +84,41 @@ LOG_LEVEL=info
 
 # Модель (OpenAI-совместимый протокол). Стартовый endpoint — OpenCode Go,
 # запасной — OpenRouter: переключение правкой этих строк, без redeploy кода.
+# Три переменные задаются вместе или ни одной; не настроены — ходы честно
+# помечаются пропуском с причиной «модель не настроена».
 MODEL_ENDPOINT=https://...
 MODEL_API_KEY=...
 MODEL_MODEL=...
 # Таймауты/лимиты §17: 60 с на вызов, 1 повтор, 1000 токенов выхода,
-# до 400 модельных вызовов в сутки.
+# 100 модельных вызовов в сутки.
 # MODEL_TIMEOUT_MS=60000
 # MODEL_MAX_RETRIES=1
 # MODEL_MAX_OUTPUT_TOKENS=1000
-# MODEL_DAILY_CALLS_LIMIT=400
+# MODEL_DAILY_CALLS_LIMIT=100
 
-# Telegram. Для первого запуска без токена: TELEGRAM_DRY_RUN=true
+# Telegram. Для первого запуска без токена: TELEGRAM_DRY_RUN=true —
+# отправки пишутся в лог, ничего не уходит в Telegram.
 TELEGRAM_BOT_TOKEN=...
 # TELEGRAM_API_BASE=https://api.telegram.org
+
+# Векторизатор памяти (§10.4), OpenAI-совместимый endpoint; три переменные
+# вместе или ни одной. Не настроен — семантический поиск выключен,
+# full-text остаётся.
+# EMBEDDING_ENDPOINT=https://api.openai.com/v1
+# EMBEDDING_API_KEY=...
+# EMBEDDING_MODEL=text-embedding-3-small
 ```
 
-Проверка конфигурации без запуска: `sudo -u dio npm run typecheck`.
+Валидация конфигурации строгая и происходит при старте до запуска циклов:
+невалидное значение или противоречивая комбинация (например токен вместе с
+dry-run) останавливают процесс с сообщением, называющим переменную.
 
 ## 5. Миграции
 
-```bash
-cd /opt/dio-agent && sudo -u dio npm run migrate
-```
-
-Миграции идемпотентны (node-pg-migrate, таблица `pgmigrations`).
-Прогонять при каждом обновлении кода — шаг 9.
+Отдельной команды нет: SQL-миграции из `migrations/` встроены в бинарник
+и применяются при каждом старте (таблица `schema_migrations`, по порядку,
+идемпотентно — уже применённые пропускаются). Строка старта
+`миграции: применено N, пропущено M` показывает, что произошло.
 
 ## 6. systemd
 
@@ -107,9 +135,12 @@ Type=simple
 User=dio
 WorkingDirectory=/opt/dio-agent
 EnvironmentFile=/opt/dio-agent/.env
-ExecStart=/usr/bin/node dist/index.js
+ExecStart=/opt/dio-agent/dio-agent
 Restart=always
 RestartSec=5
+# Graceful shutdown (§5.3) может до 90 с дожидаться текущего хода —
+# запас, чтобы systemd не убил процесс посреди дренирования.
+TimeoutStopSec=120
 # Свободное место на диске — единственный лимит, который процесс реально ест
 StandardOutput=journal
 StandardError=journal
@@ -125,8 +156,10 @@ systemctl enable --now dio-agent
 systemctl status dio-agent --no-pager
 ```
 
-Один процесс на базу гарантируется advisory-lock синглтоном (§5.1):
-второй экземпляр при том же DATABASE_URL честно выйдет с кодом 3.
+Один процесс на базу гарантируется advisory-lock синглтоном (§5.1): второй
+экземпляр при том же DATABASE_URL сразу выходит с ненулевым кодом и
+сообщением `singleton: замок занят`; systemd будет перезапускать его каждые
+5 с, пока первый жив, — это ожидаемо, ищи дубль сервиса.
 
 ## 7. Проверка живости (smoke)
 
@@ -134,15 +167,17 @@ systemctl status dio-agent --no-pager
 journalctl -u dio-agent -f
 ```
 
-В логе старта ожидаем: `singleton захвачен`, `recovery очереди завершён`,
-`запуск завершён; polling, worker, планировщик и доставка работают`.
-Дальше каждые 15 с — пульс `жив` уровня debug (при LOG_LEVEL=info не виден)
-и при непустой очереди — строка `очередь` с глубиной и возрастом старейшей
-работы (§20).
+В логе старта ожидаем по порядку: `миграции: применено N, пропущено M`,
+`singleton получен (pid N)`, `приложение запущено: модель=настроена
+telegram=true`. Дальше каждые 15–30 с — пульс `heartbeat: фон жив: …`
+уровня debug (при LOG_LEVEL=info не виден); при непустой очереди ходов в
+нём же видны глубина и возраст старейшей (§20).
 
-Smoke без Telegram-токена: `TELEGRAM_DRY_RUN=true`, затем из второго
-терминала `npm run feed -- "привет"` — updates читаются из файла, ответ
-пишется в лог, ничего не уходит в Telegram.
+Ход в логе: `ход N выполнен: recovered=… памяти=… доставки=…`; доставка:
+`delivery: отправлено (turn N, поз. N, message_id N)`.
+
+Smoke без Telegram-токена: `TELEGRAM_DRY_RUN=true` — бот работает, отправки
+пишутся в лог, ничего не уходит в Telegram.
 
 ## 8. Бэкап и восстановление PostgreSQL
 
@@ -162,54 +197,65 @@ sudo -u postgres dropdb dio && sudo -u postgres createdb -O dio dio
 sudo -u postgres pg_restore -d dio /var/backups/dio-ГГГГ-ММ-ДД.dump
 sudo -u postgres psql -d dio -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 systemctl start dio-agent
-journalctl -u dio-agent -n 50   # убедиться: singleton захвачен, recovery прошёл
+journalctl -u dio-agent -n 50   # убедиться: миграции/singleton, recovery прошёл
 ```
 
-Восстановление состояния после SIGKILL автоматическое (§5.3, §12.2):
-незавершённая работа подбирается при старте, «зависшая» доставка помечается
-unknown без слепой повторной отправки.
+Восстановление после сбоя процесса автоматическое (§5.3, §12.2, проверено
+E2E 9.7): при старте незавершённые порции событий возвращаются в очередь,
+ход с сохранённым результатом применяется без новой генерации, «зависшая»
+доставка (sending мёртвого процесса) помечается unknown без слепой
+повторной отправки. SIGKILL как условие корректности не требуется —
+graceful не обязателен.
 
 ## 9. Обновление релиза
+
+Вариант А (сборка на сервере):
 
 ```bash
 cd /opt/dio-agent
 sudo -u dio git pull
-sudo -u dio npm ci
-sudo -u dio npm run build
-sudo -u dio npm run migrate
+sudo -u dio go build -o dio-agent ./cmd/agent
 systemctl restart dio-agent
-journalctl -u dio-agent -f     # проконтролировать старт
+journalctl -u dio-agent -f     # проконтролировать старт (миграции применит старт)
 ```
 
-Откат: `git checkout <предыдущий тег>`, повторить build+migrate+restart.
-Миграции назад не откатываются (только вперёд) — при серьезной несовместимости
-восстанавливай базу из бэкапа.
+Вариант Б (кросс-сборка): собрать локально, `scp` бинарник, затем
+`systemctl restart dio-agent`.
+
+Откат: вернуть предыдущий бинарник (`git checkout <тег>` + пересборка или
+прежний скопированный файл), перезапустить. Миграции назад не откатываются
+(только вперёд) — при серьёзной несовместимости восстанавливай базу из
+бэкапа.
 
 ## 10. Наблюдаемость (§20)
 
-- Журнал хода: каждая запись `ход выполнен` содержит turn/chat/work IDs,
-  decision, число сообщений, latencyMs, usage токенов, бюджетную бронь
-  (`budgetOperationId`) и reason. Полный приватный промпт не логируется.
-- Терминальные пропуски: `работа помечена терминальным пропуском` (warn) с
-  причиной — модель не настроена, бюджет исчерпан, лимит попыток.
-- Доставка: `unknown`-отправки видны в статусах outbox и логах delivery.
-- Очередь: глубина и возраст старейшей работы — в пульсе; при возрасте
-  старше 120 с — warn `очередь растёт`.
+- Ход: `ход N выполнен: recovered=… памяти=… доставки=…`; фоновая задача —
+  одна строка `фон: задача=… kind=… decision=… outcome=… latency_ms=…
+  llm_calls=… tokens=… budget=… mood_reason=…`. Полный приватный промпт
+  не логируется.
+- Терминальные пропуски: `ход N пропущен терминально: …` — модель не
+  настроена, дневной бюджет исчерпан, лимит попыток.
+- Очередь: глубина и возраст старейшего хода — в heartbeat; три такта
+  подряд растущая очередь прямых обращений даёт warn `рост очереди прямых
+  обращений: …` (§20), фон при этом откладывается.
+- Доставка: `delivery: отправка неопределённа (unknown), зависимых отменено N`
+  — обрыв без ответа; повторных слепых отправок нет.
 - Поиск по журналу: `journalctl -u dio-agent --since "1 hour ago" | grep ход`.
 
 ## 11. Частые проблемы
 
 | Симптом | Что смотреть |
 |---|---|
-| Процесс выходит с кодом 3 | Второй экземпляр с той же базой — синглтон (§5.1). Ищи дубль сервиса. |
-| `работа помечена терминальным пропуском: модель не настроена` | Пусты MODEL_ENDPOINT/API_KEY/MODEL в `.env`. |
-| `дневной бюджет модельных вызовов исчерпан` | Лимит MODEL_DAILY_CALLS_LIMIT; ходы возобновятся назавтра. |
-| Ходы виснут в pending | `очередь` в пульсе, возраст старейшей работы; PostgreSQL жив (`systemctl status postgresql`). |
+| Выход с `singleton: замок занят` | Второй экземпляр с той же базой — синглтон (§5.1). Ищи дубль сервиса. |
+| Выход при старте с именем переменной | Ошибка конфигурации: частично заданная группа MODEL_*/EMBEDDING_*, TELEGRAM_DRY_RUN вместе с токеном и т.п. Сообщение называет переменную. |
+| `ход N пропущен терминально: модель не настроена` | Пусты MODEL_ENDPOINT/API_KEY/MODEL в `.env`. |
+| `…: дневной бюджет … исчерпан` | Лимит MODEL_DAILY_CALLS_LIMIT; ходы пропускаются до конца суток. |
+| Ходы виснут | Heartbeat: глубина/возраст очереди; warn `рост очереди…`; PostgreSQL жив (`systemctl status postgresql`). |
 | Telegram не отвечает | Токен/доступы бота; dry-run выключен; `journalctl` на ошибки polling. |
 
 ## 12. Правка характера и системного промпта
 
-Тексты персонажа лежат в двух файлах в корне проекта и правятся без изменения кода:
+Тексты персонажа лежат в двух файлах и правятся без изменения кода:
 
 | Файл | Что внутри |
 |---|---|
@@ -223,7 +269,7 @@ nano config/persona.md        # правишь текст (правила — в
 git add config/ && git commit -m "persona: ..." && git push   # правки переживают обновления релиза
 # на VPS: git pull, затем
 sudo systemctl restart dio-agent
-journalctl -u dio-agent -n 20 | grep persona   # строка "persona загружена" с новой версией
+journalctl -u dio-agent -n 20   # старт без ошибок = файл принят
 ```
 
 Как это работает: при старте файл сравнивается с активной записью в базе.
