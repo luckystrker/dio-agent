@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -157,6 +158,27 @@ func (s *PgStreamStorage) getHistory(ctx context.Context, streamID string) ([]ev
 	return out, nil
 }
 
+// SetHistoryTx — вариант setHistory внутри ЧУЖОЙ транзакции (§12.1: запись
+// дельт, создание outbox rows и события deltas_applied + delivery_queued —
+// одна транзакция PostgreSQL). Строки потока блокируются, префикс сверяется,
+// вставляется только суффикс; транзакцию фиксирует вызывающий. Уже записанная
+// история длиннее предложенной — ErrHistoryConflict (повторное применение
+// отклоняется), совпадение — честный no-op.
+func (s *PgStreamStorage) SetHistoryTx(ctx context.Context, tx pgx.Tx, streamID string, evs []events.Event) error {
+	if streamID == "" {
+		return errors.New("журнал: пустой stream_id")
+	}
+	types, payloads, err := marshalAll(streamID, evs)
+	if err != nil {
+		return err
+	}
+	stored, err := lockPrefix(ctx, tx, streamID, types, payloads)
+	if err != nil {
+		return err
+	}
+	return insertSuffix(ctx, tx, streamID, evs, stored)
+}
+
 // setHistory проверяет префикс и вставляет суффикс в одной транзакции.
 func (s *PgStreamStorage) setHistory(ctx context.Context, streamID string, evs []events.Event) error {
 	if streamID == "" {
@@ -165,18 +187,9 @@ func (s *PgStreamStorage) setHistory(ctx context.Context, streamID string, evs [
 
 	// Маршалим всё предложенное заранее: сбой сериализации не должен оставлять
 	// полузаписанный суффикс.
-	types := make([]string, len(evs))
-	payloads := make([]string, len(evs))
-	for i, ev := range evs {
-		if ev == nil {
-			return fmt.Errorf("журнал: поток %q: событие %d пустое", streamID, i)
-		}
-		raw, err := events.MarshalEvent(ev)
-		if err != nil {
-			return fmt.Errorf("журнал: поток %q: событие %d не сериализуется: %w", streamID, i, err)
-		}
-		types[i] = ev.EventType()
-		payloads[i] = string(raw)
+	types, payloads, err := marshalAll(streamID, evs)
+	if err != nil {
+		return err
 	}
 
 	tx, err := s.pool.Begin(ctx)
@@ -185,6 +198,38 @@ func (s *PgStreamStorage) setHistory(ctx context.Context, streamID string, evs [
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	stored, err := lockPrefix(ctx, tx, streamID, types, payloads)
+	if err != nil {
+		return err
+	}
+	if err := insertSuffix(ctx, tx, streamID, evs, stored); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+// marshalAll сериализует предложенную историю (тип + payload каждого события).
+func marshalAll(streamID string, evs []events.Event) ([]string, []string, error) {
+	types := make([]string, len(evs))
+	payloads := make([]string, len(evs))
+	for i, ev := range evs {
+		if ev == nil {
+			return nil, nil, fmt.Errorf("журнал: поток %q: событие %d пустое", streamID, i)
+		}
+		raw, err := events.MarshalEvent(ev)
+		if err != nil {
+			return nil, nil, fmt.Errorf("журнал: поток %q: событие %d не сериализуется: %w", streamID, i, err)
+		}
+		types[i] = ev.EventType()
+		payloads[i] = string(raw)
+	}
+	return types, payloads, nil
+}
+
+// lockPrefix блокирует строки потока и сверяет хранимый префикс с предложенным
+// (по jsonb-семантике); возвращает число совпавших событий.
+func lockPrefix(ctx context.Context, tx pgx.Tx, streamID string, types, payloads []string) (int, error) {
 	// Блокируем строки потока до конца транзакции: писатели одного потока
 	// выстраиваются в очередь, чтение префикса стабильно.
 	rows, err := tx.Query(ctx, `
@@ -194,30 +239,30 @@ func (s *PgStreamStorage) setHistory(ctx context.Context, streamID string, evs [
 		ORDER BY seq
 		FOR UPDATE`, streamID)
 	if err != nil {
-		return fmt.Errorf("журнал: поток %q не читается: %w", streamID, err)
+		return 0, fmt.Errorf("журнал: поток %q не читается: %w", streamID, err)
 	}
 	var seqs []int64
 	for rows.Next() {
 		var seq int64
 		if err := rows.Scan(&seq); err != nil {
 			rows.Close()
-			return fmt.Errorf("журнал: поток %q: %w", streamID, err)
+			return 0, fmt.Errorf("журнал: поток %q: %w", streamID, err)
 		}
 		seqs = append(seqs, seq)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("журнал: поток %q: %w", streamID, err)
+		return 0, fmt.Errorf("журнал: поток %q: %w", streamID, err)
 	}
 
 	if err := checkContiguous(streamID, seqs); err != nil {
-		return err
+		return 0, err
 	}
 
 	stored := len(seqs)
-	if stored > len(evs) {
-		return fmt.Errorf("%w: поток %q: хранится %d событий, предложено %d — сокращение истории",
-			ErrHistoryConflict, streamID, stored, len(evs))
+	if stored > len(types) {
+		return 0, fmt.Errorf("%w: поток %q: хранится %d событий, предложено %d — сокращение истории",
+			ErrHistoryConflict, streamID, stored, len(types))
 	}
 
 	// Префикс: сравнение по jsonb-семантике (порядок ключей и формат чисел не
@@ -232,39 +277,46 @@ func (s *PgStreamStorage) setHistory(ctx context.Context, streamID string, evs [
 			   OR es.payload IS DISTINCT FROM p.payload::jsonb`,
 			streamID, types[:stored], payloads[:stored]).Scan(&firstBad)
 		if err != nil {
-			return fmt.Errorf("журнал: поток %q: префикс не сверяется: %w", streamID, err)
+			return 0, fmt.Errorf("журнал: поток %q: префикс не сверяется: %w", streamID, err)
 		}
 		if firstBad > 0 {
-			return fmt.Errorf("%w: поток %q: событие на позиции %d переписано",
+			return 0, fmt.Errorf("%w: поток %q: событие на позиции %d переписано",
 				ErrHistoryConflict, streamID, firstBad)
 		}
 	}
+	return stored, nil
+}
 
-	// Суффикс: события после хранимого префикса, seq продолжается по порядку.
-	if stored < len(evs) {
-		suffixTypes := types[stored:]
-		suffixPayloads := payloads[stored:]
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO event_streams (stream_id, seq, type, payload)
-			SELECT $1, $2 + p.ord, p.type, p.payload::jsonb
-			FROM unnest($3::text[], $4::text[]) WITH ORDINALITY AS p(type, payload, ord)`,
-			streamID, stored, suffixTypes, suffixPayloads)
-		if err != nil {
-			// Гонка двух писателей на свежем потоке: проигравший упирается в
-			// UNIQUE(stream_id, seq) — это тот же конфликт префикса.
-			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				return fmt.Errorf("%w: поток %q: %v (гонка писателей)", ErrHistoryConflict, streamID, pgErr.Detail)
-			}
-			return fmt.Errorf("журнал: поток %q: суффикс не записан: %w", streamID, err)
-		}
-		if tag.RowsAffected() != int64(len(suffixTypes)) {
-			return fmt.Errorf("журнал: поток %q: записано %d строк, предложено %d",
-				streamID, tag.RowsAffected(), len(suffixTypes))
-		}
+// insertSuffix вставляет события после хранимого префикса (from — его длина).
+func insertSuffix(ctx context.Context, tx pgx.Tx, streamID string, evs []events.Event, from int) error {
+	types, payloads, err := marshalAll(streamID, evs)
+	if err != nil {
+		return err
 	}
-
-	return tx.Commit(ctx)
+	if from >= len(evs) {
+		return nil // суффикс пуст: повторная запись той же истории — no-op
+	}
+	suffixTypes := types[from:]
+	suffixPayloads := payloads[from:]
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO event_streams (stream_id, seq, type, payload)
+		SELECT $1, $2 + p.ord, p.type, p.payload::jsonb
+		FROM unnest($3::text[], $4::text[]) WITH ORDINALITY AS p(type, payload, ord)`,
+		streamID, from, suffixTypes, suffixPayloads)
+	if err != nil {
+		// Гонка двух писателей на свежем потоке: проигравший упирается в
+		// UNIQUE(stream_id, seq) — это тот же конфликт префикса.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("%w: поток %q: %v (гонка писателей)", ErrHistoryConflict, streamID, pgErr.Detail)
+		}
+		return fmt.Errorf("журнал: поток %q: суффикс не записан: %w", streamID, err)
+	}
+	if tag.RowsAffected() != int64(len(suffixTypes)) {
+		return fmt.Errorf("журнал: поток %q: записано %d строк, предложено %d",
+			streamID, tag.RowsAffected(), len(suffixTypes))
+	}
+	return nil
 }
 
 // checkContiguous требует, чтобы номера событий потока были 1..n без пропусков:

@@ -52,6 +52,7 @@ type ModelSettings struct {
 	DailyCallsLimit int // дневной лимит модельных вызовов (§16)
 	HistoryMessages int // недавний разговор в контексте хода (§11.1 п.5)
 	HistoryMaxChars int // потолок суммарного объёма истории
+	ToolCallsLimit  int // лимит обращений к инструментам за ход (§11.2, §17)
 }
 
 // EmbeddingSettings — векторизатор для семантического поиска памяти
@@ -239,6 +240,10 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	toolCallsLimit, err := positiveInt(env, "MODEL_TOOL_CALLS_LIMIT", 5)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ModelSettings{
 		Endpoint:        endpoint,
@@ -250,6 +255,7 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 		DailyCallsLimit: dailyCallsLimit,
 		HistoryMessages: historyMessages,
 		HistoryMaxChars: historyMaxChars,
+		ToolCallsLimit:  toolCallsLimit,
 	}, nil
 }
 
