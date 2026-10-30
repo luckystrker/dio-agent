@@ -160,7 +160,7 @@
 
 - [x] 12.1 Проактивность (132807e): гейт «чат активен» — окно тишины 30 минут (InitiativeQuietWindow) вместо сравнения с createdAt намерения, которое убивало любую инициативу; explore без гейта; addendum инициативы — без новых intentions; настроение относительно базовой линии persona (чуть оживлён / не в духе); промпт: блоки «Инициатива» (intentions + delay_hours) и «Эмоции» (mood_delta до ±0.3, честное снижение affinity/trust). Тесты гейта и mood обновлены
 - [x] 12.2 Устойчивость (c0a986d, e1c7056): первый пузырь уходит всегда при устаревании чата (хвост отменяется), ремонт двойного двоеточия в JSON ответа модели, повтор без forced tool_choice на попытке ≥2 (thinking-режимы), варн об исчерпании бюджета — раз в сутки
-- [ ] 12.3 Vision-фото (da9559d): caption как текст, крупнейший PhotoSize скачивается и уходит модели как image_url — следующий кусок
+- [x] 12.3 Vision-фото (da9559d): normalize — kind=photo, caption становится текстом; telegram/media.go — PhotoFileIDFromUpdate (крупнейший по площади) + FetchPhotoByFileID (getFile → скачивание, потолок 6 MiB, base64); character/photo.go — PhotoFetcher-интерфейс (реализация в telegram), CollectPhotos (до 3 фото на ход, ошибки скачивания не роняют ход), askMsgs — части Ask [текст, events.BinaryImage] (ago рендерит image_url); raw_update идёт в пачку через worker; app строит фетчер при живом Telegram (dry-run — ход по тексту). Тесты: normalize, file_id по площади, фетчер на httptest (getFile+download+oversize), части Ask, e2e фото→ответ
 - Не переносится: планировщик «раз в час» (b8432c6) — костыль убегавшего TS-планировщика; в Go claim только due-работы, runaway нет
 - **Г:** юниты 6/6, БД 8/8, офлайн-эвалы зелёные (12.3 остаётся)
 

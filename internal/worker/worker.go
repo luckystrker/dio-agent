@@ -317,7 +317,7 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 // в БД, очередь в памяти только имена).
 func (w *Worker) loadBatch(ctx context.Context, turnID int64) ([]character.BatchEvent, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT id, coalesce(actor_id, 0), coalesce(actor_name, ''), coalesce(text, '')
+		SELECT id, coalesce(actor_id, 0), coalesce(actor_name, ''), coalesce(text, ''), raw_update
 		FROM social_events WHERE turn_id = $1 ORDER BY id`, turnID)
 	if err != nil {
 		return nil, fmt.Errorf("ход %d: события пачки не читаются: %w", turnID, err)
@@ -327,7 +327,7 @@ func (w *Worker) loadBatch(ctx context.Context, turnID int64) ([]character.Batch
 	var batch []character.BatchEvent
 	for rows.Next() {
 		var ev character.BatchEvent
-		if err := rows.Scan(&ev.EventID, &ev.ActorID, &ev.ActorName, &ev.Text); err != nil {
+		if err := rows.Scan(&ev.EventID, &ev.ActorID, &ev.ActorName, &ev.Text, &ev.Raw); err != nil {
 			return nil, fmt.Errorf("ход %d: событие пачки не читается: %w", turnID, err)
 		}
 		batch = append(batch, ev)

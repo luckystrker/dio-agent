@@ -15,6 +15,7 @@ package character
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -27,6 +28,8 @@ type BatchEvent struct {
 	ActorID   int64 // 0 — актора нет (например, служебное событие)
 	ActorName string
 	Text      string
+	// Raw — исходный update (file_id фото для vision §6.1).
+	Raw json.RawMessage `json:"raw,omitempty"`
 }
 
 // BaseContext — собранный базовый контекст хода.

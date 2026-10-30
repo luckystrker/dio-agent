@@ -35,6 +35,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/telegram"
 )
 
 // sessionForChat — стабильный идентификатор разговора для провайдера: FNV-1a
@@ -79,6 +80,8 @@ type Runner struct {
 
 	// Memory — инструментарий памяти (9.3); nil — ход без инструментов памяти.
 	Memory *memory.Toolset
+	// Photos — скачивание фото Telegram (vision §6.1); nil — модель видит текст.
+	Photos PhotoFetcher
 	// Typing — «печатает…» (§13.3); nil — не показывать.
 	Typing *TypingPulse
 
@@ -171,7 +174,9 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		userText = "[сообщение без текста]"
 	}
 
-	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation)
+	// Фото пачки (vision §6.1): скачивание до вызова, ошибки — ход по тексту.
+	photos := CollectPhotos(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn)
+	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation, photos)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
 	if errors.As(err, &invalidErr) {
@@ -209,7 +214,7 @@ func (e *invalidResultError) Error() string { return e.err.Error() }
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток и число модельных вызовов.
-func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string) (TurnResult, int, int, error) {
+func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, photos []Photo) (TurnResult, int, int, error) {
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3

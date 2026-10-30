@@ -25,6 +25,7 @@ type EventKind string
 
 const (
 	KindMessage EventKind = "message"
+	KindPhoto   EventKind = "photo"
 	KindReply   EventKind = "reply"
 	KindMention EventKind = "mention"
 	KindCommand EventKind = "command"
@@ -60,11 +61,20 @@ type telegramUser struct {
 }
 
 type telegramMessage struct {
-	From           *telegramUser    `json:"from"`
-	Text           *string          `json:"text"`
-	Entities       []telegramEntity `json:"entities"`
-	ReplyToMessage json.RawMessage  `json:"reply_to_message"`
-	Chat           *telegramChat    `json:"chat"`
+	From           *telegramUser       `json:"from"`
+	Text           *string             `json:"text"`
+	Caption        *string             `json:"caption"`
+	Photo          []telegramPhotoSize `json:"photo"`
+	Entities       []telegramEntity    `json:"entities"`
+	ReplyToMessage json.RawMessage     `json:"reply_to_message"`
+	Chat           *telegramChat       `json:"chat"`
+}
+
+// telegramPhotoSize — один размер из массива photo (Telegram отдаёт по возрастанию).
+type telegramPhotoSize struct {
+	FileID string `json:"file_id"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 type telegramChat struct {
@@ -114,7 +124,7 @@ func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 		ActorID:          actorIDOf(message),
 		ActorName:        actorNameOf(message.From),
 		Kind:             detectKind(message, edited),
-		Text:             message.Text,
+		Text:             messageText(message),
 		Supported:        true,
 	}, nil
 }
@@ -134,6 +144,17 @@ func extractMessage(shape *telegramUpdateShape) (*telegramMessage, bool) {
 	}
 }
 
+// messageText — текст сообщения; для фото это caption (если есть).
+func messageText(m *telegramMessage) *string {
+	if m.Text != nil {
+		return m.Text
+	}
+	if len(m.Photo) > 0 && m.Caption != nil {
+		return m.Caption
+	}
+	return nil
+}
+
 // detectKind — порядок проверки как в TS-справочнике: правка, reply,
 // bot_command, mention, иначе сообщение.
 func detectKind(message *telegramMessage, edited bool) EventKind {
@@ -142,6 +163,9 @@ func detectKind(message *telegramMessage, edited bool) EventKind {
 	}
 	if len(message.ReplyToMessage) > 0 && string(message.ReplyToMessage) != "null" {
 		return KindReply
+	}
+	if len(message.Photo) > 0 {
+		return KindPhoto
 	}
 	for _, entity := range message.Entities {
 		switch entity.Type {

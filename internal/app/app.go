@@ -42,6 +42,10 @@ type Options struct {
 	Config runtime.Config
 	Logger *log.Logger
 
+	// PhotoFetcher — скачивание фото Telegram (vision §6.1); nil — без фото.
+	// Приложение строит само, если включён реальный Telegram.
+	PhotoFetcher character.PhotoFetcher
+
 	// PersonaFile / PromptTemplate — пути к файлам §7.1 (по умолчанию
 	// config/ от рабочей директории; тесты указывают на корень репозитория —
 	// молчаливый fallback на дефолтную персону маскировал shipped-файлы,
@@ -213,6 +217,12 @@ func (a *App) Start(ctx context.Context) error {
 	api := a.opts.Telegram
 	if api == nil {
 		api = buildTelegramAPI(a.opts.Config)
+	}
+	if a.opts.PhotoFetcher != nil {
+		runner.Photos = a.opts.PhotoFetcher
+	} else if tg := a.opts.Config.Telegram; tg != nil && !tg.DryRun && tg.BotToken != "" {
+		// Vision §6.1: реальный Telegram — фото качаются; dry-run — ход по тексту.
+		runner.Photos = telegram.NewMediaFetcher(tg.BotToken, tg.APIBase)
 	}
 	var pulse *character.TypingPulse
 	if api != nil {
