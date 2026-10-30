@@ -42,6 +42,13 @@ type Options struct {
 	Config runtime.Config
 	Logger *log.Logger
 
+	// PersonaFile / PromptTemplate — пути к файлам §7.1 (по умолчанию
+	// config/ от рабочей директории; тесты указывают на корень репозитория —
+	// молчаливый fallback на дефолтную персону маскировал shipped-файлы,
+	// найдено живыми эвалами 2026-10-31).
+	PersonaFile    string
+	PromptTemplate string
+
 	// Model — модельный конфиг поверх provider ago (§17); тесты подставляют
 	// скриптовый дубль. nil — сборка из Config.Model.
 	Model *character.ChatConfig
@@ -440,15 +447,24 @@ func (a *App) fatalFail(err error) {
 
 // loadPersona — активная персона; config/persona.md при наличии синхронизируется
 // (отличие файла создаёт версию, §7.1), config/system-prompt.md — каркас промпта.
+// Пути берутся из опций (дефолт — от рабочей директории процесса).
 func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error) {
 	repo := character.NewPersonaRepo()
+	personaPath := a.opts.PersonaFile
+	if personaPath == "" {
+		personaPath = personaFilePath
+	}
+	templatePath := a.opts.PromptTemplate
+	if templatePath == "" {
+		templatePath = promptTemplatePath
+	}
 
-	raw, err := os.ReadFile(personaFilePath)
+	raw, err := os.ReadFile(personaPath)
 	switch {
 	case err == nil:
 		source, perr := character.ParsePersonaFile(string(raw))
 		if perr != nil {
-			return character.Persona{}, "", fmt.Errorf("app: %s: %w", personaFilePath, perr)
+			return character.Persona{}, "", fmt.Errorf("app: %s: %w", personaPath, perr)
 		}
 		if _, _, uerr := repo.EnsureFromSource(ctx, a.pool, source); uerr != nil {
 			return character.Persona{}, "", fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
@@ -456,7 +472,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	case errors.Is(err, os.ErrNotExist):
 		// Файла нет — дефолтная персона версии 1 (паритет 9.4).
 	default:
-		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", personaFilePath, err)
+		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", personaPath, err)
 	}
 
 	persona, err := repo.Active(ctx, a.pool)
@@ -465,7 +481,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	}
 
 	var template string
-	if raw, err := os.ReadFile(promptTemplatePath); err == nil {
+	if raw, err := os.ReadFile(templatePath); err == nil {
 		template = string(raw)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", promptTemplatePath, err)

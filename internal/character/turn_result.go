@@ -270,6 +270,11 @@ func stripInertContradictions(r TurnResult) TurnResult {
 	if r.Decision != DecisionReact && r.Decision != DecisionAnswer {
 		r.Reaction = ""
 	}
+	for i := range r.Memory {
+		if r.Memory[i].Kind != "claim" {
+			r.Memory[i].Confidence = nil // confidence осмыслен только у claim
+		}
+	}
 	return r
 }
 
@@ -304,10 +309,9 @@ func (c MemoryCandidate) validate(i int) error {
 	if c.Salience != nil && (*c.Salience < 0 || *c.Salience > 1) {
 		return rangeErr(fmt.Sprintf("память %d: salience", i), *c.Salience, 0, 1)
 	}
-	if c.Confidence != nil {
-		if c.Kind != "claim" {
-			return fmt.Errorf("turnresult: память %d: confidence допустим только у claim", i)
-		}
+	if c.Confidence != nil && c.Kind == "claim" {
+		// У не-claim confidence вычищается в stripInertContradictions (§11.3),
+		// а не роняет ход целиком.
 		if *c.Confidence < 0 || *c.Confidence > 1 {
 			return rangeErr(fmt.Sprintf("память %d: confidence", i), *c.Confidence, 0, 1)
 		}

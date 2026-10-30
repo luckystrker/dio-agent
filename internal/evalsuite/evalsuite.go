@@ -34,7 +34,10 @@ type SeedRelationship struct {
 
 // Setup — состояние мира до кейса.
 type Setup struct {
-	Scope        string            `json:"scope,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// SeedScope — куда сеять память, если она живёт в другом скоупе, чем диалог
+	// (кейс приватности: факт в личке, разговор в группе).
+	SeedScope    string            `json:"seed_scope,omitempty"`
 	ChatType     string            `json:"chat_type,omitempty"` // private | group
 	Actor        string            `json:"actor,omitempty"`
 	ActorID      int64             `json:"actor_id,omitempty"`

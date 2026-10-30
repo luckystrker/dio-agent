@@ -103,17 +103,21 @@ func (r *evalRun) seed(c evalsuite.Case) {
 			r.t.Fatalf("отношение не вставлено: %v", err)
 		}
 	}
+	memScope := c.Setup.SeedScope
+	if memScope == "" {
+		memScope = r.scope
+	}
 	for i, m := range c.Setup.Memory {
 		ref := fmt.Sprintf("event:eval_%s_%d", c.Name, i)
 		if _, err := r.h.pool.Exec(ctx,
 			`INSERT INTO provenance (kind, ref, scopes) VALUES ('journal_event', $1, ARRAY[$2])`,
-			ref, r.scope); err != nil {
+			ref, memScope); err != nil {
 			r.t.Fatalf("provenance не вставлена: %v", err)
 		}
 		if _, err := r.h.pool.Exec(ctx, `
 			INSERT INTO memory_items (kind, text, scope_id, provenance_id, salience)
 			SELECT $1, $2, $3, p.id, 0.9 FROM provenance p WHERE p.ref = $4`,
-			m.Kind, m.Text, r.scope, ref); err != nil {
+			m.Kind, m.Text, memScope, ref); err != nil {
 			r.t.Fatalf("память не вставлена: %v", err)
 		}
 	}
@@ -242,7 +246,7 @@ func runEvalCases(t *testing.T, mode string, cases []evalsuite.Case,
 		Detail string        `json:"detail,omitempty"`
 	}
 	var reports []caseReport
-	passed := 0
+	passed, evaluated := 0, 0
 
 	only := os.Getenv("EVAL_CASES")
 	for _, c := range cases {
@@ -250,6 +254,7 @@ func runEvalCases(t *testing.T, mode string, cases []evalsuite.Case,
 			continue
 		}
 		r := newH(t, c)
+		evaluated++
 		r.seed(c)
 		r.push(c)
 		r.awaitTerminal()
@@ -289,14 +294,14 @@ func runEvalCases(t *testing.T, mode string, cases []evalsuite.Case,
 	}
 
 	rate := 0.0
-	if len(cases) > 0 {
-		rate = float64(passed) / float64(len(cases))
+	if evaluated > 0 {
+		rate = float64(passed) / float64(evaluated)
 	}
-	t.Logf("ИТОГ [%s]: %d/%d (pass_rate=%.2f)", mode, passed, len(cases), rate)
+	t.Logf("ИТОГ [%s]: %d/%d (pass_rate=%.2f)", mode, passed, evaluated, rate)
 
 	if err := os.MkdirAll("../../evals/results", 0o755); err == nil {
 		if blob, jerr := json.MarshalIndent(map[string]any{
-			"mode": mode, "pass_rate": rate, "passed": passed, "total": len(cases),
+			"mode": mode, "pass_rate": rate, "passed": passed, "total": evaluated,
 			"cases": reports, "written_at": time.Now().UTC().Format(time.RFC3339),
 		}, "", "  "); jerr == nil {
 			_ = os.WriteFile(filepath.Join("../../evals/results", mode+".json"), blob, 0o644)

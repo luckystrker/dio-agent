@@ -264,6 +264,10 @@ func newHarnessDSNTuned(t *testing.T, dsn string, tune func(*Options), resp ...*
 			LogLevel:    runtime.LogLevelError,
 			NodeEnv:     runtime.NodeEnvTest,
 		},
+		// §7.1-файлы из корня репозитория: дефолтные пути относительны рабочей
+		// директории процесса, тесты работают из internal/app.
+		PersonaFile:    "../../config/persona.md",
+		PromptTemplate: "../../config/system-prompt.md",
 		Logger:         log.New(io.Discard, "", 0),
 		Model:          character.NewChatConfigWithClient(script),
 		Telegram:       api,

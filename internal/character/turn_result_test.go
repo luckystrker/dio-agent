@@ -89,6 +89,26 @@ func TestTurnResultStripsInertContradictions(t *testing.T) {
 	}
 }
 
+// TestTurnResultStripsConfidenceOffClaim — confidence у не-claim кандидата
+// памяти вычищается, кандидат сохраняется (§11.3): живой прогон 2026-10-31 —
+// модель дважды положила confidence в experience, ход тонул целиком.
+func TestTurnResultStripsConfidenceOffClaim(t *testing.T) {
+	r, err := ParseTurnResult([]byte(
+		`{"decision":"answer","messages":["ок"],"memory":[{"kind":"experience","text":"прочитал статью","confidence":0.7}]}`))
+	if err != nil {
+		t.Fatalf("experience с confidence отвергнут целиком: %v", err)
+	}
+	if len(r.Memory) != 1 || r.Memory[0].Confidence != nil {
+		t.Fatalf("confidence у experience должен вычищаться, кандидат оставаться: %+v", r.Memory)
+	}
+	// У claim confidence остаётся.
+	r, err = ParseTurnResult([]byte(
+		`{"decision":"answer","messages":["ок"],"memory":[{"kind":"claim","text":"источник говорит X","confidence":0.5}]}`))
+	if err != nil || r.Memory[0].Confidence == nil {
+		t.Fatalf("confidence у claim не должен вычищаться: %+v %v", r.Memory, err)
+	}
+}
+
 // TestTurnResultAnswerWithReaction — необязательная reaction при answer
 // допустима (§11.2: «speak содержит 1–4 сообщения; необязательная reaction
 // разрешена»); правило «только при react» из TS-реализации противоречило
@@ -156,11 +176,15 @@ func TestTurnResultDeltaRanges(t *testing.T) {
 }
 
 func TestTurnResultMemoryRules(t *testing.T) {
-	// confidence допустим только у claim (§10.1).
+	// confidence у не-claim вычищается, кандидат живёт (§11.3; решение
+	// 2026-10-31 — см. TestTurnResultStripsConfidenceOffClaim).
 	raw := `{"decision":"ignore","memory":[{"kind":"thought","text":"мысль","confidence":0.9}]}`
-	_, err := ParseTurnResult([]byte(raw))
-	if err == nil || !strings.Contains(err.Error(), "confidence") {
-		t.Fatalf("confidence у мысли не пойман: %v", err)
+	r, err := ParseTurnResult([]byte(raw))
+	if err != nil {
+		t.Fatalf("thought с confidence отвергнут целиком: %v", err)
+	}
+	if r.Memory[0].Confidence != nil {
+		t.Fatalf("confidence у мысли должен вычищаться: %+v", r.Memory[0])
 	}
 	// Неизвестный kind.
 	raw = `{"decision":"ignore","memory":[{"kind":"rumor","text":"x"}]}`
