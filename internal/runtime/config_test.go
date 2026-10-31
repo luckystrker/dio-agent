@@ -214,6 +214,29 @@ func TestLoadConfigModel(t *testing.T) {
 		}
 	})
 
+	t.Run("пул фона: отдельный лимит и умолчание от общего", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		cfg, err := LoadConfig(envOf(env))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.Model.BackgroundCallsLimit != cfg.Model.DailyCallsLimit {
+			t.Errorf("без MODEL_BACKGROUND_CALLS_LIMIT пул фона берёт общий лимит: %d != %d",
+				cfg.Model.BackgroundCallsLimit, cfg.Model.DailyCallsLimit)
+		}
+		env["MODEL_BACKGROUND_CALLS_LIMIT"] = "400"
+		cfg, err = LoadConfig(envOf(env))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.Model.BackgroundCallsLimit != 400 {
+			t.Errorf("отдельный лимит пула фона не применился: %d", cfg.Model.BackgroundCallsLimit)
+		}
+	})
+
 	t.Run("пустое число = умолчание (паритет с TS)", func(t *testing.T) {
 		env := map[string]string{}
 		for k, v := range full {
