@@ -9,3 +9,6 @@ evals/results/
 
 # Локальный мусор Windows-инструментов
 *.log
+
+# локальная сборка (go build -o dio-agent)
+/dio-agent

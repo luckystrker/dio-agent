@@ -285,7 +285,7 @@ func (a *App) Start(ctx context.Context) error {
 		Persona:         persona,
 		PromptTemplate:  template,
 		Model:           model,
-		DailyCallsLimit: dailyCallsLimit(a.opts.Config),
+		DailyCallsLimit: backgroundCallsLimit(a.opts.Config),
 		ToolCallsLimit:  toolCallsLimit(a.opts.Config),
 		Logger:          a.logger,
 		Now:             a.opts.Now,
@@ -530,6 +530,19 @@ func buildTelegramAPI(cfg runtime.Config) telegram.API {
 func dailyCallsLimit(cfg runtime.Config) int64 {
 	if cfg.Model == nil {
 		return 0
+	}
+	return int64(cfg.Model.DailyCallsLimit)
+}
+
+// backgroundCallsLimit — дневной потолок пула background (§16). Отдельное
+// значение (MODEL_BACKGROUND_CALLS_LIMIT) не даёт фону выжечь день целиком:
+// прямые разговоры должны остаться с бюджетом; пусто — общий лимит.
+func backgroundCallsLimit(cfg runtime.Config) int64 {
+	if cfg.Model == nil {
+		return 0
+	}
+	if cfg.Model.BackgroundCallsLimit > 0 {
+		return int64(cfg.Model.BackgroundCallsLimit)
 	}
 	return int64(cfg.Model.DailyCallsLimit)
 }

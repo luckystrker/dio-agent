@@ -135,6 +135,28 @@ func (s *BudgetStore) RecordActual(ctx context.Context, operationID, pool string
 	return nil
 }
 
+// Available — peek без резерва: остался ли в пуле запас на count вызовов
+// сегодня (limit <= 0 — не ограничивать). Резерв не создаётся: фон проверяет
+// это до начала работы, чтобы отложиться до нового дня, не расходуя потолок
+// попыток и не плодя шаги WAL (находка 2026-10-31: собственный дневной лимит
+// приравнивался к вечному сбою провайдера и уводил задачу в cooldown 24 ч).
+func (s *BudgetStore) Available(ctx context.Context, pool string, count, limit int64) (bool, error) {
+	if limit <= 0 {
+		return true, nil
+	}
+	if count <= 0 {
+		count = 1
+	}
+	var reserved int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = CURRENT_DATE`,
+		pool).Scan(&reserved)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("бюджет: счётчик дня не читается: %w", err)
+	}
+	return reserved+count <= limit, nil
+}
+
 // ReservedToday — сколько операций пула зарезервировано сегодня (диагностика §20).
 func (s *BudgetStore) ReservedToday(ctx context.Context, pool string) (int64, error) {
 	var n int64

@@ -20,6 +20,7 @@ import (
 	agotask "github.com/luckystrker/ago/task"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // consolidationCooldown — пауза консолидации эпизода после терминального сбоя
@@ -108,6 +109,21 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 			return out, nil
 		}
 
+		// §16: собственный дневной лимит пула фона — не сбой провайдера.
+		// Проверяем до попытки: иначе каждый такт отнимал бы попытку у потолка
+		// генерации и уводил эпизод в cooldown 24 ч ровно тогда, когда бюджет
+		// вот-вот обнулится (находка 2026-10-31). Работа продолжится сама.
+		available, berr := s.budget.Available(ctx, runtime.BudgetPoolBackground, 1, s.dailyLimit)
+		if berr != nil {
+			return out, berr
+		}
+		if !available {
+			_ = task.Cancel("отложено: дневной лимит пула фона исчерпан")
+			out.Outcome, out.Detail = "deferred", "бюджет фона исчерпан (§16)"
+			out.Latency = s.now().Sub(started)
+			return out, nil
+		}
+
 		cp.Attempt++
 		if err := s.saveCheckpoint(ctx, unitID, cp); err != nil {
 			return out, err
@@ -125,6 +141,18 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 		p, stats, gerr := s.runConsolidationModel(ctx, op, system, userText, sessionForChat(ep.ChatID))
 		out.Stats = stats
 		if gerr != nil {
+			// Гонка с соседней задачей: пул исчерпан между проверкой и вызовом.
+			// Попытку возвращаем — это не сбой генерации, а исчерпанный день.
+			if errors.Is(gerr, runtime.ErrBudgetExhausted) {
+				cp.Attempt--
+				if err := s.saveCheckpoint(ctx, unitID, cp); err != nil {
+					return out, err
+				}
+				_ = task.Cancel("отложено: дневной лимит пула фона исчерпан")
+				out.Outcome, out.Detail = "deferred", "бюджет фона исчерпан (§16)"
+				out.Latency = s.now().Sub(started)
+				return out, nil
+			}
 			var invalid *errInvalidResult
 			if errors.As(gerr, &invalid) {
 				// Терминальный сбой: пауза на cooldown, иначе каждый такт

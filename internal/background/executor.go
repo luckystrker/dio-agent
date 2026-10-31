@@ -244,6 +244,23 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			return out, nil
 		}
 
+		// §16: собственный дневной лимит пула фона — не сбой провайдера
+		// (находка 2026-10-31): не расходуем потолок попыток и не плодим шаги
+		// WAL, а возвращаем намерение на завтра — как deferIntention.
+		available, berr := s.budget.Available(ctx, runtime.BudgetPoolBackground, 1, s.dailyLimit)
+		if berr != nil {
+			return out, berr
+		}
+		if !available {
+			if rerr := s.intentions.Release(ctx, it.ID, nextDay(s.now())); rerr != nil {
+				return out, rerr
+			}
+			_ = task.Cancel("отложено: дневной лимит пула фона исчерпан")
+			out.Outcome, out.Detail = "deferred", "бюджет фона исчерпан (§16)"
+			out.Latency = s.now().Sub(started)
+			return out, nil
+		}
+
 		// Попытка фиксируется ДО модельного вызова: сбой посреди вызова даёт
 		// повтор с тем же operation_id — бюджет не списывается дважды (§16).
 		cp.Attempt++
@@ -292,7 +309,15 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 				return out, nil
 			}
 			// Транзитный сбой (сеть/бюджет/БД): turn_started без model_output →
-			// повтор с тем же unit и новой попыткой (§12.2).
+			// повтор с тем же unit и новой попыткой (§12.2). Исчерпанный бюджет
+			// сюда тоже попадает (гонка с соседней задачей) — это не сбой
+			// генерации: попытку возвращаем, потолок не тратим.
+			if errors.Is(err, runtime.ErrBudgetExhausted) {
+				cp.Attempt--
+				if serr := s.saveCheckpoint(ctx, unitID, cp); serr != nil {
+					return out, serr
+				}
+			}
 			return out, fmt.Errorf("фон: генерация намерения %d не удалась: %w", it.ID, err)
 		}
 		out.Decision = run.Result.Decision

@@ -53,9 +53,14 @@ type ModelSettings struct {
 	MaxRetries      int
 	MaxOutputTokens int
 	DailyCallsLimit int // дневной лимит модельных вызовов (§16)
-	HistoryMessages int // недавний разговор в контексте хода (§11.1 п.5)
-	HistoryMaxChars int // потолок суммарного объёма истории
-	ToolCallsLimit  int // лимит обращений к инструментам за ход (§11.2, §17)
+	// BackgroundCallsLimit — дневной лимит пула background (§16); 0 — как
+	// DailyCallsLimit. Отдельный потолок не даёт фоновой жизни (консолидации,
+	// exploration, инициативы) выжечь весь день и оставить прямые разговоры
+	// без бюджета (инцидент 2026-10-31).
+	BackgroundCallsLimit int
+	HistoryMessages      int // недавний разговор в контексте хода (§11.1 п.5)
+	HistoryMaxChars      int // потолок суммарного объёма истории
+	ToolCallsLimit       int // лимит обращений к инструментам за ход (§11.2, §17)
 }
 
 // EmbeddingSettings — векторизатор для семантического поиска памяти
@@ -311,6 +316,12 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Пул фона по умолчанию равен общему лимиту (прежнее поведение):
+	// отдельное значение задаётся только явно.
+	backgroundCallsLimit, err := positiveInt(env, "MODEL_BACKGROUND_CALLS_LIMIT", dailyCallsLimit)
+	if err != nil {
+		return nil, err
+	}
 	historyMessages, err := positiveInt(env, "MODEL_HISTORY_MESSAGES", 1000)
 	if err != nil {
 		return nil, err
@@ -325,16 +336,17 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	}
 
 	return &ModelSettings{
-		Endpoint:        endpoint,
-		APIKey:          apiKey,
-		Model:           model,
-		TimeoutMs:       timeoutMs,
-		MaxRetries:      maxRetries,
-		MaxOutputTokens: maxOutputTokens,
-		DailyCallsLimit: dailyCallsLimit,
-		HistoryMessages: historyMessages,
-		HistoryMaxChars: historyMaxChars,
-		ToolCallsLimit:  toolCallsLimit,
+		Endpoint:             endpoint,
+		APIKey:               apiKey,
+		Model:                model,
+		TimeoutMs:            timeoutMs,
+		MaxRetries:           maxRetries,
+		MaxOutputTokens:      maxOutputTokens,
+		DailyCallsLimit:      dailyCallsLimit,
+		BackgroundCallsLimit: backgroundCallsLimit,
+		HistoryMessages:      historyMessages,
+		HistoryMaxChars:      historyMaxChars,
+		ToolCallsLimit:       toolCallsLimit,
 	}, nil
 }
 
