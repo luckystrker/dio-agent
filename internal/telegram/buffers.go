@@ -30,8 +30,11 @@ type Windows struct {
 // DefaultWindows — стартовые окна §6.2 (настраиваемые значения, не гарантии).
 func DefaultWindows(chatType ChatType, kind EventKind) Windows {
 	if chatType == ChatPrivate {
-		// Личка: 1–2 с idle, максимум 3 с.
-		return Windows{Idle: 1500 * time.Millisecond, Max: 3 * time.Second}
+		// Личка: idle 3 с (решение 2026-11-01, было 1.5 с — бурст человека
+		// с паузами в пару секунд рвался на отдельные ходы, бот отвечал
+		// на каждое сообщение по отдельности), максимум 10 с от первого
+		// события — непрерывно печатающий не ждёт дольше этого.
+		return Windows{Idle: 3 * time.Second, Max: 10 * time.Second}
 	}
 	switch kind {
 	case KindReply, KindMention, KindCommand:

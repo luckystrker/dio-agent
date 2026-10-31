@@ -56,4 +56,20 @@ func TestShippedSystemPromptRenders(t *testing.T) {
 	if !strings.Contains(out, "не проговаривай механически") {
 		t.Fatalf("обязательные установки §7.1 не в шаблоне:\n%s", out)
 	}
+	// Живое состояние — в самом конце каркаса (решение 2026-10-31, кэш
+	// префикса провайдера): {{mood}} и {{relationship}} после всей статики,
+	// включая «примеры» и заметку о пачке.
+	moodAt := strings.LastIndex(out, "Твоё состояние сейчас")
+	relAt := strings.LastIndex(out, "Отношение к собеседнику")
+	for _, anchor := range []string{"дио:", "отвечай на пачку целиком"} {
+		if strings.LastIndex(out, anchor) > moodAt {
+			t.Fatalf("статика %q после {{mood}} — динамика должна заканчивать промпт:\n%s", anchor, out)
+		}
+	}
+	if relAt < moodAt {
+		t.Fatalf("{{relationship}} раньше {{mood}}:\n%s", out)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(out), "Отношение к собеседнику: почти незнаком.") {
+		t.Fatalf("промпт не заканчивается отношением к собеседнику:\n%s", out)
+	}
 }

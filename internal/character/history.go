@@ -9,6 +9,9 @@ import (
 	"context"
 	"fmt"
 	"unicode/utf8"
+
+	"github.com/luckystrker/ago/events"
+	"github.com/luckystrker/ago/stream"
 )
 
 // HistoryMessage — одна реплика недавнего разговора.
@@ -28,7 +31,7 @@ func RecentHistory(ctx context.Context, db DBTX, chatID int64, limit int, exclud
 		SELECT role, content FROM (
 		  SELECT 'user' AS role, text AS content, occurred_at AS ts
 		  FROM social_events
-		  WHERE chat_id = $1 AND text IS NOT NULL AND kind IN ('message', 'reply', 'mention')
+		  WHERE chat_id = $1 AND text IS NOT NULL AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo')
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL
 		  SELECT 'assistant' AS role, payload->>'text' AS content, created_at AS ts
@@ -77,4 +80,28 @@ func FitHistory(messages []HistoryMessage, maxChars int) []HistoryMessage {
 		out = append([]HistoryMessage{message}, out...)
 	}
 	return out
+}
+
+// historyStream — поток запуска агента с засеянной историей чата: реплики
+// прошлых ходов уходят на провод настоящими user/assistant сообщениями ПЕРЕД
+// текущей пачкой (BuildMessages ago разворачивает ModelRequest/ModelResponse
+// из истории потока). Durable разговор живёт в БД (social_events ∪
+// delivery_outbox), стрим одноразовый — на один запуск агента.
+func historyStream(hist []HistoryMessage) (*stream.MemoryStream, error) {
+	s := stream.NewMemoryStream()
+	for _, m := range hist {
+		var ev events.Event
+		switch m.Role {
+		case "user":
+			ev = events.ModelRequest{Parts: []events.Input{events.TextInput{Content: m.Content}}}
+		case "assistant":
+			ev = events.ModelResponse{Message: &events.ModelMessage{Content: m.Content}}
+		default:
+			continue
+		}
+		if err := s.Send(ev); err != nil {
+			return nil, fmt.Errorf("history: реплика истории не посеяна: %w", err)
+		}
+	}
+	return s, nil
 }

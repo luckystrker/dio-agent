@@ -239,6 +239,16 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	if r.Memory != nil {
 		opts = append(opts, agent.WithTools(r.Memory.Tools()...))
 	}
+	// История чата (§11.1 п.5): реплики прошлых ходов — настоящими user/
+	// assistant сообщениями до пачки, append-only (кэш префикса провайдера
+	// не страдает). Пустая история — поток по умолчанию.
+	if len(bctx.History) > 0 {
+		seeded, err := historyStream(bctx.History)
+		if err != nil {
+			return TurnResult{}, 0, 0, fmt.Errorf("ход %d: история чата не посеяна: %w", in.TurnID, err)
+		}
+		opts = append(opts, agent.WithStreamBase(seeded))
+	}
 
 	// Middleware: бюджет §16 — внешний слой (резерв до всего остального);
 	// журналирование tool_call/tool_result — наружу лимита, чтобы отклонённые

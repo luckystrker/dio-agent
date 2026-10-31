@@ -730,3 +730,71 @@ func TestTurnMemoryCandidateInvalidRejected(t *testing.T) {
 		t.Fatalf("вставился не repair-кандидат: %q", memText)
 	}
 }
+
+// TestTurnHistoryReachesModel — история чата доходит до модели: реплики
+// предыдущих ходов (входящие события + доставленные ответы) видны сценарному
+// клиенту ПЕРЕД пачкой текущего хода (§11.1 п.5; находка 2026-10-31: History
+// собирался, но не использовался — ход шёл с амнезией).
+func TestTurnHistoryReachesModel(t *testing.T) {
+	f, ctx := newFixture(t)
+
+	// Ход 1: реплика пользователя, ответ применяется и доставляется.
+	first := int64(9101)
+	f.seedTurn(t, ctx, first, "я короче решил всё переписать")
+	f.withModel(
+		&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["а что переписываешь?"]}`}},
+	)
+	if _, err := f.runner.Run(ctx, Input{TurnID: first, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "я короче решил всё переписать"}}}); err != nil {
+		t.Fatalf("ход 1 не выполнен: %v", err)
+	}
+	// Ответ доставлен: в историю попадают только sent-ответы (§13.5).
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE delivery_outbox SET status='sent', telegram_message_id = 555000 WHERE turn_id = $1`, first); err != nil {
+		t.Fatalf("outbox не доставлен: %v", err)
+	}
+
+	// Ход 2: новая пачка; модель должна увидеть ход 1 до пачки.
+	second := int64(9102)
+	f.seedTurn(t, ctx, second, "ну там пару сервисов")
+	cfg2 := f.withModel(
+		&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["ну удачи)"]}`}},
+	)
+	if _, err := f.runner.Run(ctx, Input{TurnID: second, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 2, ActorID: 777, ActorName: "Коля", Text: "ну там пару сервисов"}}}); err != nil {
+		t.Fatalf("ход 2 не выполнен: %v", err)
+	}
+
+	calls := cfg2.Calls()
+	if len(calls) == 0 {
+		t.Fatal("модель не вызывалась")
+	}
+	evs := calls[len(calls)-1]
+	reqText := func(i int) string {
+		req, ok := events.AsValue(evs[i]).(events.ModelRequest)
+		if !ok {
+			t.Fatalf("событие[%d] = %T, хочу ModelRequest", i, events.AsValue(evs[i]))
+		}
+		if len(req.Parts) == 0 {
+			t.Fatalf("запрос[%d] без частей", i)
+		}
+		if ti, ok := events.AsValue(req.Parts[0]).(events.TextInput); ok {
+			return ti.Content
+		}
+		t.Fatalf("часть[%d][0] не текст: %T", i, events.AsValue(req.Parts[0]))
+		return ""
+	}
+	if len(evs) < 3 {
+		t.Fatalf("на проводе %d событий, want >= 3 (реплика + ответ + пачка)", len(evs))
+	}
+	if got := reqText(0); got != "я короче решил всё переписать" {
+		t.Fatalf("первая реплика истории = %q", got)
+	}
+	resp, ok := events.AsValue(evs[1]).(events.ModelResponse)
+	if !ok || resp.Content() != "а что переписываешь?" {
+		t.Fatalf("второе событие не ответ ассистента: %T", events.AsValue(evs[1]))
+	}
+	if got := reqText(2); got != "ну там пару сервисов" {
+		t.Fatalf("пачка не после истории: %q", got)
+	}
+}

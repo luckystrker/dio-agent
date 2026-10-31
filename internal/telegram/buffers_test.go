@@ -39,7 +39,9 @@ func waitForRecord(t *testing.T, closed chan turnRecord) turnRecord {
 }
 
 func TestDefaultWindowsByScenario(t *testing.T) {
-	// §6.2: личка 1–2с/3с; пассивная группа 3–5с/6с; reply/mention/command 0–300мс/1с.
+	// §6.2 (решение 2026-11-01): личка 3с/10с — пачка человека с паузами
+	// в пару секунд собирается в один ход; пассивная группа 4с/6с;
+	// reply/mention/command 150мс/1с.
 	cases := []struct {
 		chatType ChatType
 		kind     EventKind
@@ -47,7 +49,7 @@ func TestDefaultWindowsByScenario(t *testing.T) {
 		idleMax  time.Duration
 		maxMax   time.Duration
 	}{
-		{ChatPrivate, KindMessage, time.Second, 2 * time.Second, 3 * time.Second},
+		{ChatPrivate, KindMessage, 2500 * time.Millisecond, 3500 * time.Millisecond, 10 * time.Second},
 		{ChatGroup, KindMessage, 3 * time.Second, 5 * time.Second, 6 * time.Second},
 		{ChatGroup, KindReply, 0, 300 * time.Millisecond, time.Second},
 		{ChatGroup, KindMention, 0, 300 * time.Millisecond, time.Second},
@@ -59,6 +61,40 @@ func TestDefaultWindowsByScenario(t *testing.T) {
 			t.Fatalf("%s/%s: окна %+v вне спецификации", tc.chatType, tc.kind, w)
 		}
 	}
+}
+
+// TestBufferBatchesHumanBurst — бурст человека (сообщения с паузами ~2 с,
+// обычный стиль в Telegram) собирается в ОДИН ход на реальных окнах лички
+// (находка приёмки 2026-11-01: прежние 1.5с/3с рвали бурст на отдельные ходы —
+// бот отвечал на каждое сообщение по отдельности). Закрытие подменено,
+// как в остальных юнит-тестах.
+func TestBufferBatchesHumanBurst(t *testing.T) {
+	closed := make(chan turnRecord, 8)
+	m := NewChatBufferManager(BufferDeps{Pool: nil})
+	m.startTurn = func(ctx context.Context, chatID int64, ids []int64) (int64, string, error) {
+		closed <- turnRecord{chatID: chatID, ids: ids}
+		return 1, "direct", nil
+	}
+	for i, ev := range []int64{11, 12, 13} {
+		if i > 0 {
+			time.Sleep(1800 * time.Millisecond) // пауза больше прежних 1.5с idle
+		}
+		m.Add(PendingEvent{EventID: ev, ChatID: 1, ChatType: ChatPrivate, Kind: KindMessage})
+	}
+	select {
+	case rec := <-closed:
+		if len(rec.ids) != 3 {
+			t.Fatalf("бурст разорван: первая порция из %d событий %v", len(rec.ids), rec.ids)
+		}
+	case <-time.After(9 * time.Second):
+		t.Fatalf("бурст не закрылся за 9 с")
+	}
+	select {
+	case rec := <-closed:
+		t.Fatalf("лишняя порция: %v", rec)
+	case <-time.After(500 * time.Millisecond):
+	}
+	m.Wait()
 }
 
 func TestBufferClosesOnIdle(t *testing.T) {
