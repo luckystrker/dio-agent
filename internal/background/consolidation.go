@@ -88,6 +88,26 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 			return out, nil
 		}
 
+		// Потолок попыток (§16): вечный транзитный сбой провайдера не может
+		// повторяться каждым тактом — он выжег дневной пул фона целиком
+		// (находка 2026-10-31, HTTP 400 MissingSessionID). Терминально на цикл:
+		// cooldown на срок, после него свежий цикл попыток — чекпоинт Attempt
+		// сброшен, WAL generate не помечен (возобновление чистое).
+		if cp.Attempt >= maxGenerateAttempts {
+			if cerr := s.setConsolidationCooldown(ctx, ep); cerr != nil {
+				s.logError("фон: cooldown консолидации %q не записан: %v", unitID, cerr)
+			}
+			cp.Attempt = 0
+			if err := s.saveCheckpoint(ctx, unitID, cp); err != nil {
+				return out, err
+			}
+			failErr := errors.New("исчерпаны попытки генерации консолидации")
+			_ = task.Fail(failErr)
+			out.Outcome, out.Detail = "failed", failErr.Error()
+			out.Latency = s.now().Sub(started)
+			return out, nil
+		}
+
 		cp.Attempt++
 		if err := s.saveCheckpoint(ctx, unitID, cp); err != nil {
 			return out, err
@@ -102,17 +122,19 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 		if err != nil {
 			return out, err
 		}
-		p, stats, gerr := s.runConsolidationModel(ctx, op, system, userText)
+		p, stats, gerr := s.runConsolidationModel(ctx, op, system, userText, sessionForChat(ep.ChatID))
 		out.Stats = stats
 		if gerr != nil {
 			var invalid *errInvalidResult
 			if errors.As(gerr, &invalid) {
 				// Терминальный сбой: пауза на cooldown, иначе каждый такт
-				// повторяет невалидный вызов и сжигает бюджет (§16).
+				// повторяет невалидный вызов и сжигает бюджет (§16). WAL
+				// generate не помечен: после cooldown возобновление перезапускает
+				// генерацию, а не спотыкается о «proposal в WAL нет»; число
+				// циклов ограничивает потолок попыток.
 				if cerr := s.setConsolidationCooldown(ctx, ep); cerr != nil {
 					s.logError("фон: cooldown консолидации %q не записан: %v", unitID, cerr)
 				}
-				_ = s.wal.StepDone(ctx, unitID, stepGenerate, map[string]any{"failed": true})
 				_ = task.Fail(invalid)
 				out.Outcome, out.Detail = "failed", invalid.Error()
 				out.Latency = s.now().Sub(started)

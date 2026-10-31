@@ -52,6 +52,13 @@ type checkpointState struct {
 	TurnID  int64 `json:"turn_id,omitempty"`
 }
 
+// maxGenerateAttempts — потолок попыток генерации одной фоновой задачи
+// (находка 2026-10-31: вечный транзитный сбой провайдера — HTTP 400 —
+// повторялся каждым тактом и выжег дневной пул фона целиком, §16). Достигнув
+// потолка, задача терминально проваливается; консолидация дополнительно уходит
+// в cooldown, а после срока cooldown начинает свежий цикл попыток.
+const maxGenerateAttempts = 5
+
 // intentionOutcome — итог исполнения намерения (для записи хода §20).
 type intentionOutcome struct {
 	Outcome    string // completed | cancelled | failed | deferred | noop | error
@@ -220,6 +227,21 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 					return out, err
 				}
 			}
+		}
+
+		// Потолок попыток (§16): транзитный вечный сбой провайдера не может
+		// повторяться поверх RetryBackoff бесконечно — выжег бы пул фона.
+		if cp.Attempt >= maxGenerateAttempts {
+			reason := fmt.Sprintf("исчерпаны попытки генерации (%d)", maxGenerateAttempts)
+			if cp.TurnID > 0 {
+				s.skipTurn(ctx, cp.TurnID, "generate", reason)
+			}
+			_ = s.intentions.Fail(ctx, it.ID, reason)
+			_ = s.wal.StepDone(ctx, unitID, stepGenerate, map[string]any{"failed": true})
+			_ = task.Fail(errors.New(reason))
+			out.Outcome, out.Detail = "failed", reason
+			out.Latency = s.now().Sub(started)
+			return out, nil
 		}
 
 		// Попытка фиксируется ДО модельного вызова: сбой посреди вызова даёт
@@ -563,9 +585,12 @@ func (s *Scheduler) exploreAddendum() string {
 }
 
 // sessionForChat — стабильный идентификатор разговора для провайдера
-// (x-opencode-session, §17: наружу — только хеш, не сам chat id).
+// (x-opencode-session, §17: наружу — только хеш, не сам chat id). Групповые
+// чаты Telegram имеют отрицательные id — сессия нужна им так же, как личным
+// (находка 2026-10-31: гард «<= 0» оставлял группы без заголовка —
+// HTTP 400 MissingSessionID на эндпоинте OpenCode Go).
 func sessionForChat(chatID int64) string {
-	if chatID <= 0 {
+	if chatID == 0 {
 		return ""
 	}
 	h := fnv.New64a()

@@ -180,9 +180,15 @@ func parseTurnReply(reply *agent.AgentReply) (character.TurnResult, error) {
 
 // runConsolidationModel — модельный вызов консолидации (§10.2): proposal по
 // своей схеме, один repair (§11.3); инструменты не выдаются — модель только
-// предлагает, ничего не ищет и не отправляет.
-func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system, userText string) (consolidationProposal, modelStats, error) {
-	cfg, err := s.model.Clone(nil)
+// предлагает, ничего не ищет и не отправляет. Сессия провайдера по чату
+// эпизода (x-opencode-session, как у прямого хода; находка 2026-10-31: вызовы
+// без заголовка падали HTTP 400 MissingSessionID). sessionID пуст — заголовка нет.
+func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system, userText, sessionID string) (consolidationProposal, modelStats, error) {
+	overrides := map[string]any(nil)
+	if sessionID != "" {
+		overrides = map[string]any{"session_id": sessionID}
+	}
+	cfg, err := s.model.Clone(overrides)
 	if err != nil {
 		return consolidationProposal{}, modelStats{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
 	}

@@ -6,3 +6,6 @@
 agent
 agent.exe
 evals/results/
+
+# Локальный мусор Windows-инструментов
+*.log
