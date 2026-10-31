@@ -1,0 +1,740 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dio-agent — полный агентский цикл (по реальному коду)</title>
+<style>
+:root{
+  --bg:#0a0e14; --surface:#111722; --surface2:#151c29; --surface3:#1a2231;
+  --border:rgba(148,163,184,.15); --border2:rgba(148,163,184,.28);
+  --text:#e6edf3; --muted:#94a3b8; --dim:#64748b;
+  --sky:#38bdf8; --indigo:#818cf8; --violet:#a78bfa; --mint:#34d399; --amber:#fbbf24;
+  --rose:#fb7185; --cyan:#22d3ee;
+  --mono:ui-monospace,'Cascadia Code','JetBrains Mono',Consolas,'Courier New',monospace;
+  --sans:-apple-system,'Segoe UI',system-ui,Roboto,'Helvetica Neue',Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--sans);color:var(--text);background:var(--bg);line-height:1.6;font-size:15px;
+  background-image:
+    radial-gradient(1100px 520px at 85% -5%,rgba(56,189,248,.09),transparent 60%),
+    radial-gradient(900px 480px at 5% 5%,rgba(129,140,248,.08),transparent 60%);
+  background-attachment:fixed;
+}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(148,163,184,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(148,163,184,.035) 1px,transparent 1px);
+  background-size:44px 44px;
+  -webkit-mask-image:linear-gradient(180deg,#000 0%,transparent 45%);mask-image:linear-gradient(180deg,#000 0%,transparent 45%);
+}
+main,header,nav,section,footer{position:relative;z-index:1}
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+a{color:var(--sky);text-decoration:none}
+a:hover{text-decoration:underline}
+code,.m{font-family:var(--mono)}
+code{font-size:.9em;background:rgba(148,163,184,.12);border:1px solid var(--border);border-radius:6px;padding:1px 6px;white-space:nowrap}
+strong{color:#f1f5f9;font-weight:600}
+
+/* ---------- hero ---------- */
+.hero{padding:76px 0 36px}
+.kicker{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--sky)}
+.hero h1{font-size:clamp(30px,4.6vw,46px);font-weight:700;letter-spacing:-.02em;margin:10px 0 14px;line-height:1.15;
+  background:linear-gradient(92deg,#f1f5f9 10%,#7dd3fc 55%,#a5b4fc 95%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero .sub{color:var(--muted);max-width:760px;font-size:16px}
+.badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+.badge{font-family:var(--mono);font-size:12px;color:var(--muted);border:1px solid var(--border);background:rgba(17,23,34,.7);border-radius:999px;padding:4px 12px}
+.badge b{color:var(--text);font-weight:500}
+.stats{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+.stat{border:1px solid var(--border);background:linear-gradient(180deg,var(--surface2),var(--surface));border-radius:14px;padding:12px 18px;min-width:132px}
+.stat .n{font-size:22px;font-weight:600;font-family:var(--mono);color:var(--sky)}
+.stat .l{font-size:12px;color:var(--muted)}
+
+/* ---------- nav ---------- */
+.topnav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  background:rgba(10,14,20,.82);border-bottom:1px solid var(--border)}
+.topnav .wrap{display:flex;gap:4px;overflow-x:auto;padding-top:8px;padding-bottom:8px;scrollbar-width:none}
+.topnav .wrap::-webkit-scrollbar{display:none}
+.topnav a{flex:0 0 auto;font-size:13px;color:var(--muted);padding:6px 12px;border-radius:999px;border:1px solid transparent}
+.topnav a:hover{color:var(--text);text-decoration:none;background:rgba(148,163,184,.08)}
+.topnav a.on{color:#0a0e14;background:var(--sky);font-weight:600}
+
+/* ---------- sections ---------- */
+section{padding:54px 0 10px}
+.sh .kick{font-family:var(--mono);font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+.sh h2{font-size:24px;font-weight:600;letter-spacing:-.01em;margin:6px 0 8px}
+.sh .lead{color:var(--muted);max-width:820px;margin-bottom:24px}
+.sh .lead b{color:var(--text)}
+
+/* ---------- pipeline ---------- */
+.pipe{display:grid;grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:30px;align-items:start}
+@media(max-width:980px){.pipe{grid-template-columns:1fr}}
+.phase{display:flex;align-items:center;gap:9px;margin:22px 0 2px;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.phase::after{content:"";flex:1;border-top:1px solid var(--border)}
+.phase .dot{width:9px;height:9px;border-radius:50%;background:var(--pc);box-shadow:0 0 10px var(--pc)}
+.flowlist{list-style:none}
+.flowlist li{position:relative;padding-left:34px}
+.flowlist li::before{content:"";position:absolute;left:13px;top:0;bottom:0;border-left:2px solid rgba(148,163,184,.18)}
+.flowlist li:first-child::before{top:24px}
+.flowlist li:last-child::before{height:24px;bottom:auto}
+.flowlist li:only-child::before{display:none}
+.stage{position:relative;display:flex;align-items:center;gap:12px;width:100%;margin:7px 0;padding:10px 12px;text-align:left;
+  background:linear-gradient(180deg,var(--surface2),var(--surface));border:1px solid var(--border);border-radius:13px;color:var(--text);
+  font-family:var(--sans);font-size:14px;cursor:pointer;transition:border-color .15s,transform .15s,background .15s}
+.stage:hover{border-color:var(--pc);transform:translateY(-1px)}
+.stage:focus-visible{outline:2px solid var(--sky);outline-offset:2px}
+.stage.sel{border-color:var(--pc);background:linear-gradient(180deg,color-mix(in srgb,var(--pc) 12%,var(--surface2)),color-mix(in srgb,var(--pc) 5%,var(--surface)));
+  box-shadow:0 0 0 1px var(--pc),0 8px 24px -12px color-mix(in srgb,var(--pc) 45%,transparent)}
+.stage .num{flex:0 0 28px;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:12px;color:var(--text);background:color-mix(in srgb,var(--pc) 17%,transparent);border:1px solid color-mix(in srgb,var(--pc) 45%,transparent)}
+.stage .tx{flex:1;min-width:150px}
+.stage .tx .t{display:block;font-weight:600}
+.stage .tx .s{display:block;font-size:12px;color:var(--muted);margin-top:1px}
+.stage .mod{font-family:var(--mono);font-size:10.5px;color:var(--dim);border:1px solid var(--border);border-radius:999px;padding:1px 8px;white-space:nowrap}
+.detail{position:sticky;top:66px}
+@media(max-width:980px){.detail{position:static}}
+.dcard{border:1px solid var(--border);border-radius:16px;background:linear-gradient(180deg,var(--surface2),var(--surface));padding:20px 22px;overflow:hidden;position:relative}
+.dcard::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--pc,#38bdf8)}
+.dcard .dphase{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--pc,#38bdf8)}
+.dcard h3{font-size:18px;font-weight:600;margin:4px 0 8px}
+.dcard .dd{color:var(--muted)}
+.dcard .dd b{color:var(--text)}
+.dsec{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);margin:16px 0 8px}
+.crefs{display:flex;flex-wrap:wrap;gap:6px}
+.cref{font-family:var(--mono);font-size:11.5px;color:#bae6fd;background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.22);border-radius:8px;padding:2px 9px}
+.cfgs{display:flex;flex-wrap:wrap;gap:6px}
+.cfg{font-size:12px;color:#bbf7d0;background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.22);border-radius:8px;padding:2px 9px}
+
+/* ---------- chips ---------- */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.chip{font-family:var(--mono);font-size:11.5px;border:1px solid var(--border);border-radius:999px;padding:2px 10px;color:var(--muted);background:rgba(17,23,34,.6)}
+.chip.sky{color:#7dd3fc;border-color:rgba(56,189,248,.3);background:rgba(56,189,248,.07)}
+.chip.mint{color:#6ee7b7;border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.07)}
+.chip.amber{color:#fcd34d;border-color:rgba(251,191,36,.3);background:rgba(251,191,36,.07)}
+.chip.rose{color:#fda4af;border-color:rgba(251,113,133,.3);background:rgba(251,113,133,.07)}
+.chip.violet{color:#c4b5fd;border-color:rgba(167,139,250,.3);background:rgba(167,139,250,.07)}
+
+/* ---------- cards & grids ---------- */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+@media(max-width:860px){.grid2{grid-template-columns:1fr}}
+.panel{border:1px solid var(--border);border-radius:16px;background:linear-gradient(180deg,var(--surface2),var(--surface));padding:18px 20px;margin:14px 0}
+.panel h3{font-size:16px;font-weight:600;margin-bottom:8px}
+.panel h3 .m{color:var(--sky);font-size:13px;font-weight:500}
+.panel p{color:var(--muted);margin:6px 0}
+.panel p b{color:var(--text)}
+.panel ul{margin:8px 0 2px 18px;color:var(--muted)}
+.panel li{margin:4px 0}
+.panel li b{color:var(--text)}
+.formula{font-family:var(--mono);font-size:13px;color:#c4b5fd;background:rgba(167,139,250,.07);border:1px solid rgba(167,139,250,.22);border-radius:10px;padding:10px 14px;margin:10px 0;overflow-x:auto}
+.sql{font-family:var(--mono);font-size:12.5px;color:#7dd3fc;background:rgba(10,14,20,.75);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin:10px 0;overflow-x:auto;line-height:1.7}
+.sql .cm{color:var(--dim)}
+
+/* ---------- schema grid ---------- */
+.tgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:12px;margin-top:14px}
+.tcard{border:1px solid var(--border);border-radius:13px;background:linear-gradient(180deg,var(--surface2),var(--surface));padding:12px 14px;transition:border-color .15s}
+.tcard:hover{border-color:var(--border2)}
+.tcard .tn{font-family:var(--mono);font-size:13px;color:#7dd3fc}
+.tcard .tg{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);margin-left:6px}
+.tcard .tc{font-size:12px;color:var(--muted);margin-top:5px;line-height:1.55}
+.tcard .tc b{color:var(--text);font-weight:500}
+
+/* ---------- tables ---------- */
+.tbl{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.5px}
+.tbl th{text-align:left;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);font-weight:500;padding:8px 12px;border-bottom:1px solid var(--border2)}
+.tbl td{padding:8px 12px;border-bottom:1px solid var(--border);color:var(--muted);vertical-align:top}
+.tbl td:first-child{color:var(--text)}
+.tbl tr:last-child td{border-bottom:none}
+.tbl .m{font-size:12px;color:#bae6fd}
+.tw{overflow-x:auto}
+
+/* ---------- event flow / machine ---------- */
+.seq{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:10px 0}
+.seq .a{color:var(--dim);font-size:13px}
+.ev{font-family:var(--mono);font-size:12px;border-radius:8px;padding:3px 10px;border:1px solid var(--border);background:rgba(17,23,34,.7)}
+.ev.c{color:#7dd3fc;border-color:rgba(56,189,248,.3)}
+.ev.o{color:#fcd34d;border-color:rgba(251,191,36,.32)}
+.ev.m{color:#6ee7b7;border-color:rgba(52,211,153,.3)}
+.ev.r{color:#fda4af;border-color:rgba(251,113,133,.32)}
+.ev.v{color:#c4b5fd;border-color:rgba(167,139,250,.3)}
+
+/* ---------- steps ---------- */
+.steps{list-style:none;counter-reset:st;margin:10px 0}
+.steps li{counter-increment:st;position:relative;padding:5px 0 5px 38px;color:var(--muted)}
+.steps li b{color:var(--text)}
+.steps li::before{content:counter(st);position:absolute;left:0;top:6px;width:24px;height:24px;border-radius:50%;
+  border:1px solid rgba(56,189,248,.35);background:rgba(56,189,248,.08);color:#7dd3fc;font-family:var(--mono);font-size:12px;
+  display:flex;align-items:center;justify-content:center}
+
+/* ---------- code map ---------- */
+.modgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:14px}
+.mod{border:1px solid var(--border);border-radius:13px;background:linear-gradient(180deg,var(--surface2),var(--surface));padding:14px 16px}
+.mod .mp{font-family:var(--mono);font-size:13px;color:#7dd3fc}
+.mod .mr{font-size:12.5px;color:var(--muted);margin-top:4px}
+.mod .mf{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:8px;line-height:1.7}
+
+/* ---------- misc ---------- */
+.incident{border:1px solid rgba(251,191,36,.35);background:linear-gradient(180deg,rgba(251,191,36,.07),rgba(251,191,36,.02));border-radius:16px;padding:18px 20px;margin:14px 0}
+.incident h3{color:#fcd34d;font-size:15px;margin-bottom:8px}
+.incident p,.incident li{color:var(--muted)}
+.incident ul{margin:6px 0 0 18px}
+.note{font-size:12.5px;color:var(--dim);margin-top:8px}
+footer{padding:44px 0 60px;color:var(--dim);font-size:13px;border-top:1px solid var(--border);margin-top:50px}
+.rv{opacity:0;transform:translateY(14px);transition:opacity .5s ease,transform .5s ease}
+.rv.in{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}.stage{transition:none}html{scroll-behavior:auto}}
+@media(max-width:640px){
+  .hero{padding:52px 0 26px}
+  .stage .mod{display:none}
+  .detail{order:2}
+}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="kicker">dio-agent · living telegram agent · go</div>
+    <h1>Полный агентский цикл —<br>как это устроено в реальном коде</h1>
+    <p class="sub">Один процесс-бинарник: приём сообщений, один когнитивный воркер, событийный журнал в PostgreSQL, фоновая жизнь с бюджетами. Ниже — не планы из спецификации, а то, как это работает сейчас: имена функций, константы и ссылки на строки кода (main, <span class="m">16b83a7</span>).</p>
+    <div class="badges">
+      <span class="badge"><b>Go</b> · один процесс на VPS</span>
+      <span class="badge"><b>PostgreSQL + pgvector</b> · база — источник истины</span>
+      <span class="badge">фреймворк <b>ago v0.6.0</b></span>
+      <span class="badge">singleton: <b>advisory lock 0x64696f</b> («dio»)</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n">8</div><div class="l">миграций схемы</div></div>
+      <div class="stat"><div class="n">24</div><div class="l">таблицы в БД</div></div>
+      <div class="stat"><div class="n">17</div><div class="l">этапов конвейера</div></div>
+      <div class="stat"><div class="n">9</div><div class="l">типов событий журнала</div></div>
+    </div>
+  </div>
+</header>
+
+<nav class="topnav">
+  <div class="wrap">
+    <a href="#pipeline">Конвейер</a>
+    <a href="#memory">Память</a>
+    <a href="#schema">Схема БД</a>
+    <a href="#journal">Журнал и восстановление</a>
+    <a href="#outbox">Доставка</a>
+    <a href="#background">Фоновая жизнь</a>
+    <a href="#config">Настройки</a>
+    <a href="#codemap">Карта кода</a>
+    <a href="#specdiff">Код vs спека</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+<!-- ================= PIPELINE ================= -->
+<section id="pipeline" class="sh">
+  <div class="kick">01 · main pipeline</div>
+  <h2>Конвейер хода</h2>
+  <p class="lead">Путь сообщения: от <code>getUpdates</code> до доставки ответа и фоновой задачи. Кликните этап — справа появятся детали из кода: что происходит, <b>какие функции это делают</b> и с какими настройками.</p>
+  <div class="pipe">
+    <div id="flowroot">
+      <div style="--pc:var(--sky)">
+        <div class="phase"><span class="dot"></span>Приём · internal/telegram</div>
+        <ul class="flowlist">
+          <li><button class="stage" data-s="s1" style="--pc:var(--sky)"><span class="num">1</span><span class="tx"><span class="t">Long polling</span><span class="s">getUpdates · offset из БД · порядок update_id</span></span><span class="mod">poller.go</span></button></li>
+          <li><button class="stage" data-s="s2" style="--pc:var(--sky)"><span class="num">2</span><span class="tx"><span class="t">Нормализация + prefilter</span><span class="s">kind: message/photo/reply/sticker/… · pending или journal_only</span></span><span class="mod">normalize.go</span></button></li>
+          <li><button class="stage" data-s="s3" style="--pc:var(--sky)"><span class="num">3</span><span class="tx"><span class="t">Ingest</span><span class="s">дедуп по telegram_update_id + offset — одна транзакция</span></span><span class="mod">ingest.go</span></button></li>
+          <li><button class="stage" data-s="s4" style="--pc:var(--sky)"><span class="num">4</span><span class="tx"><span class="t">Буфер чата</span><span class="s">пачка: idle/max окна · 20 событий · 8000 рун → turn</span></span><span class="mod">buffers.go</span></button></li>
+        </ul>
+      </div>
+      <div style="--pc:var(--indigo)">
+        <div class="phase"><span class="dot"></span>Очередь и восстановление · internal/worker</div>
+        <ul class="flowlist">
+          <li><button class="stage" data-s="s5" style="--pc:var(--indigo)"><span class="num">5</span><span class="tx"><span class="t">Claim хода</span><span class="s">личка выше группы · CAS attempts+1 · FIFO по id</span></span><span class="mod">worker.go</span></button></li>
+          <li><button class="stage" data-s="s6" style="--pc:var(--indigo)"><span class="num">6</span><span class="tx"><span class="t">Recovery из журнала</span><span class="s">уже применён? пропущен? есть model_output без применения?</span></span><span class="mod">turn.go</span></button></li>
+        </ul>
+      </div>
+      <div style="--pc:var(--violet)">
+        <div class="phase"><span class="dot"></span>Когниция · internal/character + ago</div>
+        <ul class="flowlist">
+          <li><button class="stage" data-s="s7" style="--pc:var(--violet)"><span class="num">7</span><span class="tx"><span class="t">Контекст и персона</span><span class="s">шаблон system-prompt.md · mood · отношения · история чата</span></span><span class="mod">context.go</span></button></li>
+          <li><button class="stage" data-s="s8" style="--pc:var(--violet)"><span class="num">8</span><span class="tx"><span class="t">Фото</span><span class="s">до 3 фото пачки — частями [текст, image] в запрос</span></span><span class="mod">photo.go</span></button></li>
+          <li><button class="stage" data-s="s9" style="--pc:var(--violet)"><span class="num">9</span><span class="tx"><span class="t">Запуск агента (ago)</span><span class="s">strict-схема TurnResult · forced memory_search · x-opencode-session</span></span><span class="mod">model.go</span></button></li>
+          <li><button class="stage" data-s="s10" style="--pc:var(--violet)"><span class="num">10</span><span class="tx"><span class="t">Middleware-цепочка</span><span class="s">бюджет → журнал инструментов → лимит → typing</span></span><span class="mod">middleware.go</span></button></li>
+          <li><button class="stage" data-s="s11" style="--pc:var(--violet)"><span class="num">11</span><span class="tx"><span class="t">TurnResult и repair</span><span class="s">answer/react/ignore/defer · ровно один repair-запрос</span></span><span class="mod">turn_result.go</span></button></li>
+        </ul>
+      </div>
+      <div style="--pc:var(--mint)">
+        <div class="phase"><span class="dot"></span>Применение и доставка · apply.go · telegram</div>
+        <ul class="flowlist">
+          <li><button class="stage" data-s="s12" style="--pc:var(--mint)"><span class="num">12</span><span class="tx"><span class="t">Атомарное применение</span><span class="s">дельты + память + intentions + outbox — одна транзакция</span></span><span class="mod">apply.go</span></button></li>
+          <li><button class="stage" data-s="s13" style="--pc:var(--mint)"><span class="num">13</span><span class="tx"><span class="t">Доставка</span><span class="s">SKIP LOCKED · устаревание · пауза 800 мс между пузырями</span></span><span class="mod">delivery.go</span></button></li>
+        </ul>
+      </div>
+      <div style="--pc:var(--amber)">
+        <div class="phase"><span class="dot"></span>Фоновая жизнь · internal/background</div>
+        <ul class="flowlist">
+          <li><button class="stage" data-s="s14" style="--pc:var(--amber)"><span class="num">14</span><span class="tx"><span class="t">Планировщик</span><span class="s">тик 15–30 с · фон откладывается при прямых ходах</span></span><span class="mod">scheduler.go</span></button></li>
+          <li><button class="stage" data-s="s15" style="--pc:var(--amber)"><span class="num">15</span><span class="tx"><span class="t">Гейты намерений</span><span class="s">expiresAt → дубль → личка → 2/сутки → 4 ч → тишина 30 мин</span></span><span class="mod">executor.go</span></button></li>
+          <li><button class="stage" data-s="s16" style="--pc:var(--amber)"><span class="num">16</span><span class="tx"><span class="t">Исполнение задачи</span><span class="s">WAL collect→generate→apply · чекпоинт · потолок 5 попыток</span></span><span class="mod">executor.go</span></button></li>
+          <li><button class="stage" data-s="s17" style="--pc:var(--amber)"><span class="num">17</span><span class="tx"><span class="t">Консолидация</span><span class="s">эпизоды 4 ч / 1 ч / 100 событий → summary + stances</span></span><span class="mod">consolidation.go</span></button></li>
+        </ul>
+      </div>
+    </div>
+    <div class="detail">
+      <div class="dcard" id="dcard" aria-live="polite">
+        <div class="dphase" id="d-phase"></div>
+        <h3 id="d-title"></h3>
+        <p class="dd" id="d-desc"></p>
+        <div class="dsec">В коде</div><div class="crefs" id="d-code"></div>
+        <div class="dsec">Настройки</div><div class="cfgs" id="d-cfg"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= MEMORY ================= -->
+<section id="memory" class="sh">
+  <div class="kick">02 · internal/memory</div>
+  <h2>Как устроена память</h2>
+  <p class="lead">Единая типизированная память на таблицах миграций <code>000004_memory</code> и <code>000007_embeddings</code>: сущности, записи со ссылками на источники, stances и векторный индекс. Доступ фильтруется <b>в SQL до ранжирования</b> — модель физически не видит недоступные записи.</p>
+
+  <div class="grid2">
+    <div>
+      <div class="panel rv">
+        <h3>Типы и статусы <span class="m">— как в коде</span></h3>
+        <p><b>Виды записей</b> (<code>item.go:16</code>) и их жизненный цикл:</p>
+        <div class="chips">
+          <span class="chip sky">claim — утверждение источника</span>
+          <span class="chip sky">experience — событие работы персонажа</span>
+          <span class="chip sky">thought — интерпретация</span>
+          <span class="chip sky">preference — устойчивый вкус</span>
+        </div>
+        <div class="chips">
+          <span class="chip mint">active</span><span class="chip amber">disputed</span><span class="chip">superseded</span><span class="chip rose">retracted</span>
+        </div>
+        <p><b>Сущности</b> (<code>entity.go:15</code>) — идентификаторы предметов памяти:</p>
+        <div class="chips">
+          <span class="chip violet">person</span><span class="chip violet">topic</span><span class="chip violet">place</span><span class="chip violet">object</span><span class="chip violet">event</span><span class="chip violet">project</span>
+        </div>
+        <p><b>Роли связей</b> memory_links (<code>item.go:28</code>):</p>
+        <div class="chips"><span class="chip">subject</span><span class="chip">participant</span><span class="chip">place</span><span class="chip">context</span></div>
+        <p><b>Источники</b> (<code>source.go:17</code>):</p>
+        <div class="chips"><span class="chip">journal_event</span><span class="chip">web_document</span><span class="chip">runtime_action</span><span class="chip">persona_version</span></div>
+        <p class="note">Статус меняется только через <b>Supersede</b> (<code>item.go:255</code>): новая запись + старая становится superseded; cross-scope запрещён (<code>ErrSupersedeScope</code>). Тихой перезаписи нет.</p>
+      </div>
+
+      <div class="panel rv">
+        <h3>Видимость: фильтр до выдачи <span class="m">— item.go:166 · scope.go:91</span></h3>
+        <div class="sql"><span class="cm">// аудитория = 'internal' → видно всё</span>
+(scope_id = аудитория OR 'public')
+AND provenance существует и валиден
+AND каждый scope provenance ∈ public | internal | chat:&lt;id&gt;
+AND (provenance содержит 'public' OR саму аудиторию)</div>
+        <p>Условие живёт в SQL (<code>visCond</code>) и дословно дублируется предикатом <code>ItemVisible</code> в Go. Битый provenance → запись видна только internal. Имена и алиасы сущностей тоже имеют свой scope — алиас чужого скоупа не открывает даже публичную сущность.</p>
+      </div>
+
+      <div class="panel rv">
+        <h3>Запись после хода <span class="m">— apply.go</span></h3>
+        <ul>
+          <li><b>До 5 memory-кандидатов</b> (<code>maxMemories=5</code>): <code>Items.Insert</code> идемпотентно пишет запись + <code>memory_sources</code> + <code>memory_links</code> + <code>memory_derivations</code>; runtime сам назначает источник <code>journal_event</code> ref <code>turn:&lt;id&gt;</code> и provenance скоупа хода.</li>
+          <li><b>До 2 намерений</b> (<code>maxIntentions=2</code>): ключ дедупа — JSON <code>[kind, lower(topic), chatID]</code>, <code>ON CONFLICT DO NOTHING</code>; <code>not_before = now + delay_hours</code>, TTL 72 ч. <b>defer</b> дополнительно создаёт <code>reply_later</code> с темой = последний текст пачки (≤80 рун).</li>
+          <li>Salience — модель предлагает (по умолчанию 0.5), валидируется 0..1.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel rv">
+        <h3>Retrieval: три инструмента хода <span class="m">— tools.go:27</span></h3>
+        <div class="chips">
+          <span class="chip sky">memory_find_entities</span>
+          <span class="chip sky">memory_entity_card</span>
+          <span class="chip sky">memory_search</span>
+        </div>
+        <p class="note">Скоуп чата внедряется зависимостью <code>memory_scope</code> — модель не выбирает аудиторию сама. Таймаут инструмента 30 с.</p>
+        <ol class="steps">
+          <li><b>Лексический канал:</b> <code>to_tsvector('russian', text)</code>, слова запроса через OR; только <code>status='active'</code>; ранжирование <code>ts_rank → salience → свежесть</code>.</li>
+          <li><b>Семантический канал</b> (если задан <code>EMBEDDING_*</code>): pgvector, <code>embedding &lt;=&gt; $2::vector</code> — косинусная близость, строка привязана к модели эмбеддингов (<code>memory_embeddings.model</code>).</li>
+          <li><b>Слияние:</b> каждый канал отдаёт пул 3×лимит, дубли убираются, затем жадное «разнообразие источников» (<code>diverseOrder</code>, первый элемент не сдвигается).</li>
+          <li><b>Карточка сущности:</b> сама сущность + до 10 записей (пул 30) с цитатами источников (kind + ref); сам provenance модели не показывается.</li>
+        </ol>
+        <p class="note">Лимиты: поиск по умолчанию 10, максимум 50; вызовы за ход — <code>MODEL_TOOL_CALLS_LIMIT=5</code>. На прямом вопросе первый вызов <b>memory_search принудительный</b> (tool_choice, только попытка 1 — на retry сбрасывается из-за thinking-режима).</p>
+      </div>
+
+      <div class="panel rv">
+        <h3>Настроение и отношения <span class="m">— mood.go · relationships.go</span></h3>
+        <p><b>Mood</b> <code>{valence −1..1, arousal 0..1, socialEnergy 0..1}</code> хранится в <code>character_state</code> (строка <code>CHECK (id=1)</code>). При каждом чтении затухает к baseline персоны (файл <code>config/persona.md</code>, у Дио: 0.1 / 0.7 / 0.9):</p>
+        <div class="formula">current = baseline + (stored − baseline) · e^(−λ·часы) &nbsp;&nbsp;<span style="color:var(--dim)">λ = 0.5/ч → полураспад ≈ 1.4 ч</span></div>
+        <p>Дельты от модели сжимаются до <b>±0.3 за ход</b> (<code>MaxMoodDeltaPerTurn</code>) и требуют основания (reason ≤500 рун). Текстовое описание строится порогами (<code>DescribeMood</code>: |Δvalence| &gt; 0.4 — сильно, &gt; 0.12 — слегка, и т.д.).</p>
+        <p><b>Отношения</b> <code>{familiarity, affinity, trust}</code> по паре (сущность-человек, скоуп чата), <code>SELECT … FOR UPDATE</code>. За ход: affinity ±0.1, trust ±0.1; familiarity растёт только от runtime — <b>+0.05 за каждый применённый значимый ход</b>, модель им не управляет. Стартовое доверие 0.2.</p>
+      </div>
+
+      <div class="panel rv">
+        <h3>Stances — текущее отношение <span class="m">— stance.go:82</span></h3>
+        <p>Уникальны по <code>(entity, aspect, scope)</code>. Обновление = <code>revision + 1</code>; основания в <code>stance_basis</code> только дополняются — прошлые аргументы не стираются. Поэтому возможны противоречивые аспекты одной сущности: «атмосфера праздника нравится, шум — нет». Против сущности по незнакомому имени — запись просто пропускается (повторный прогон того же summary — no-op).</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SCHEMA ================= -->
+<section id="schema" class="sh">
+  <div class="kick">03 · migrations 000001–000008</div>
+  <h2>Схема БД — что реально есть</h2>
+  <p class="lead">Миграции применяются при старте (<code>runtime.Migrate</code> из embed). 24 таблицы; выделенное — ключи и перечисления из кода.</p>
+  <div class="tgrid rv">
+    <div class="tcard"><span class="tn">social_events</span><span class="tg">приём</span><div class="tc"><b>UNIQUE(telegram_update_id)</b> — дедуп; kind: message|reply|mention|command|edited|other; status: pending → buffered → processed, либо journal_only; raw_update jsonb; turn_id; summarized_at</div></div>
+    <div class="tcard"><span class="tn">turns</span><span class="tg">ходы</span><div class="tc">status: <b>created | applied | failed | skipped</b>; attempts; context_revision. Колонка validated_result есть, но кодом не используется — результат живёт событием model_output</div></div>
+    <div class="tcard"><span class="tn">delivery_outbox</span><span class="tg">доставка</span><div class="tc"><b>UNIQUE(turn_id, position)</b>; status: pending|sending|sent|retry_wait|unknown|cancelled|failed; not_before; attempts; last_error</div></div>
+    <div class="tcard"><span class="tn">runtime_state</span><span class="tg">состояние</span><div class="tc">key-value jsonb: telegram_offset, cooldown-ключи консолидации bg:consolidate:cooldown:…</div></div>
+    <div class="tcard"><span class="tn">event_streams</span><span class="tg">журнал</span><div class="tc"><b>PK (stream_id, seq)</b>; триггер append-only: UPDATE/DELETE → exception</div></div>
+    <div class="tcard"><span class="tn">task_checkpoints</span><span class="tg">фон</span><div class="tc"><b>UNIQUE(task_id)</b>, state jsonb — чекпоинты фоновых задач {Attempt, TurnID}</div></div>
+    <div class="tcard"><span class="tn">intentions</span><span class="tg">фон</span><div class="tc"><b>UNIQUE(dedupe_key)</b>; kind: reply_later|check_in|share|explore; status: pending|running|completed|cancelled|failed; not_before / expires_at; priority</div></div>
+    <div class="tcard"><span class="tn">budget_reservations</span><span class="tg">бюджет</span><div class="tc"><b>UNIQUE(operation_id)</b> — retry не платит дважды; reserved/actual jsonb; period</div></div>
+    <div class="tcard"><span class="tn">budget_counters</span><span class="tg">бюджет</span><div class="tc"><b>PK (pool, period)</b>: conversation | background | maintenance; reserved_calls / actual_calls</div></div>
+    <div class="tcard"><span class="tn">memory_items</span><span class="tg">память</span><div class="tc">kind × status; salience 0.5 по умолчанию; supersedes_id; <b>GIN FTS</b> по to_tsvector('russian', text)</div></div>
+    <div class="tcard"><span class="tn">entities · entity_aliases</span><span class="tg">память</span><div class="tc">kind ∈ 6 типов; имена уникальны только <b>внутри скоупа</b>; алиасы со своим scope_id</div></div>
+    <div class="tcard"><span class="tn">sources · provenance</span><span class="tg">память</span><div class="tc"><b>UNIQUE(kind, ref)</b>; deletion_status active|deleted; provenance.scopes text[] — разрешения записей</div></div>
+    <div class="tcard"><span class="tn">memory_links / _sources / _derivations</span><span class="tg">память</span><div class="tc">связи запись↔сущность (role), запись↔источник, производность (supersede и др.)</div></div>
+    <div class="tcard"><span class="tn">stances · stance_basis</span><span class="tg">память</span><div class="tc"><b>UNIQUE(entity_id, aspect, scope_id)</b>; strength / interest 0.3 по умолчанию; revision; основания — пары stance↔memory</div></div>
+    <div class="tcard"><span class="tn">memory_embeddings</span><span class="tg">000007</span><div class="tc">PK memory_id; <b>model text</b> + vector без размерности (точный скан, без ANN-индекса); каскадное удаление</div></div>
+    <div class="tcard"><span class="tn">personas</span><span class="tg">персонаж</span><div class="tc">версии: MAX(version)+1 при отличии config/persona.md; mood-baseline колонки; seed_bio; <b>interests jsonb</b> (000008)</div></div>
+    <div class="tcard"><span class="tn">character_state</span><span class="tg">персонаж</span><div class="tc"><b>одна строка: CHECK (id = 1)</b>; valence/arousal/social_energy; context_revision; deletion_revision</div></div>
+    <div class="tcard"><span class="tn">relationships</span><span class="tg">персонаж</span><div class="tc"><b>PK (person_entity_id, scope_id)</b>; familiarity/affinity/trust; trust по умолчанию 0.2</div></div>
+  </div>
+</section>
+
+<!-- ================= JOURNAL ================= -->
+<section id="journal" class="sh">
+  <div class="kick">04 · event_streams · internal/runtime</div>
+  <h2>Журнал и восстановление</h2>
+  <p class="lead">Каждый ход — запуск агента ago; его траектория записывается в <code>event_streams</code>. Восстановление после любого сбоя — это <b>чтение журнала</b>, никаких ручных флагов.</p>
+
+  <div class="panel rv">
+    <h3>События хода <span class="m">— events.go:22 · journal.go:21</span></h3>
+    <div class="seq">
+      <span class="ev c">turn_started</span><span class="a">→</span>
+      <span class="ev v">tool_call</span><span class="a">⇄</span><span class="ev v">tool_result</span><span class="a">×0..N →</span>
+      <span class="ev m">model_output</span><span class="a">→</span>
+      <span class="ev m">deltas_applied</span><span class="a">+</span><span class="ev m">delivery_queued</span>
+      <span class="a">&nbsp;·&nbsp; ветка:</span><span class="ev r">turn_skipped</span>
+    </div>
+    <p class="note">Фоновые задачи пишут в свои потоки (stream = <code>bg:intention:N</code>, <code>bg:consolidate:&lt;chat&gt;:&lt;last&gt;</code>) WAL-события <span class="ev" style="font-size:11px">task_step_intended</span> <span class="ev" style="font-size:11px">task_step_done</span> с шагами collect / generate / apply. <code>deltas_applied</code> + <code>delivery_queued</code> пишутся <b>внутри транзакции применения</b> (<code>SetHistoryTx</code>) — либо всё, либо ничего.</p>
+  </div>
+
+  <div class="grid2">
+    <div class="panel rv">
+      <h3>Контракт адаптера журнала <span class="m">— runtime/journal.go</span></h3>
+      <ul>
+        <li><code>SetHistory</code> блокирует все строки потока <code>FOR UPDATE</code>, требует непрерывности seq, сверяет префикс по jsonb-семантике и вставляет <b>только суффикс</b>. Сокращение истории → <code>ErrHistoryConflict</code>; уникальность 23505 (гонка писателей) — тоже.</li>
+        <li><code>DropHistory</code> всегда запрещён (<code>ErrDropForbidden</code>) — журнал append-only.</li>
+        <li><code>ErrHistoryConflict</code> при применении трактуется как «ход уже применён» (<code>turn.go:349</code>).</li>
+        <li>Тип события обязан совпадать с <code>@type</code> payload'а (<code>ErrTypeMismatch</code>).</li>
+      </ul>
+    </div>
+    <div class="panel rv">
+      <h3>Singleton <span class="m">— runtime/singleton.go</span></h3>
+      <div class="formula">pg_try_advisory_lock(0x64696f) <span style="color:var(--dim)">— «dio» в hex</span></div>
+      <p>Отдельное постоянное соединение; занято — процесс не стартует. Часы каждые 5 с: соединение потеряно → <code>OnLost</code> → процесс завершается (systemd перезапустит). Продолжать без singleton-защиты нельзя.</p>
+      <h3 style="margin-top:16px">Бюджеты <span class="m">— runtime/budget.go</span></h3>
+      <p>Перед каждым вызовом модели — <code>Reserve</code>: одна транзакция проверяет <code>budget_counters</code> (пул + текущий день), вставляет резерв с <b>UNIQUE(operation_id)</b> (retry той же операции — бесплатно). После сбоя пишется <code>{"calls":1,"unknown":true}</code> — неизвестная стоимость <b>не считается нулём</b>. Пулы: <code>conversation</code> и <code>background</code>; <code>maintenance</code> объявлен, но пока никем не используется.</p>
+    </div>
+  </div>
+
+  <div class="panel rv">
+    <h3>Таблица восстановления — как в коде</h3>
+    <div class="tw"><table class="tbl">
+      <thead><tr><th>Что видно</th><th>Что делает процесс</th><th>Где</th></tr></thead>
+      <tbody>
+        <tr><td>События pending без turn (старт после падения)</td><td>Группирует по чатам и немедленно закрывает в ходы</td><td class="m">buffers.go:231 RecoverStalePending</td></tr>
+        <tr><td>turn_started без model_output</td><td>Повтор хода с тем же stream_id; ≤3 попытки воркера, backoff 2 с · 2ⁿ⁻¹, потолок 5 мин; исчерпаны → turn_skipped</td><td class="m">worker.go:341</td></tr>
+        <tr><td>model_output без deltas_applied</td><td>Применяет сохранённый результат <b>без новой генерации</b> (Recovered)</td><td class="m">turn.go:139</td></tr>
+        <tr><td>deltas_applied уже есть</td><td>AlreadyApplied — повторное применение невозможно (CAS в БД)</td><td class="m">turn.go:128 · apply.go:74</td></tr>
+        <tr><td>turn_skipped в журнале</td><td>Уважает пропуск с сохранённой причиной</td><td class="m">turn.go:133</td></tr>
+        <tr><td>outbox в sending от мёртвого процесса</td><td>Через 1 мин → unknown + отмена зависимых пузырей</td><td class="m">outbox.go:294 RecoverStaleSending</td></tr>
+        <tr><td>Намерения в running после падения</td><td>ResetRunning → pending; задача продолжает с чекпоинта + WAL</td><td class="m">scheduler.go:191</td></tr>
+        <tr><td>Незавершённая фоновая задача</td><td>Чекпоинт {Attempt, TurnID} + replay шагов WAL; повтор generate не платит дважды (тот же operation_id)</td><td class="m">runtime/wal.go · checkpoint.go</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- ================= OUTBOX ================= -->
+<section id="outbox" class="sh">
+  <div class="kick">05 · delivery_outbox · internal/telegram</div>
+  <h2>Доставка: состояния и честные гарантии</h2>
+  <p class="lead">Отдельный цикл каждые 500 мс забирает батч из 10 строк <code>FOR UPDATE SKIP LOCKED</code> в порядке чат → turn → position. exactly-once не заявляется: выбрана сторона «без дублей».</p>
+  <div class="panel rv">
+    <h3>Жизненный цикл строки outbox</h3>
+    <div class="seq">
+      <span class="ev">pending</span><span class="a">→</span>
+      <span class="ev c">sending</span><span class="a">→</span>
+      <span class="ev m">sent</span>
+      <span class="a">&nbsp;·&nbsp;</span>
+      <span class="ev c">sending</span><span class="a">→</span><span class="ev o">retry_wait</span><span class="a">→ (not_before) →</span><span class="ev">pending</span>
+    </div>
+    <div class="seq">
+      <span class="ev c">sending</span><span class="a">→</span><span class="ev r">unknown</span>
+      <span class="a">· timeout / обрыв / crash / висит &gt;1 мин</span>
+    </div>
+    <div class="seq">
+      <span class="ev c">sending</span><span class="a">→</span><span class="ev r">failed</span>
+      <span class="a">· постоянная ошибка</span>
+      <span class="a">&nbsp;·&nbsp;</span>
+      <span class="ev">cancelled</span>
+      <span class="a">· чат ушёл вперёд / зависимые от unknown</span>
+    </div>
+    <h3 style="margin-top:16px">Классификация ошибок отправки <span class="m">— delivery.go:253</span></h3>
+    <div class="tw"><table class="tbl">
+      <thead><tr><th>Ситуация</th><th>Исход</th></tr></thead>
+      <tbody>
+        <tr><td>HTTP 429 (rate limit)</td><td>retry_wait на RetryAfter от Telegram (запасной вариант — 1 с)</td></tr>
+        <tr><td>HTTP 5xx</td><td>retry_wait с backoff 2 с · 2ⁿ⁻¹; после 5 попыток — failed</td></tr>
+        <tr><td>прочие 4xx</td><td>failed сразу</td></tr>
+        <tr><td>таймаут / connection reset / потеря ответа</td><td><b>unknown</b> — автоматически не повторяется; зависимые пузыри отменяются</td></tr>
+      </tbody>
+    </table></div>
+    <ul>
+      <li><b>Устаревание:</b> перед отправкой проверяется, нет ли в чате новых pending-событий; есть — хвост пачки отменяется («чат ушёл вперёд — пузыри устарели»), но <b>первый пузырь уходит всегда</b>.</li>
+      <li><b>Темп:</b> между пузырями пауза <code>BubbleGap = 800 мс</code> (в памяти, чистится через 10 мин). Реакция — <code>SetMessageReaction</code> списком ReactionType, цель — message_id первого события пачки.</li>
+      <li><b>Typing</b> идёт всё время хода: <code>SendChatAction("typing")</code> сразу и каждые 4 с (<code>TypingPulse</code>).</li>
+      <li><b>История разговора</b> берёт только <code>status='sent'</code> из outbox — неотправленный текст не изображается состоявшимся.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= BACKGROUND ================= -->
+<section id="background" class="sh">
+  <div class="kick">06 · internal/background</div>
+  <h2>Фоновая жизнь</h2>
+  <p class="lead">Один планировщик обслуживает намерения, консолидацию и cleanup. Все модельные задачи выполняются <b>последовательно внутри тика</b> — параллельной когниции нет. Пока в очереди есть прямые ходы, весь тик возвращается сразу: <code>«фон отложен (§5.2)»</code>.</p>
+
+  <div class="grid2">
+    <div>
+      <div class="panel rv">
+        <h3>Тик планировщика <span class="m">— scheduler.go:225</span></h3>
+        <ol class="steps">
+          <li><b>ResetRunning</b> — зависшие running-намерения мёртвого процесса → pending</li>
+          <li><b>Наблюдаемость</b>: статистика очереди; варн роста после 3 подряд растущих тиков; варн исчерпания бюджета — раз в сутки</li>
+          <li><b>ExpireOverdue</b>: просроченные pending → cancelled, «срок истёк»</li>
+          <li><b>Гейт прямой очереди</b>: есть created-ходы с событиями? → тик заканчивается</li>
+          <li><b>Намерения</b>: ClaimDue ≤3 (<code>FOR UPDATE SKIP LOCKED</code>, порядок priority DESC, not_before, id) → исполнение; ошибка → пауза 15 мин; бюджет исчерпан → следующий UTC-полночь +5 мин</li>
+          <li><b>Консолидация</b>: ≤2 готовых эпизодов за тик (если не в cooldown)</li>
+        </ol>
+        <p class="note">Интервал тика — равномерный джиттер на [15 c, 30 c]. Никаких cron и внешних очередей.</p>
+      </div>
+      <div class="panel rv">
+        <h3>Гейты намерения перед генерацией <span class="m">— executor.go:405</span></h3>
+        <ol class="steps">
+          <li><b>expiresAt</b> истёк → cancelled</li>
+          <li><b>Дубль</b>: то же kind + чат + lower(topic) в pending/running → cancelled</li>
+          <li><b>Только личка</b> — инициативы в группы выключены</li>
+          <li><b>Лимиты инициативы</b>: ≤2/сутки на чат, ≥4 ч между (считаются по доставленным инициативам)</li>
+          <li><b>Лимит explore</b>: ≤2 исследований в сутки</li>
+          <li><b>Окно тишины 30 мин</b> (<code>ChatMoved</code>): в чате были события или отправки — «инициатива неуместна»; explore освобождён</li>
+        </ol>
+        <p class="note">Инициатива создаёт строку в turns <b>до</b> генерации; промпт получает добавку «Ты сам решил написать первым…». После explore может создаваться share-намерение с задержкой 10 мин.</p>
+      </div>
+    </div>
+    <div>
+      <div class="panel rv">
+        <h3>Исполнение фоновой задачи <span class="m">— executor.go</span></h3>
+        <ul>
+          <li>Задача = шаги <b>collect → generate → apply</b>; перед каждым шагом в WAL пишется <code>task_step_intended</code>, после — <code>task_step_done</code>. Чекпоинт <code>{Attempt, TurnID}</code> в <code>task_checkpoints</code>.</li>
+          <li>Номер попытки инкрементируется и чекпоинтится <b>до</b> вызова модели; retry того же шага переиспользует operation_id — бюджет не платит дважды.</li>
+          <li><b>Потолок генерации — 5 попыток</b> (<code>maxGenerateAttempts</code>). Намерение при потолке: turn → skipped, намерение → failed, WAL помечает generate failed.</li>
+          <li>Если посреди задачи в очереди появились прямые ходы — <code>errDeferred</code>: намерение возвращается в pending, задача отменяется без штрафа.</li>
+          <li>Результат explore живёт только в WAL (turn-строки нет); при успехе — записи памяти с источником <code>runtime_action</code> ref <code>intention:&lt;id&gt;</code>.</li>
+        </ul>
+      </div>
+      <div class="panel rv">
+        <h3>Консолидация <span class="m">— episodes.go · consolidation.go</span></h3>
+        <p>Эпизод готов при тишине <b>4 ч (личка) / 1 ч (группа)</b> или при <b>100 событиях</b> в сегменте. Агент <code>"dio-consolidate"</code> получает ≤30 записей эпизода (тексты ≤300 рун) и предлагает summary + ревизии stances:</p>
+        <ul>
+          <li>Одна summary-запись: kind <b>experience</b>, salience <b>0.3</b>, источник <code>runtime_action</code> ref <code>episode:&lt;chat&gt;:&lt;lastEvent&gt;</code>. Отдельной таблицы summaries нет — это обычная memory_items.</li>
+          <li>События эпизода получают <code>summarized_at = now()</code> — повторное применение эпизода невозможно.</li>
+          <li>Stances: <code>Upsert</code> с <code>revision+1</code>; максимум 5 аспектов по 100 рун.</li>
+        </ul>
+      </div>
+      <div class="incident rv">
+        <h3>⚡ Инцидент 2026-10-31: как фон выжег дневной пул</h3>
+        <p>Консолидация падала <code>HTTP 400 MissingSessionID</code> — при клонировании конфига для фонового пути терялся <code>session_id</code> — и повторялась <b>каждым тиком</b>: ~1000 вызовов в пустоту за день, вся фоновая жизнь встала до полуночи.</p>
+        <ul>
+          <li>Фикс причины: заголовок <code>x-opencode-session</code> теперь на всех путях (прямой ход, инициатива, explore, консолидация); групповые чаты (отрицательные id) тоже — прежний гард «≤ 0» их отсекал.</li>
+          <li>Усилитель (класс дефекта): потолок 5 попыток генерации + cooldown 24 ч для консолидации в <code>runtime_state</code>; после срока — свежий цикл попыток (WAL generate не помечен, Attempt сброшен).</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= CONFIG ================= -->
+<section id="config" class="sh">
+  <div class="kick">07 · internal/runtime/config.go</div>
+  <h2>Настройки: что читается из окружения</h2>
+  <p class="lead">Единственная точка — <code>LoadConfig</code>; <code>.env</code> подхватывается, не перекрывая реальные переменные. Буферы чатов и лимиты инициатив — <b>константы в коде</b>, не env.</p>
+  <div class="tw rv"><table class="tbl">
+    <thead><tr><th>Переменная</th><th>По умолчанию</th><th>Что делает</th></tr></thead>
+    <tbody>
+      <tr><td class="m">DATABASE_URL</td><td>— (обязательна)</td><td>PostgreSQL</td></tr>
+      <tr><td class="m">MODEL_ENDPOINT / MODEL_API_KEY / MODEL_MODEL</td><td>—</td><td>OpenAI-совместимый провайдер; задаётся всё или ничего — иначе ошибка старта</td></tr>
+      <tr><td class="m">MODEL_TIMEOUT_MS</td><td class="m">60000</td><td>таймаут одного вызова</td></tr>
+      <tr><td class="m">MODEL_MAX_RETRIES</td><td class="m">1</td><td>повторы на уровне провайдера</td></tr>
+      <tr><td class="m">MODEL_MAX_OUTPUT_TOKENS</td><td class="m">1000</td><td>потолок ответа</td></tr>
+      <tr><td class="m">MODEL_DAILY_CALLS_LIMIT</td><td class="m">100</td><td>дневной лимит вызовов — один на пулы conversation и background</td></tr>
+      <tr><td class="m">MODEL_HISTORY_MESSAGES</td><td class="m">1000</td><td>глубина истории чата в контексте</td></tr>
+      <tr><td class="m">MODEL_HISTORY_MAX_CHARS</td><td class="m">200000</td><td>потолок объёма истории в рунах (режутся самые старые)</td></tr>
+      <tr><td class="m">MODEL_TOOL_CALLS_LIMIT</td><td class="m">5</td><td>вызовов инструментов за ход (0 = без лимита)</td></tr>
+      <tr><td class="m">TELEGRAM_BOT_TOKEN / TELEGRAM_API_BASE</td><td class="m">https://api.telegram.org</td><td>без токена (или TELEGRAM_DRY_RUN=true) Telegram выключается / работает dry-run</td></tr>
+      <tr><td class="m">EMBEDDING_ENDPOINT / _API_KEY / _MODEL</td><td>— (всё или ничего)</td><td>без них семантический поиск честно недоступен, остаётся full-text</td></tr>
+      <tr><td class="m">EMBEDDING_TIMEOUT_MS</td><td class="m">30000</td><td>таймаут векторизации</td></tr>
+      <tr><td class="m">WEB_SEARCH_PROVIDER</td><td class="m">off</td><td>off | ddg | tavily (tavily требует ключ)</td></tr>
+      <tr><td class="m">WEB_MAX_SEARCH_PER_TASK / WEB_MAX_FETCH_PER_TASK</td><td class="m">2 / 3</td><td>лимиты одного исследования</td></tr>
+      <tr><td class="m">WEB_FETCH_MAX_BYTES / WEB_FETCH_TIMEOUT_MS</td><td class="m">256 KiB / 20 с</td><td>жёсткие потолки скачивания</td></tr>
+      <tr><td class="m">LOG_LEVEL · NODE_ENV</td><td class="m">info · development</td><td>журналирование и режим</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Константы в коде: окна буферов (личка 3 с/10 с — бурст человека одним ходом · группа 4 с/6 с · reply 150 мс/1 с · 20 событий · 8000 рун), инициативы (2/сутки · 4 ч · тишина 30 мин · explore 2/сутки), эпизоды (4 ч / 1 ч / 100 событий), typing 4 с, BubbleGap 800 мс, TTL намерений 72 ч, drain при остановке 90 с.</p>
+</section>
+
+<!-- ================= CODE MAP ================= -->
+<section id="codemap" class="sh">
+  <div class="kick">08 · структура репозитория</div>
+  <h2>Карта кода</h2>
+  <p class="lead">Один бинарник (<code>cmd/agent</code>); всё остальное — пакеты <code>internal/</code>. Фреймворк ago — внешняя зависимость v0.6.0, состояние хранит только PostgreSQL.</p>
+  <div class="modgrid rv">
+    <div class="mod"><div class="mp">cmd/agent</div><div class="mr">точка входа: .env → конфиг → app.Run; сигналы SIGINT/SIGTERM</div><div class="mf">main.go</div></div>
+    <div class="mod"><div class="mp">internal/app</div><div class="mr">сборка всего и порядок старта; shutdown: intake → буферы → drain воркера 90 с; recovery до запуска циклов</div><div class="mf">app.go · dryrun.go</div></div>
+    <div class="mod"><div class="mp">internal/telegram</div><div class="mr">Bot API: polling, нормализация, prefilter, ingest, буферы пачек, outbox-доставка, медиа</div><div class="mf">api.go · poller.go · normalize.go · prefilter.go · ingest.go · buffers.go · outbox.go · delivery.go · media.go</div></div>
+    <div class="mod"><div class="mp">internal/worker</div><div class="mr">один когнитивный воркер: claim, retry-паузы, потолок попыток</div><div class="mf">worker.go</div></div>
+    <div class="mod"><div class="mp">internal/character</div><div class="mr">личность и ход: персона, контекст, история, mood/отношения, запуск агента ago, TurnResult, применение</div><div class="mf">turn.go · context.go · history.go · persona.go · persona_file.go · prompt_template.go · mood.go · relationships.go · model.go · middleware.go · turn_result.go · turn_result_schema.go · photo.go · apply.go · events.go · journal.go</div></div>
+    <div class="mod"><div class="mp">internal/memory</div><div class="mr">единая память: сущности, записи, источники, скоупы, поиск (FTS + pgvector), инструменты, эмбеддинги</div><div class="mf">tools.go · search.go · item.go · entity.go · scope.go · source.go · stance.go · embed.go · index.go</div></div>
+    <div class="mod"><div class="mp">internal/background</div><div class="mr">планировщик, намерения, консолидация эпизодов, исполнение задач с чекпоинтами</div><div class="mf">scheduler.go · executor.go · intentions.go · episodes.go · consolidation.go · modelrun.go · observe.go</div></div>
+    <div class="mod"><div class="mp">internal/runtime</div><div class="mr">конфиг, singleton, бюджеты, адаптер журнала ago, WAL, чекпоинты, миграции</div><div class="mf">config.go · envfile.go · singleton.go · budget.go · journal.go · wal.go · checkpoint.go · migrate.go</div></div>
+    <div class="mod"><div class="mp">internal/web</div><div class="mr">ограниченные search/fetch: блокировка приватных адресов, лимиты байтов и редиректов</div><div class="mf">fetch.go · tools.go</div></div>
+    <div class="mod"><div class="mp">migrations/</div><div class="mr">8 SQL-файлов, применяются embed'ом при старте</div><div class="mf">000001_extensions · 000002_runtime_core · 000003_budgets · 000004_memory · 000005_character · 000006_background · 000007_embeddings · 000008_persona_interests</div></div>
+  </div>
+</section>
+
+<!-- ================= SPEC DIFF ================= -->
+<section id="specdiff" class="sh">
+  <div class="kick">09 · честно</div>
+  <h2>Где код расходится со спекой v0.7</h2>
+  <p class="lead">Страница построена по коду, поэтому эти отличия зафиксированы как есть — пригодится при следующей сверке спеки с реализацией.</p>
+  <div class="panel rv">
+    <ul>
+      <li><b>Решения хода:</b> в коде <code>answer | react | ignore | defer</code> — спека §11.2 описывала <code>speak</code>.</li>
+      <li><b>Забывания нет:</b> salience — только ключ ранжирования; кода, понижающего её со временем, не существует (спека §10.5).</li>
+      <li><b>Семантическая индексация не подключена:</b> <code>IndexPending</code> вызывается только из тестов — в проде поиск FTS-only, пока векторизация не встроена в цикл.</li>
+      <li><b>Quiet hours отсутствуют</b> — из ночных пауз в коде только окно тишины 30 мин и дневные лимиты инициатив (спека §14.3 предполагала timezone-тишину).</li>
+      <li><b>maintenance-пул бюджетов</b> объявлен, но не используется; дневной лимит вызовов общий для разговоров и фона.</li>
+      <li><b>turns.validated_result</b> — колонка существует, код не пишет и не читает её (результат хранится событием <code>model_output</code>).</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    Собрано из исходников ветки main (коммит <span class="m">16b83a7</span>, 2026-10-31). Ссылки вида <span class="m">файл:строка</span> соответствуют рабочей копии и будут дрейфовать с правками кода.
+  </div>
+</footer>
+
+<script>
+(function () {
+  'use strict';
+  /* ---------- данные этапов ---------- */
+  var D = {
+    s1:{ph:'Приём · internal/telegram',t:'Long polling',d:'Цикл <b>GetUpdates</b>: начальный offset читается из runtime_state, пачка updates обрабатывается строго по порядку. Первый сбой прерывает пачку — offset не продвигается, пауза 3 c и повторный опрос: ничего не теряется и не дублируется.',
+      c:['TelegramPoller.Run — poller.go:63','API.GetUpdates — api.go:120','allowed_updates: message, edited_message','PollOffsetKey — ingest.go:19'],
+      g:['таймаут опроса 25 c','backoff ошибки 3 c','транспорт жёстко IPv4 — api.go:78 (инцидент IPv6-флапа)','токен затирается в текстах ошибок']},
+    s2:{ph:'Приём · internal/telegram',t:'Нормализация и prefilter',d:'Update → <b>NormalizedEvent</b>: kind определяется по цепочке edited → reply → sticker → photo → command → mention → message. Стикер превращается в «[стикер 😂]», реплей — в префикс «[в ответ на Имя: цитата ≤200 рун]», поэтому ход не слепнет вне окна недавнего. Prefilter решает судьбу: личка всегда pending; в группе — только reply/mention/command, остальное journal_only.',
+      c:['NormalizeUpdate — normalize.go:107','detectKind — normalize.go:233','eventText — normalize.go:178','DecideIngestStatus — prefilter.go:19'],
+      g:['kinds: message · photo · reply · sticker · mention · command · edited · other','цитата реплая ≤ 200 рун','journal_only не вызывает LLM, но остаётся в истории']},
+    s3:{ph:'Приём · internal/telegram',t:'Ingest — короткая транзакция',d:'Одна транзакция: INSERT в <b>social_events</b> с <code>ON CONFLICT (telegram_update_id) DO NOTHING</code> (дедуп: повтор не создаёт второе событие) и перенос offset в <b>runtime_state</b> через GREATEST. raw_update сохраняется целиком. Не поддержанные типы updates тоже фиксируются — offset не застревает.',
+      c:['IngestUpdate — ingest.go:37','INSERT … ON CONFLICT — ingest.go:52','offset GREATEST — ingest.go:70'],
+      g:['status: pending | journal_only','offset двигается только после commit','обработка пачки останавливается на первой ошибке БД']},
+    s4:{ph:'Приём · internal/telegram',t:'Буфер чата → turn',d:'События одного чата копятся в пачку, чтобы ход видел разговор, а не обрывки. Закрытие — по ближайшему из idle-и max-таймеров либо по объёму. При закрытии: INSERT в <b>turns</b>, события получают turn_id и status=buffered (проверка RowsAffected — без потерь), затем <b>worker.Wake()</b>.',
+      c:['ChatBufferManager.Add — buffers.go:144','DefaultWindows — buffers.go:31','createTurn — buffers.go:268','dbStartTurn — buffers.go:283','RecoverStalePending — buffers.go:231'],
+      g:['личка: idle 3 c · max 10 c (бурст человека — один ход)','группа: idle 4 c · max 6 c','reply/mention/command: 150 мс · 1 c','закрытие: 20 событий или 8000 рун','таймер закрытия — вне ingest-пути (goroutine)']},
+    s5:{ph:'Очередь · internal/worker',t:'Claim хода',d:'Один воркер опрашивает очередь каждые 500 мс: до 20 created-ходов, <b>личка раньше группы</b> (direct DESC), внутри — FIFO по возрастанию id. Захват — CAS: <code>UPDATE turns SET attempts = attempts + 1 WHERE status=created</code>; повторное применение исключено на уровне строки.',
+      c:['claimNext SQL — worker.go:233','CAS-claim — worker.go:263','loadBatch — worker.go:318','backoff — worker.go:368'],
+      g:['poll 500 мс','retry: 2 с · 2ⁿ⁻¹, потолок 5 мин (в памяти процесса)','3 попытки → turn_skipped (phase "worker")','фоновые задачи идут мимо этой очереди — у планировщика свой claim']},
+    s6:{ph:'Очередь · internal/worker',t:'Recovery хода из журнала',d:'Перед любой генерацией воркер читает состояние потока <code>turn:&lt;id&gt;</code>: deltas_applied есть → ход уже применён; turn_skipped → пропуск с причиной; model_output без применения → <b>применяем сохранённый результат без нового LLM</b>. Только после этого пишется свежий turn_started.',
+      c:['LoadTurnState — journal.go:174','Runner.Run phase 0 — turn.go:128–145','ErrHistoryConflict → AlreadyApplied — turn.go:349'],
+      g:['stream = turn:<id> · PK (stream_id, seq)','kind: conversation | background','событие model_output пишет результат ДО применения']},
+    s7:{ph:'Когниция · internal/character',t:'Сборка контекста и персона',d:'<b>Assemble</b> строит BaseContext: системный промпт из config/system-prompt.md (метки persona/mood/relationship; {{memory}} всегда пуст — память модель добирает инструментами), mood с затуханием к baseline, строка отношений с актором, история чата (события ∪ доставленные ответы), пачка текстом. Актор пачки создаётся как person-сущность, если ещё нет.',
+      c:['Assembler.Assemble — context.go:70','RecentHistory — history.go:23','historyStream — history.go (засев потока запуска)','FitHistory — history.go:67','DescribeMood — mood.go:68','PersonaRepo.EnsureFromSource — persona.go:146'],
+      g:['история — на проводе до пачки, настоящими user/assistant ходами (append-only, кэш префикса не страдает)','MODEL_HISTORY_MESSAGES=1000 · MODEL_HISTORY_MAX_CHARS=200000','персона: версии в БД при отличии config/persona.md','interests — секция персоны (jsonb, миграция 000008)','baseline Дио: valence 0.1 · arousal 0.7 · socialEnergy 0.9']},
+    s8:{ph:'Когниция · internal/character',t:'Фото из пачки',d:'<b>CollectPhotos</b> берёт file_id крупнейшего PhotoSize, через getFile скачивает и кодирует в base64; каждая фотография становится частью запроса <b>[текст, image]</b> после текста. Ошибка скачивания не валит ход — он продолжается по тексту.',
+      c:['CollectPhotos — photo.go:38','askMsgs — photo.go:65','MediaFetcher — media.go','PhotoFileIDFromUpdate — media.go'],
+      g:['MaxImagesPerTurn = 3','MaxPhotoBytes = 6 MiB','в dry-run фетчер не строится — ход по тексту']},
+    s9:{ph:'Когниция · ago',t:'Запуск агента',d:'Агент <b>"dio"</b>: системный промпт + constraints отдельными фрагментами, строгая схема ответа TurnResultJSONSchema (response_format json_schema), инструменты памяти. На прямом вопросе первой попытки — <b>forced tool_choice memory_search</b>. Провайдеру уходит заголовок <code>x-opencode-session</code> = FNV-1a от "dio-chat-<id>" — сессия обязательна на всех путях (урок инцидента 2026-10-31).',
+      c:['generate — turn.go:217','wantForcedTool — turn.go:54','sessionForChat — turn.go:44','ExtraHeaders — model.go:153','TurnResultJSONSchema — turn_result_schema.go:13'],
+      g:['MODEL_TIMEOUT_MS=60000 · retries=1','tool_choice сбрасывается на retry (несовместим с thinking)','сессия: dio-%016x, фон клонирует конфиг с session_id']},
+    s10:{ph:'Когниция · internal/character',t:'Middleware-цепочка',d:'Каждый вызов модели обёрнут: <b>Budget</b> — резерв в пуле до вызова (сбой БД тоже блокирует вызов); <b>toolJournal</b> — tool_call/tool_result в журнал; <b>ToolLimit</b> — сверх лимита инструмент получает ошибку «завершай ход финальным ответом»; <b>Typing</b> — sendChatAction «typing» на весь ход каждые 4 c.',
+      c:['BudgetMiddleware.OnLLMCall — middleware.go:72','ToolLimitMiddleware — middleware.go:221','TypingPulse — middleware.go:144','toolJournalMW — turn.go:299'],
+      g:['MODEL_TOOL_CALLS_LIMIT=5 (0 = без лимита)','typing каждые 4 c','operation id: model:turn:<turn>:<attempt>:<call>','пул conversation для ходов, background — для фона']},
+    s11:{ph:'Когниция · internal/character',t:'TurnResult: валидация и repair',d:'Ответ — строгий JSON (DisallowUnknownFields), чинится известный дефект двойного двоеточия, инертные поля срезаются (defer_hours у не-defer, reaction у не-react…). Решения: <b>answer | react | ignore | defer</b>. Невалидно — ровно один repair-запрос («твой последний ответ не прошёл валидацию…»), после — терминальный turn_skipped.',
+      c:['ParseTurnResult — turn_result.go:111','Validate — turn_result.go:165','repair — turn.go:271','invalidResultError — turn.go:182'],
+      g:['≤4 сообщения × 4000 рун','≤5 memory × 2000 рун · ≤2 intentions','defer: 0.05–168 ч','reason ≤500 рун · reaction ≤64','emoji реакций живёт в system-prompt.md, не валидируется кодом']},
+    s12:{ph:'Применение · internal/character',t:'Атомарное применение',d:'Одна транзакция: CAS <b>turns → applied</b> (повтор невозможен), события → processed; mood- и relationship-дельты (с затуханием и clamp); до 5 memory-кандидатов с источником journal_event; до 2 намерений с dedupe-ключом; строки <b>delivery_outbox</b> (сообщения поз. 0..3 + реакция); события deltas_applied + delivery_queued — тем же коммитом.',
+      c:['ApplyTurn — apply.go:65','CAS — apply.go:74','insertMemoryCandidate — apply.go:322','createIntention — apply.go:402','enqueueOutbox — apply.go:277'],
+      g:['mood: clamp ±0.3/ход · λ=0.5/ч','affinity/trust ±0.1 за ход · familiarity +0.05 (runtime)','TTL намерения 72 ч · dedupe [kind, topic, chat]','defer → reply_later (топик ≤80 рун)']},
+    s13:{ph:'Доставка · internal/telegram',t:'Outbox → Telegram',d:'Цикл каждые 500 мс: ClaimDue батчем 10 (<code>FOR UPDATE SKIP LOCKED</code>), повторная проверка статуса строки, проверка устаревания (новые pending-события в чате → хвост отменяется, первый пузырь всегда уходит), пауза 800 мс между пузырями, затем SendMessage или SetMessageReaction → MarkSent.',
+      c:['ClaimDue — outbox.go:82','deliver — delivery.go:127','classifySendError — delivery.go:253','CancelTurnFrom — outbox.go:263'],
+      g:['BubbleGap 800 мс между пузырями','429 → retry_wait (RetryAfter) · 5xx → retry, failed после 5','таймаут/обрыв → unknown: не повторяется, зависимые отменяются','в историю разговора попадает только status=sent']},
+    s14:{ph:'Фон · internal/background',t:'Планировщик',d:'Тик каждые 15–30 с (равномерный джиттер): ResetRunning зависших намерений → статистика очереди → ExpireOverdue → <b>гейт «есть прямые ходы — фон откладывается»</b> → заявка ≤3 due-намерений → консолидация ≤2 эпизодов. Все модельные задачи — последовательно, параллельной когниции нет.',
+      c:['Tick — scheduler.go:225','directPending — scheduler.go:320','ClaimDue — intentions.go:124','nextDelay — scheduler.go:181'],
+      g:['тик 15–30 c · ClaimLimit 3 · ConsolidateLimit 2','ошибка намерения → пауза 15 мин','бюджет исчерпан → следующий UTC-полночь +5 мин','варн роста очереди после 3 растущих тиков']},
+    s15:{ph:'Фон · internal/background',t:'Гейты намерений',d:'Перед генерацией намерение проходит цепочку проверок: срок → дубль (kind+чат+topic) → только личка → дневной лимит инициатив 2/чат и пауза ≥4 ч → лимит explore 2/сутки → окно тишины 30 мин (ChatMoved смотрит свежие события и отправки; explore освобождён). Инициатива создаёт turn-строку до генерации.',
+      c:['runGates — executor.go:405','ProactiveAllowed — intentions.go:85','ChatMoved — intentions.go:254','DuplicatePending — intentions.go:274'],
+      g:['MaxProactivePerChatPerDay=2 · MinProactiveGap=4 ч','MaxExplorationsPerDay=2 · тишина 30 мин','TTL намерения 72 ч','share после explore — задержка 10 мин']},
+    s16:{ph:'Фон · internal/background',t:'Исполнение и потолок попыток',d:'Задача = шаги <b>collect → generate → apply</b>, каждый фиксируется в WAL (task_step_intended/done) с чекпоинтом {Attempt, TurnID}. Попытка инкрементируется ДО вызова модели; retry не платит дважды (тот же operation_id). Потолок <b>5 попыток</b>: намерение → failed, консолидация → cooldown 24 ч со свежим циклом после срока.',
+      c:['maxGenerateAttempts — executor.go:60','WAL Steps — runtime/wal.go:98','checkpointState — executor.go:50','cooldownKey — consolidation.go:552','errDeferred — executor.go:44'],
+      g:['unit: bg:intention:N · bg:consolidate:chat:last','cooldown 24 ч в runtime_state','прямые ходы в очереди → errDeferred без штрафа','x-opencode-session обязателен и здесь (инцидент 2026-10-31)']},
+    s17:{ph:'Фон · internal/background',t:'Консолидация эпизодов',d:'Эпизод готов при тишине 4 ч (личка) / 1 ч (группа) или 100 событиях. Агент "dio-consolidate" получает ≤30 записей эпизода и предлагает summary + ревизии stances. Результат — обычная memory-запись kind=experience (salience 0.3); события получают summarized_at, поэтому повтор эпизода невозможен.',
+      c:['EpisodeReady — episodes.go:84','applyConsolidation — consolidation.go:258','Stances.Upsert — stance.go:82'],
+      g:['EpisodeSilenceDM 4 ч · группы 1 ч · 100 событий','summary ≤2000 рун · ≤5 аспектов × 100 рун','episodeItemLimit 30 · тексты событий ≤300 рун','источник: runtime_action ref episode:chat:last']}
+  };
+  var dPhase = document.getElementById('d-phase'), dTitle = document.getElementById('d-title'),
+      dDesc = document.getElementById('d-desc'), dCode = document.getElementById('d-code'), dCfg = document.getElementById('d-cfg');
+  function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function selectStage(id){
+    var s = D[id]; if(!s) return;
+    document.querySelectorAll('.stage').forEach(function(b){
+      var on = b.getAttribute('data-s') === id;
+      b.classList.toggle('sel', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    dPhase.textContent = s.ph; dTitle.textContent = s.t; dDesc.innerHTML = s.d;
+    dCode.innerHTML = s.c.map(function(x){return '<span class="cref">'+esc(x)+'</span>';}).join('');
+    dCfg.innerHTML = s.g.map(function(x){return '<span class="cfg">'+esc(x)+'</span>';}).join('');
+  }
+  document.querySelectorAll('.stage').forEach(function(b){
+    b.setAttribute('aria-pressed','false');
+    b.addEventListener('click', function(){ selectStage(b.getAttribute('data-s')); });
+  });
+  selectStage('s1');
+
+  /* ---------- scrollspy ---------- */
+  var links = Array.prototype.slice.call(document.querySelectorAll('.topnav a'));
+  var secs = links.map(function(a){ return document.querySelector(a.getAttribute('href')); });
+  function spy(){
+    var y = window.scrollY + 120, cur = 0;
+    secs.forEach(function(sec, i){ if (sec && sec.offsetTop <= y) cur = i; });
+    links.forEach(function(a, i){ a.classList.toggle('on', i === cur); });
+  }
+  window.addEventListener('scroll', spy, {passive:true}); spy();
+
+  /* ---------- reveal ---------- */
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function(es){
+      es.forEach(function(e){ if (e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+    }, {threshold:.06});
+    document.querySelectorAll('.rv').forEach(function(el){ io.observe(el); });
+  } else {
+    document.querySelectorAll('.rv').forEach(function(el){ el.classList.add('in'); });
+  }
+})();
+</script>
+</body>
+</html>
