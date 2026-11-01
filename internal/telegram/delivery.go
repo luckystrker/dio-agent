@@ -4,7 +4,10 @@
 // подтверждённая постоянная ошибка — failed; timeout/обрыв после возможной
 // отправки — unknown без автоповтора, зависимые пузыри отменяются. Перед
 // каждой отправкой — проверка устаревания: новые события чата отменяют
-// оставшиеся bubbles (§13.3). Поведение — src/telegram/delivery.ts.
+// оставшиеся bubbles (§13.3). Ошибка БД не зависляет пузырь в sending
+// (16.3): до попытки отправки — возврат в retry_wait, после отправки без
+// записи исхода — unknown; зависшее sending подбирает периодический recovery
+// (§12.2). Поведение — src/telegram/delivery.ts.
 package telegram
 
 import (
@@ -26,6 +29,11 @@ type DB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// staleSendingAfter — sending старше этого возраста считается зависшим:
+// recovery §12.2 переводит его в unknown (не отправлять вслепую). Тот же
+// порог, что у startup-recovery приложения (internal/app).
+const staleSendingAfter = time.Minute
+
 // DeliveryOptions — настройки delivery loop.
 type DeliveryOptions struct {
 	// Interval — период такта (по умолчанию 500 мс, паритет TS).
@@ -39,6 +47,10 @@ type DeliveryOptions struct {
 	// BubbleGap — минимальный интервал между bubbles одного turn
 	// (§13.3: 300–1500 мс; по умолчанию 800 мс — середина диапазона TS).
 	BubbleGap time.Duration
+	// RecoveryInterval — период recovery зависшего sending из такта (§12.2,
+	// 16.3; по умолчанию 30 с): пузырь, зависший в живом процессе, подбирается
+	// без рестарта. Порог staleness — staleSendingAfter, настройкой не меняется.
+	RecoveryInterval time.Duration
 }
 
 func (o DeliveryOptions) withDefaults() DeliveryOptions {
@@ -57,6 +69,9 @@ func (o DeliveryOptions) withDefaults() DeliveryOptions {
 	if o.BubbleGap <= 0 {
 		o.BubbleGap = 800 * time.Millisecond
 	}
+	if o.RecoveryInterval <= 0 {
+		o.RecoveryInterval = 30 * time.Second
+	}
 	return o
 }
 
@@ -67,6 +82,10 @@ type DeliveryLoop struct {
 	api    API
 	logger *log.Logger
 	opts   DeliveryOptions
+
+	// lastRecovery — когда последний раз шёл recovery зависшего sending
+	// (§12.2, 16.3); читается/пишется только из горутины такта.
+	lastRecovery time.Time
 
 	// lastSent[turnID] — когда отправлен последний bubble turn (для паузы
 	// §13.3 между bubbles, в том числе между тактами).
@@ -81,12 +100,13 @@ func NewDeliveryLoop(db DB, repo *OutboxRepo, api API, logger *log.Logger, opts 
 		logger = log.New(discardWriter{}, "", 0)
 	}
 	return &DeliveryLoop{
-		db:       db,
-		repo:     repo,
-		api:      api,
-		logger:   logger,
-		opts:     opts.withDefaults(),
-		lastSent: map[int64]time.Time{},
+		db:           db,
+		repo:         repo,
+		api:          api,
+		logger:       logger,
+		opts:         opts.withDefaults(),
+		lastRecovery: time.Now(),
+		lastSent:     map[int64]time.Time{},
 	}
 }
 
@@ -120,8 +140,12 @@ func (l *DeliveryLoop) tickGuarded(ctx context.Context) (err error) {
 }
 
 // Tick — один такт доставки (отдельным методом для тестируемости):
-// захват пачки и отправка по порядку.
+// периодический recovery зависшего sending (§12.2, 16.3), затем захват пачки
+// и отправка по порядку.
 func (l *DeliveryLoop) Tick(ctx context.Context) error {
+	if err := l.recoverStaleDue(ctx); err != nil {
+		return err
+	}
 	rows, err := l.repo.ClaimDue(ctx, l.opts.BatchSize)
 	if err != nil {
 		return err
@@ -136,13 +160,35 @@ func (l *DeliveryLoop) Tick(ctx context.Context) error {
 	return nil
 }
 
+// recoverStaleDue — периодический recovery зависшего sending (§12.2) из такта
+// доставки (16.3): раньше recovery шёл один раз на старте — пузырь, зависший
+// в живом процессе (ошибка записи исхода), ждал рестарта. Пока интервал не
+// истёк — пропуск (обычный такт не бегает recovery-запросом в БД); истёк —
+// sending старше staleSendingAfter переводится в unknown, зависимые
+// отменяются. Ошибка — ошибка такта (логируется Run'ом), следующий такт
+// попробует снова.
+func (l *DeliveryLoop) recoverStaleDue(ctx context.Context) error {
+	if time.Since(l.lastRecovery) < l.opts.RecoveryInterval {
+		return nil
+	}
+	touched, err := l.repo.RecoverStaleSending(ctx, staleSendingAfter)
+	l.lastRecovery = time.Now()
+	if err != nil {
+		return fmt.Errorf("recovery sending: %w", err)
+	}
+	if touched > 0 {
+		l.logger.Printf("delivery: recovery перевёл %d зависших sending в unknown/cancelled (§12.2)", touched)
+	}
+	return nil
+}
+
 // deliver отправляет одну единицу доставки с проверками §13.2/§13.3.
 func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	// Захваченная пачка могла устареть в памяти: предыдущий пузырь стал
 	// unknown и отменил эту. Перепроверяем статус перед отправкой (§13.2).
 	status, err := l.repo.StatusOf(ctx, row.ID)
 	if err != nil {
-		l.logger.Printf("delivery: статус строки %d не читается: %v", row.ID, err)
+		l.requeueOnDBError(ctx, row, fmt.Sprintf("статус строки %d не читается: %v", row.ID, err))
 		return
 	}
 	if status != OutboxSending {
@@ -158,14 +204,15 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	// (портировано из TS-линии c0a986d, 2026-10-31).
 	stale, err := l.chatHasNewPendingEvents(ctx, row.ChatID)
 	if err != nil {
-		l.logger.Printf("delivery: устаревание не проверяется (строка %d остаётся в sending до recovery): %v",
-			row.ID, err)
+		l.requeueOnDBError(ctx, row, err.Error())
 		return
 	}
 	if stale && row.Position > 0 {
 		cancelled, cerr := l.repo.CancelTurnFrom(ctx, row.TurnID, row.Position, "чат ушёл вперёд — пузыри устарели")
 		if cerr != nil {
-			l.logger.Printf("delivery: отмена устаревших пузырей turn %d не удалась: %v", row.TurnID, cerr)
+			// Отмена не записалась — строка возвращается в очередь: следующий
+			// такт перепроверит устаревание и отменит как надо (16.3).
+			l.requeueOnDBError(ctx, row, fmt.Sprintf("отмена устаревших пузырей turn %d не удалась: %v", row.TurnID, cerr))
 			return
 		}
 		l.logger.Printf("delivery: доставка отменена — чат %d ушёл вперёд (turn %d, отменено %d)",
@@ -182,7 +229,9 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	switch row.Kind {
 	case "reaction":
 		if row.TargetMessageID == 0 || row.Reaction == "" {
-			_ = l.repo.MarkFailed(ctx, row.ID, "реакция без emoji/target_message_id")
+			if ferr := l.repo.MarkFailed(ctx, row.ID, "реакция без emoji/target_message_id"); ferr != nil {
+				l.requeueOnDBError(ctx, row, ferr.Error())
+			}
 			return
 		}
 		if err := l.api.SetMessageReaction(ctx, row.ChatID, row.TargetMessageID, row.Reaction); err != nil {
@@ -191,7 +240,7 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		}
 		// У реакции нет telegram_message_id — NULL, а не 0 (§13.1).
 		if err := l.repo.MarkSent(ctx, row.ID, nil); err != nil {
-			l.logger.Printf("delivery: sent реакции %d не записан: %v", row.ID, err)
+			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
 		l.noteSent(row)
@@ -204,13 +253,70 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			return
 		}
 		if err := l.repo.MarkSent(ctx, row.ID, &messageID); err != nil {
-			l.logger.Printf("delivery: sent строки %d не записан: %v", row.ID, err)
+			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
 		l.noteSent(row)
 		l.logger.Printf("delivery: отправлено (turn %d, поз. %d, message_id %d)",
 			row.TurnID, row.Position, messageID)
 	}
+}
+
+// requeueOnDBError — ошибка БД ДО попытки отправки (16.3): захват уже сделан,
+// отправки не было — строка возвращается из sending в retry_wait с паузой по
+// образцу classifySendError (экспонента по попыткам, предел попыток — failed).
+// Без этого пузырь зависал в sending до рестарта: ClaimDue берёт только
+// pending/retry_wait. Если и возврат не записался — строка остаётся в sending,
+// её подберёт периодический recovery (§12.2).
+func (l *DeliveryLoop) requeueOnDBError(ctx context.Context, row OutboxItem, reason string) {
+	message := "ошибка БД до отправки: " + reason
+	wait, giveUp := dbRetryBackoff(row.Attempts, l.opts.MaxAttempts, l.opts.RetryBase)
+	if giveUp {
+		if err := l.repo.MarkFailed(ctx, row.ID, message); err != nil {
+			l.logger.Printf("delivery: failed не записан (строка %d остаётся в sending до recovery): %v", row.ID, err)
+			return
+		}
+		l.logger.Printf("delivery: ошибка БД до отправки, предел попыток — failed (строка %d, turn %d, поз. %d): %s",
+			row.ID, row.TurnID, row.Position, reason)
+		return
+	}
+	if err := l.repo.RequeueFromSending(ctx, row.ID, time.Now().Add(wait), message); err != nil {
+		l.logger.Printf("delivery: возврат в retry_wait не удался (строка %d остаётся в sending до recovery): %v", row.ID, err)
+		return
+	}
+	l.logger.Printf("delivery: ошибка БД до отправки — возврат в retry_wait, повтор через %v (строка %d, turn %d, поз. %d): %s",
+		wait, row.ID, row.TurnID, row.Position, reason)
+}
+
+// markUnknownAfterDBError — ошибка записи ПОСЛЕ подтверждённой отправки
+// (MarkSent не записан, 16.3): исход для строки неясен — unknown, не
+// отправлять вслепую (§13.2); зависимые пузыри отменяются. Если и эта запись
+// не прошла — строка остаётся в sending до периодического recovery (§12.2).
+func (l *DeliveryLoop) markUnknownAfterDBError(ctx context.Context, row OutboxItem, reason string) {
+	message := "отправка подтверждена, sent не записан: " + reason
+	changed, cancelled, err := l.repo.MarkUnknown(ctx, row.ID, message)
+	if err != nil {
+		l.logger.Printf("delivery: unknown не записан (строка %d остаётся в sending до recovery): %v", row.ID, err)
+		return
+	}
+	if changed {
+		l.logger.Printf("delivery: sent не записан после отправки — исход неопределён, зависимых отменено %d (строка %d, turn %d, поз. %d)",
+			cancelled, row.ID, row.TurnID, row.Position)
+	}
+}
+
+// dbRetryBackoff — пауза повтора после ошибки БД до отправки (16.3), по
+// образцу classifySendError: экспоненциальная пауза от номера попытки,
+// исчерпание лимита попыток — failed (без капа вечный флап одной строки
+// сжигал бы такты). Попытки считает ClaimDue, захват всегда даёт attempts ≥ 1.
+func dbRetryBackoff(attempts, maxAttempts int, retryBase time.Duration) (wait time.Duration, giveUp bool) {
+	if attempts < 1 {
+		attempts = 1 // защита от отрицательного сдвига (классификатор ниже предполагает захваченную строку)
+	}
+	if attempts >= maxAttempts {
+		return 0, true
+	}
+	return retryBase * (1 << (attempts - 1)), false
 }
 
 // handleSendError — классификация исхода отправки по политике §13.2.

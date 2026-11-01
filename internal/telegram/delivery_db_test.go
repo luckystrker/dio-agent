@@ -11,9 +11,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // telegramStub — заглушка Bot API с записью вызовов sendMessage.
@@ -353,6 +356,192 @@ func TestDeliveryLoopPermanentFailure(t *testing.T) {
 	}
 	if status != "failed" || lastError == nil {
 		t.Fatalf("4xx должен давать failed: %s %v", status, lastError)
+	}
+}
+
+// TestDeliveryLoopDBErrorBeforeSendRequeues — 16.3: ошибка БД до попытки
+// отправки (перепроверка статуса StatusOf) не оставляет строку в sending до
+// рестарта: захват возвращается в retry_wait и берётся повторно. Обрыв
+// соединения — реальный сценарий: единственное соединение пула доставки
+// убивается на стороне PostgreSQL (pg_terminate_backend, как в тестах
+// singleton §5.1), StatusOf падает на мёртвом соединении, следующий запрос
+// пула получает свежее.
+func TestDeliveryLoopDBErrorBeforeSendRequeues(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+
+	// Пул доставки из одного соединения без фоновых проверек здоровья:
+	// после обрыва первый запрос (StatusOf) обязан упасть на мёртвом
+	// соединении, следующий (возврат строки) — получить свежее.
+	singleCfg, err := pgxpool.ParseConfig(pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatalf("конфиг пула не разбирается: %v", err)
+	}
+	singleCfg.MaxConns = 1
+	singleCfg.MinConns = 0
+	singleCfg.HealthCheckPeriod = time.Hour
+	single, err := pgxpool.NewWithConfig(ctx, singleCfg)
+	if err != nil {
+		t.Fatalf("пул доставки не создан: %v", err)
+	}
+	t.Cleanup(single.Close)
+	repo := NewOutboxRepo(single)
+
+	id := insertOutbox(t, pool, 180, 42, 0, `{"kind":"message","text":"пережить обрыв базы"}`)
+	claimed := mustClaim(t, repo, 10)
+	if len(claimed) != 1 {
+		t.Fatalf("захвачено %d строк, хочу 1", len(claimed))
+	}
+
+	// Обрыв единственного соединения пула доставки со стороны СУБД.
+	var backendPID int32
+	if err := single.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&backendPID); err != nil {
+		t.Fatalf("pid соединения не читается: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `SELECT pg_terminate_backend($1)`, backendPID); err != nil {
+		t.Fatalf("соединение не оборвано: %v", err)
+	}
+
+	// Отправка захваченной строки: StatusOf падает на мёртвом соединении.
+	// Пауза повтора мала (RetryBase), чтобы свежий такт сразу взял строку.
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{RetryBase: 50 * time.Millisecond})
+	loop.deliver(ctx, claimed[0])
+
+	var status string
+	var notBefore time.Time
+	var lastError *string
+	if err := pool.QueryRow(ctx,
+		`SELECT status, not_before, last_error FROM delivery_outbox WHERE id = $1`, id).
+		Scan(&status, &notBefore, &lastError); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "retry_wait" {
+		t.Fatalf("после ошибки БД до отправки строка в %q, хочу retry_wait — пузырь зависает в sending до рестарта", status)
+	}
+	if lastError == nil || !strings.Contains(*lastError, "ошибка БД") {
+		t.Fatalf("причина возврата в retry_wait не записана: %v", lastError)
+	}
+	if notBefore.IsZero() {
+		t.Fatalf("пауза повтора (not_before) не записана")
+	}
+
+	// Строка берётся повторно: свежий такт с живым пулом отправляет её.
+	time.Sleep(80 * time.Millisecond) // пауза повтора (RetryBase) истекла
+	fresh := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil, DeliveryOptions{})
+	if err := fresh.Tick(ctx); err != nil {
+		t.Fatalf("повторный такт не удался: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("после повтора строка в %s, хочу sent", status)
+	}
+	if sent := stub.sentMessages(); len(sent) != 1 || sent[0]["text"] != "пережить обрыв базы" {
+		t.Fatalf("сообщение не доставлено повторно: %v", sent)
+	}
+}
+
+// TestDeliveryLoopPeriodicRecovery — 16.3: recovery зависшего sending идёт
+// периодически из такта доставки (§12.2), а не раз при старте процесса:
+// пузырь, зависший в живом процессе, подбирается без рестарта. Пока интервал
+// recovery не истёк, такт его не запускает (обычный такт не должен бегать
+// recovery-запросом в БД) — включая второй такт сразу после срабатывания:
+// счётчик троттлина обновляется, интервал отсчитывается заново (без этого
+// после первого интервала recovery деградировал бы до «каждым тактом»,
+// ~×60 нагрузки). Порог staleness — 1 минута, свежее sending и unknown-строки
+// не отправляются вслепую (образец: TestRecoverStaleSending).
+func TestDeliveryLoopPeriodicRecovery(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+
+	// Зависшее sending (5 минут назад) и свежее sending живого процесса.
+	stale := insertOutbox(t, pool, 190, 42, 0, `{"kind":"message","text":"завис процесса"}`)
+	fresh := insertOutbox(t, pool, 191, 43, 0, `{"kind":"message","text":"живой процесс"}`)
+	if _, err := pool.Exec(ctx, `
+		UPDATE delivery_outbox SET status = 'sending', attempts = 1, updated_at = now() - interval '5 minutes'
+		WHERE id = $1`, stale); err != nil {
+		t.Fatalf("зависшее sending не выставлено: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE delivery_outbox SET status = 'sending', attempts = 1
+		WHERE id = $1`, fresh); err != nil {
+		t.Fatalf("свежее sending не выставлено: %v", err)
+	}
+
+	// Интервал recovery не истёк — такт его не запускает.
+	idle := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil, DeliveryOptions{})
+	if err := idle.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, stale).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "sending" {
+		t.Fatalf("до истечения интервала recovery тронул зависшую строку: %s", status)
+	}
+
+	// Интервал истёк — такт подбирает зависшее sending. Отсчёт сдвинут в
+	// прошлое: между сборкой цикла и тактом нет ни одного оператора, а
+	// монотонные часы Windows грубее наносекунды — time.Since измерялся нулём
+	// и recovery не запускался (находка зелёного прогона). Интервал 10 с:
+	// между тактами теста проходят миллисекунды — второй такт ниже честно
+	// считает интервал неистёкшим.
+	active := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil,
+		DeliveryOptions{RecoveryInterval: 10 * time.Second})
+	active.lastRecovery = time.Now().Add(-20 * time.Second)
+	if err := active.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	statuses := map[int64]string{}
+	rows, err := pool.Query(ctx, `SELECT id, status FROM delivery_outbox`)
+	if err != nil {
+		t.Fatalf("статусы не читаются: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var st string
+		if err := rows.Scan(&id, &st); err != nil {
+			t.Fatalf("статус не читается: %v", err)
+		}
+		statuses[id] = st
+	}
+	rows.Close()
+	if statuses[stale] != "unknown" {
+		t.Fatalf("зависшее sending не подобрано периодическим recovery: %s", statuses[stale])
+	}
+	if statuses[fresh] != "sending" {
+		t.Fatalf("свежее sending затронуто recovery: %s", statuses[fresh])
+	}
+	if len(stub.sentMessages()) != 0 {
+		t.Fatalf("recovery не должен отправлять вслепую (§13.2): %v", stub.sentMessages())
+	}
+
+	// Второй такт сразу после срабатывания: счётчик троттлина обновился,
+	// интервал отсчитывается заново — новая зависшая строка ждёт следующего
+	// интервала, а не подбирается каждым тактом (мутация М6 приёмки).
+	secondStale := insertOutbox(t, pool, 192, 44, 0, `{"kind":"message","text":"ждёт интервала"}`)
+	if _, err := pool.Exec(ctx, `
+		UPDATE delivery_outbox SET status = 'sending', attempts = 1, updated_at = now() - interval '5 minutes'
+		WHERE id = $1`, secondStale); err != nil {
+		t.Fatalf("второе зависшее sending не выставлено: %v", err)
+	}
+	if err := active.Tick(ctx); err != nil {
+		t.Fatalf("второй такт не удался: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, secondStale).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "sending" {
+		t.Fatalf("recovery бежит каждым тактом после первого срабатывания (счётчик троттлина не обновился): %s", status)
 	}
 }
 

@@ -52,6 +52,32 @@ func TestClassifyRetryAfter429BeatsBackoff(t *testing.T) {
 	}
 }
 
+// TestDBRetryBackoff — 16.3: пауза повтора после ошибки БД до отправки — по
+// образцу classifySendError (экспонента от номера попытки, исчерпание лимита
+// — failed, без повтора).
+func TestDBRetryBackoff(t *testing.T) {
+	cases := []struct {
+		name       string
+		attempts   int
+		wantWait   time.Duration
+		wantGiveUp bool
+	}{
+		{"первая попытка — базовая пауза", 1, 2 * time.Second, false},
+		{"вторая попытка — пауза ×2", 2, 4 * time.Second, false},
+		{"третья попытка — пауза ×4", 3, 8 * time.Second, false},
+		{"лимит попыток исчерпан — failed", 5, 0, true},
+		{"ноль попыток — защита от отрицательного сдвига", 0, 2 * time.Second, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wait, giveUp := dbRetryBackoff(tc.attempts, 5, 2*time.Second)
+			if wait != tc.wantWait || giveUp != tc.wantGiveUp {
+				t.Fatalf("пауза=%v giveUp=%v, хочу %v/%v", wait, giveUp, tc.wantWait, tc.wantGiveUp)
+			}
+		})
+	}
+}
+
 // syncBuffer — потокобезопасный буфер лога (delivery loop пишет из своей
 // горутины, тест читает из своей).
 type syncBuffer struct {

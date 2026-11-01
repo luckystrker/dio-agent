@@ -210,6 +210,25 @@ func (r *OutboxRepo) MarkRetryWait(ctx context.Context, id int64, notBefore time
 	return nil
 }
 
+// RequeueFromSending — ошибка БД до попытки отправки (§13.2, этап 16.3):
+// захваченная строка возвращается из sending в retry_wait, чтобы не зависать
+// до рестарта (ClaimDue берёт только pending/retry_wait). Условная запись —
+// как MarkSent: терминальный исход, случившийся пока ошибка шла до записи,
+// не перезаписывается.
+func (r *OutboxRepo) RequeueFromSending(ctx context.Context, id int64, notBefore time.Time, sendErr string) error {
+	tag, err := r.Pool.Exec(ctx, `
+		UPDATE delivery_outbox
+		SET status = 'retry_wait', not_before = $2, last_error = $3, updated_at = now()
+		WHERE id = $1 AND status = 'sending'`, id, notBefore, sendErr)
+	if err != nil {
+		return fmt.Errorf("outbox: retry_wait не записан: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("outbox: строка %d не в sending — retry_wait не записан", id)
+	}
+	return nil
+}
+
 // MarkFailed — подтверждённая постоянная ошибка (§13.2).
 func (r *OutboxRepo) MarkFailed(ctx context.Context, id int64, sendErr string) error {
 	_, err := r.Pool.Exec(ctx, `
