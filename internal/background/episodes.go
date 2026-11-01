@@ -88,6 +88,10 @@ func readyEpisodes(now time.Time, evs []episodeEvent) []Episode {
 				out = append(out, newEpisode(chatID, chatType[chatID], seg[:EpisodeMaxEvents]))
 				seg = seg[EpisodeMaxEvents:]
 			}
+			if len(seg) == 0 {
+				// Ровно N×100 событий: серия нарезана целиком, хвоста нет.
+				continue
+			}
 			last := seg[len(seg)-1]
 			if now.Sub(last.OccurredAt) > boundary {
 				out = append(out, newEpisode(chatID, chatType[chatID], seg))

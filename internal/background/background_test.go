@@ -116,6 +116,97 @@ func TestReadyEpisodesBoundaries(t *testing.T) {
 	})
 }
 
+// TestReadyEpisodesExactChunks — ровно N×100 событий без тишины: нарезка
+// закрывает серию целиком, пустого хвоста не остаётся. Раньше на ровно
+// 100/200/300 seg после нарезки был пуст и seg[len(seg)-1] паниковал
+// (index out of range) — паника в горутине планировщика роняла процесс.
+func TestReadyEpisodesExactChunks(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	// Непрерывная серия из n событий (пауза 1 мин « границы), последнее — сейчас:
+	// тишины нет, готовность даёт только граница 100 событий.
+	series := func(chatID int64, n int) []episodeEvent {
+		evs := make([]episodeEvent, 0, n)
+		for i := 0; i < n; i++ {
+			evs = append(evs, episodeEvent{
+				ID: int64(i + 1), ChatID: chatID, ChatType: "private",
+				OccurredAt: now.Add(-time.Duration(n-i) * time.Minute),
+			})
+		}
+		return evs
+	}
+
+	t.Run("ровно 100 — один готовый кусок, без паники", func(t *testing.T) {
+		got := readyEpisodes(now, series(600, 100))
+		if len(got) != 1 || len(got[0].EventIDs) != 100 {
+			t.Fatalf("хочу 1 кусок из 100, получено %d кусков: %+v", len(got), got)
+		}
+		if got[0].LastEventID != 100 {
+			t.Fatalf("LastEventID=%d, хочу 100", got[0].LastEventID)
+		}
+	})
+
+	t.Run("ровно 200 — два готовых куска", func(t *testing.T) {
+		got := readyEpisodes(now, series(700, 200))
+		if len(got) != 2 {
+			t.Fatalf("хочу 2 куска по 100, получено %d", len(got))
+		}
+		if got[0].EventIDs[99] != 100 || got[1].EventIDs[0] != 101 || got[1].LastEventID != 200 {
+			t.Fatalf("куски не подряд [1..100][101..200]: %+v", got)
+		}
+	})
+
+	t.Run("ровно 300 — три готовых куска", func(t *testing.T) {
+		got := readyEpisodes(now, series(800, 300))
+		if len(got) != 3 {
+			t.Fatalf("хочу 3 куска по 100, получено %d", len(got))
+		}
+		if got[2].LastEventID != 300 {
+			t.Fatalf("LastEventID последнего куска=%d, хочу 300", got[2].LastEventID)
+		}
+	})
+
+	t.Run("300+хвост 37 — три куска, хвост ждёт тишину", func(t *testing.T) {
+		got := readyEpisodes(now, series(900, 337))
+		if len(got) != 3 {
+			t.Fatalf("хочу 3 готовых куска, получено %d", len(got))
+		}
+		for i, ep := range got {
+			if len(ep.EventIDs) != 100 {
+				t.Fatalf("кусок %d не из 100 событий: %d", i, len(ep.EventIDs))
+			}
+		}
+	})
+
+	t.Run("соседние сегменты 99/100/101", func(t *testing.T) {
+		// Три сегмента одного чата с паузами больше 4 ч между ними: 99 закрывается
+		// тишиной, ровно 100 — границей, 101 даёт кусок 100 и хвост-одно-событие,
+		// который ждёт тишину.
+		var evs []episodeEvent
+		id := int64(0)
+		addSeg := func(n int, start time.Time) {
+			for i := 0; i < n; i++ {
+				id++
+				evs = append(evs, episodeEvent{
+					ID: id, ChatID: 950, ChatType: "private",
+					OccurredAt: start.Add(time.Duration(i) * time.Second),
+				})
+			}
+		}
+		addSeg(99, now.Add(-10*time.Hour))
+		addSeg(100, now.Add(-5*time.Hour))
+		addSeg(101, now.Add(-30*time.Minute))
+		got := readyEpisodes(now, evs)
+		if len(got) != 3 {
+			t.Fatalf("хочу 3 готовых куска (99 тишиной + 100 + 100), получено %d: %+v", len(got), got)
+		}
+		for i, want := range []int{99, 100, 100} {
+			if n := len(got[i].EventIDs); n != want {
+				t.Fatalf("кусок %d: %d событий, хочу %d", i, n, want)
+			}
+		}
+	})
+}
+
 // TestProactiveAllowedPolicy — проактивная политика §14.3: только личные чаты,
 // не более 2 на чат в сутки, не менее 4 часов между инициативами.
 func TestProactiveAllowedPolicy(t *testing.T) {
