@@ -9,9 +9,15 @@ package telegram
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrUnusableUpdate — update неисправим на уровне данных (не разобран или
+// без update_id): повтор не поможет, poller скипает его с продвижением
+// offset, чтобы один такой update не глушил приём (16.4).
+var ErrUnusableUpdate = errors.New("update неисправим")
 
 // ChatType — тип чата события (§6.2 различает окна лички и группы).
 type ChatType string
@@ -107,10 +113,10 @@ type telegramUpdateShape struct {
 func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 	var shape telegramUpdateShape
 	if err := json.Unmarshal(raw, &shape); err != nil {
-		return NormalizedEvent{}, fmt.Errorf("нормализация: update не разобран: %w", err)
+		return NormalizedEvent{}, fmt.Errorf("%w: update не разобран: %v", ErrUnusableUpdate, err)
 	}
 	if shape.UpdateID == 0 {
-		return NormalizedEvent{}, fmt.Errorf("нормализация: у update нет update_id")
+		return NormalizedEvent{}, fmt.Errorf("%w: у update нет update_id", ErrUnusableUpdate)
 	}
 
 	message, edited := extractMessage(&shape)
