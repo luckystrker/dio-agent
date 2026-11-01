@@ -6,6 +6,9 @@ package telegram
 import (
 	"context"
 	"errors"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,5 +49,54 @@ func TestClassifyRetryAfter429BeatsBackoff(t *testing.T) {
 	got := classifySendError(&APIError{HTTPStatus: 429, RetryAfter: 30 * time.Second}, 4, 5, time.Second)
 	if got.kind != outcomeRetryWait || got.wait != 30*time.Second {
 		t.Fatalf("429: %+v", got)
+	}
+}
+
+// syncBuffer — потокобезопасный буфер лога (delivery loop пишет из своей
+// горутины, тест читает из своей).
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestDeliveryRunSurvivesTickPanic — 16.2: паника такта доставки (битый
+// репозиторий: nil- deref в ClaimDue) пишется в лог и не роняет цикл и
+// процесс; раньше паника в горутине Run убивала весь бинарник.
+func TestDeliveryRunSurvivesTickPanic(t *testing.T) {
+	var buf syncBuffer
+	loop := NewDeliveryLoop(nil, nil, nil,
+		log.New(&buf, "", 0), DeliveryOptions{Interval: 5 * time.Millisecond})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { loop.Run(ctx); close(done) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "паника") {
+		if time.Now().After(deadline) {
+			t.Fatalf("паника такта не залогирована, лог: %q", buf.String())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delivery loop не остановился после отмены")
+	}
+	if !strings.Contains(buf.String(), "ошибка такта") {
+		t.Fatalf("паника такта должна проходить обычным путём ошибки такта, лог: %q", buf.String())
 	}
 }

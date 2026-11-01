@@ -161,6 +161,9 @@ func NewTypingPulse(send ChatActionSender, interval time.Duration) *TypingPulse 
 // Start запускает пульс чата: первое действие сразу, затем по тикеру.
 func (p *TypingPulse) Start(chatID int64) {
 	p.Stop(chatID) // повторный старт заменяет прежний пульс (паритет TS)
+	if p.send == nil {
+		return // отправитель не настроен (telegram выключен) — пульсу нечем тикать (16.2)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
 	p.cancels[chatID] = cancel
@@ -169,6 +172,14 @@ func (p *TypingPulse) Start(chatID int64) {
 	go func() {
 		defer cancel()
 		fire := func() {
+			// Паника адаптера глотается с записью в лог: «печатает…» не имеет
+			// права ронять ход и процесс (16.2). Стандартный логгер — у пульса
+			// нет своего, а строчка должна попасть в журнал процесса (systemd).
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("typing: пульс чата %d подавил панику отправителя: %v", chatID, r)
+				}
+			}()
 			_ = p.send.SendChatAction(ctx, chatID, "typing") // ошибка глотается
 		}
 		fire()

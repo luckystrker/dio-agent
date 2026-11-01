@@ -149,3 +149,45 @@ func TestTypingPulseSwallowsErrors(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	pulse.Stop(7) // дожили без паники
 }
+
+// panickingActionSender — отправитель, падающий на каждом действии (16.2:
+// recover в горутине пульса не даёт багу адаптера убить процесс).
+type panickingActionSender struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *panickingActionSender) SendChatAction(_ context.Context, _ int64, _ string) error {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	panic("адаптер chat action сломался")
+}
+
+func (p *panickingActionSender) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+// TestTypingPulseNilSenderDoesNotPanic — nil-отправитель не роняет процесс:
+// раньше вызов метода на nil-интерфейсе паниковал в горутине пульса (16.2).
+func TestTypingPulseNilSenderDoesNotPanic(t *testing.T) {
+	pulse := NewTypingPulse(nil, 10*time.Millisecond)
+	pulse.Start(1)
+	time.Sleep(40 * time.Millisecond)
+	pulse.Stop(1) // дожили без паники
+}
+
+// TestTypingPulseRecoversSenderPanic — паника отправителя глотается, пульс
+// продолжает тикать: «печатает…» не должно ронять ход и процесс (16.2).
+func TestTypingPulseRecoversSenderPanic(t *testing.T) {
+	sender := &panickingActionSender{}
+	pulse := NewTypingPulse(sender, 15*time.Millisecond)
+	pulse.Start(7)
+	time.Sleep(60 * time.Millisecond)
+	pulse.Stop(7)
+	if n := sender.count(); n < 2 {
+		t.Fatalf("пульс должен тикать и после паники отправителя, действий %d", n)
+	}
+}

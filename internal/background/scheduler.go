@@ -212,9 +212,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.logInfo("планировщик фона остановлен")
 			return nil
 		case <-time.After(delay):
-			if err := s.Tick(ctx); err != nil {
-				s.logError("такт планировщика фона не удался: %v", err)
-			}
+			// Такт под recover (16.2): паника — ERROR в лог, цикл продолжается.
+			s.tickGuarded(ctx)
 		}
 	}
 }
@@ -254,7 +253,8 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		return err
 	}
 	for _, it := range claimed {
-		out, rerr := s.runIntention(ctx, it)
+		// Изоляция задачи (16.2): паника одного намерения — ошибка этой задачи.
+		out, rerr := s.runIntentionGuarded(ctx, it)
 		if rerr != nil {
 			out.Outcome = "error"
 			out.Detail = rerr.Error()
@@ -275,7 +275,8 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		if cooled {
 			continue
 		}
-		out, rerr := s.runConsolidation(ctx, ep)
+		// Изоляция задачи (16.2): паника одного эпизода — ошибка этой задачи.
+		out, rerr := s.runConsolidationGuarded(ctx, ep)
 		if rerr != nil {
 			out.Outcome = "error"
 			out.Detail = rerr.Error()

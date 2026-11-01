@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -90,7 +91,8 @@ func NewDeliveryLoop(db DB, repo *OutboxRepo, api API, logger *log.Logger, opts 
 }
 
 // Run крутит такты до отмены контекста (§5.3: delivery запускается на старте,
-// останавливается при shutdown).
+// останавливается при shutdown). Такт под recover (16.2): паника становится
+// ошибкой такта в логе и не роняет цикл и процесс.
 func (l *DeliveryLoop) Run(ctx context.Context) {
 	ticker := time.NewTicker(l.opts.Interval)
 	defer ticker.Stop()
@@ -99,11 +101,22 @@ func (l *DeliveryLoop) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := l.Tick(ctx); err != nil {
+			if err := l.tickGuarded(ctx); err != nil {
 				l.logger.Printf("delivery: ошибка такта: %v", err)
 			}
 		}
 	}
+}
+
+// tickGuarded — один такт доставки под recover: паника возвращается ошибкой
+// (со стеком), цикл продолжает следующим тиком (16.2).
+func (l *DeliveryLoop) tickGuarded(ctx context.Context) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("паника такта: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return l.Tick(ctx)
 }
 
 // Tick — один такт доставки (отдельным методом для тестируемости):
