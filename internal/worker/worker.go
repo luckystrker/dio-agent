@@ -18,6 +18,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // Стартовые значения повторов (§12.1, §5.2; паритет TS worker.ts).
@@ -293,6 +295,13 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 		if ctx.Err() != nil {
 			return // shutdown: ход остаётся в очереди, recovery подберёт (§12.2)
 		}
+		// Исчерпание дневного бюджета (§16) — не сбой хода: в полночь пул
+		// обнуляется, ход откладывается до завтра, а не теряется (решение 16.7,
+		// паритет с фоном). Ошибка хода несёт ErrBudgetExhausted через %w.
+		if errors.Is(err, runtime.ErrBudgetExhausted) {
+			w.deferBudgetExhausted(ctx, turn)
+			return
+		}
 		w.fail(ctx, turn, err)
 		return
 	}
@@ -362,6 +371,24 @@ func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 	w.notBeforeMu.Unlock()
 	w.logger.Printf("ход %d вернулся в очередь с паузой %v (попытка %d): %v",
 		turn.ID, pause, turn.Attempt, runErr)
+}
+
+// deferBudgetExhausted — исчерпание дневного бюджета на прямом ходе (§16):
+// попытка не сжигается (claim её добавил — возвращаем), ход стоит в очереди
+// до следующего дня 00:05 UTC — общей с фоном границы суток (runtime.NextDay,
+// решение 16.7). notBefore живёт в памяти процесса: рестарт делает ход
+// доступным сразу, но попытки бюджетной ошибкой не тратятся — вторая встреча
+// снова отложит, бесконечного терминального пропуска нет.
+func (w *Worker) deferBudgetExhausted(ctx context.Context, turn *claimedTurn) {
+	if _, err := w.pool.Exec(ctx,
+		`UPDATE turns SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'created'`, turn.ID); err != nil {
+		w.logger.Printf("ход %d: попытка не возвращена после откладывания по бюджету: %v", turn.ID, err)
+	}
+	notBefore := runtime.NextDay(time.Now())
+	w.notBeforeMu.Lock()
+	w.notBefore[turn.ID] = notBefore
+	w.notBeforeMu.Unlock()
+	w.logger.Printf("ход %d отложено до завтра: бюджет (до %s)", turn.ID, notBefore.UTC().Format("2006-01-02 15:04"))
 }
 
 // backoff — экспоненциальная пауза: base * 2^(попытка-1), с потолком RetryMax.

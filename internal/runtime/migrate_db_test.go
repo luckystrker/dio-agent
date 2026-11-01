@@ -81,8 +81,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("первое применение миграций: %v", err)
 	}
-	if first.Applied != 8 || first.Skipped != 0 {
-		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 8/0", first.Applied, first.Skipped)
+	if first.Applied != 9 || first.Skipped != 0 {
+		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 9/0", first.Applied, first.Skipped)
 	}
 
 	// 2. Повторное применение: идемпотентно, без ошибок и без записей.
@@ -90,8 +90,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("второе применение миграций (идемпотентность): %v", err)
 	}
-	if second.Applied != 0 || second.Skipped != 8 {
-		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/8", second.Applied, second.Skipped)
+	if second.Applied != 0 || second.Skipped != 9 {
+		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/9", second.Applied, second.Skipped)
 	}
 
 	// Все миграции отмечены в schema_migrations.
@@ -99,8 +99,32 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err := pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&appliedCount); err != nil {
 		t.Fatalf("schema_migrations не читается: %v", err)
 	}
-	if appliedCount != 8 {
-		t.Errorf("записей в schema_migrations = %d, хочу 8", appliedCount)
+	if appliedCount != 9 {
+		t.Errorf("записей в schema_migrations = %d, хочу 9", appliedCount)
+	}
+
+	// Частичный индекс очереди ходов (16.9): worker опрашивает
+	// turns WHERE status='created' каждые 500 мс — без индекса seq scan.
+	var idxRegclass *string
+	if err := pool.QueryRow(ctx, "SELECT to_regclass($1)", "public.turns_created_partial_idx").Scan(&idxRegclass); err != nil {
+		t.Fatalf("to_regclass(turns_created_partial_idx): %v", err)
+	}
+	if idxRegclass == nil {
+		t.Error("частичный индекс turns_created_partial_idx отсутствует (16.9)")
+	}
+
+	// Предикат частичности (мутационная находка приёмки, М10): индекс обязан
+	// покрывать именно очередь created. Предикат по applied рос бы с историей,
+	// а запрос очереди worker снова уходил бы в seq scan — молча.
+	var idxdef string
+	if err := pool.QueryRow(ctx, `
+		SELECT pg_get_indexdef(c.oid) FROM pg_class c
+		JOIN pg_index i ON i.indexrelid = c.oid
+		WHERE c.relname = 'turns_created_partial_idx'`).Scan(&idxdef); err != nil {
+		t.Fatalf("определение индекса очереди не читается: %v", err)
+	}
+	if !strings.Contains(idxdef, "WHERE (status = 'created'") {
+		t.Errorf("индекс очереди не частичный по created: %s", idxdef)
 	}
 
 	// Полная схема §18 на месте.

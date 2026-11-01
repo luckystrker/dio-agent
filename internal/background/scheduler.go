@@ -294,18 +294,12 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 func (s *Scheduler) deferIntention(ctx context.Context, it Intention, runErr error) {
 	notBefore := s.now().Add(s.opts.RetryBackoff)
 	if errors.Is(runErr, runtime.ErrBudgetExhausted) {
-		notBefore = nextDay(s.now())
+		notBefore = runtime.NextDay(s.now())
 		s.logInfo("намерение %d отложено на завтра: бюджет фона исчерпан (§16)", it.ID)
 	}
 	if err := s.intentions.Release(ctx, it.ID, notBefore); err != nil {
 		s.logError("намерение %d не возвращено в pending после сбоя: %v", it.ID, err)
 	}
-}
-
-// nextDay — момент после полуночи UTC (00:05): повтор фонового пула с нового дня.
-func nextDay(now time.Time) time.Time {
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
-	return midnight.Add(5 * time.Minute)
 }
 
 // dueEpisodes — готовые к консолидации эпизоды (§10.2). Проверка читает

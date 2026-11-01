@@ -252,7 +252,7 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			return out, berr
 		}
 		if !available {
-			if rerr := s.intentions.Release(ctx, it.ID, nextDay(s.now())); rerr != nil {
+			if rerr := s.intentions.Release(ctx, it.ID, runtime.NextDay(s.now())); rerr != nil {
 				return out, rerr
 			}
 			_ = task.Cancel("отложено: дневной лимит пула фона исчерпан")

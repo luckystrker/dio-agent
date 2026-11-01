@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"sync"
@@ -216,7 +215,7 @@ func (a *App) Start(ctx context.Context) error {
 	// Telegram: приём и доставка (§6, §13).
 	api := a.opts.Telegram
 	if api == nil {
-		api = buildTelegramAPI(a.opts.Config)
+		api = buildTelegramAPI(a.opts.Config, a.logger)
 	}
 	if a.opts.PhotoFetcher != nil {
 		runner.Photos = a.opts.PhotoFetcher
@@ -517,12 +516,16 @@ func (a *App) buildMemory(ctx context.Context) (*memory.Toolset, error) {
 
 // buildTelegramAPI — клиент Bot API по конфигурации; dry-run — заглушка,
 // пишущая отправки в лог (живой локальный прогон — с настоящим токеном).
-func buildTelegramAPI(cfg runtime.Config) telegram.API {
+// logger — логгер приложения: dry-run без токена виден в журнале процесса.
+func buildTelegramAPI(cfg runtime.Config, logger *log.Logger) telegram.API {
 	if cfg.Telegram == nil {
 		return nil
 	}
 	if cfg.Telegram.DryRun {
-		return &dryRunAPI{logger: log.New(io.Discard, "", 0)}
+		if logger == nil {
+			logger = log.New(os.Stderr, "dio: ", log.LstdFlags)
+		}
+		return &dryRunAPI{logger: logger}
 	}
 	return telegram.NewClient(cfg.Telegram.BotToken, cfg.Telegram.APIBase, nil)
 }

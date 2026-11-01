@@ -368,6 +368,16 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 	if !applyRes.Applied {
 		out.AlreadyApplied = true
 	}
+	// Индексация эмбеддингов (§10.4, 16.8): применённый ход векторизует новые
+	// записи памяти — семантический канал оживает в прод-пути. Лучшие усилия:
+	// ошибка индексации не трогает применённый ход, векторы догонят позже.
+	if applyRes.Applied && r.Memory != nil {
+		if n, ierr := r.Memory.IndexPending(ctx, 0); ierr != nil {
+			r.logf("ход %d: индексация памяти отложена: %v", in.TurnID, ierr)
+		} else if n > 0 {
+			r.logf("ход %d: проиндексировано записей памяти: %d", in.TurnID, n)
+		}
+	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
 		len(out.Apply.IntentionIDs), len(out.Apply.OutboxIDs), out.Recovered)

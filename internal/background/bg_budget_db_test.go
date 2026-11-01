@@ -177,8 +177,12 @@ func TestIntentionDefersOnBudgetExhausted(t *testing.T) {
 	if status := f.intentionStatus(t, ctx, id); status == "failed" {
 		t.Fatal("намерение терминально провалено на исчерпанном дневном лимите")
 	}
-	// Отложено на завтра, а не на RetryBackoff.
-	if nb := f.intentionNotBefore(t, ctx, id); !nb.After(f.now.Add(6 * time.Hour)) {
-		t.Fatalf("намерение не отложено на завтра: not_before=%s", nb)
+	// Отложено на завтра (после границы суток UTC), а не на RetryBackoff.
+	// Сравнение с полуночью, а не с запасом в часы: к концу суток запас
+	// стирался и тест плавающе падал после ~18:05 UTC (найдено 2026-11-02).
+	midnight := time.Date(f.now.UTC().Year(), f.now.UTC().Month(), f.now.UTC().Day(),
+		0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+	if nb := f.intentionNotBefore(t, ctx, id); nb.Before(midnight) {
+		t.Fatalf("намерение не отложено на завтра: not_before=%s, граница суток %s", nb, midnight)
 	}
 }

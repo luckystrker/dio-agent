@@ -131,8 +131,8 @@ func newWorkerPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 8 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 8/0", result.Applied, result.Skipped)
+	if result.Applied != 9 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 9/0", result.Applied, result.Skipped)
 	}
 	return pool
 }
@@ -239,6 +239,152 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 	}
 	if !skipped {
 		t.Fatalf("turn_skipped нет в журнале хода %d", turnFail)
+	}
+}
+
+// budgetRunner — двойной исполнитель, отвечающий исчерпанием дневного бюджета
+// (§16), пока тест не разрешит успех: имитирует вопрос в конце лимитного дня.
+type budgetRunner struct {
+	pool      *pgxpool.Pool
+	mu        sync.Mutex
+	exhausted bool
+	calls     int
+}
+
+func (r *budgetRunner) Run(ctx context.Context, in character.Input) (character.Outcome, error) {
+	r.mu.Lock()
+	r.calls++
+	exhausted := r.exhausted
+	r.mu.Unlock()
+	if exhausted {
+		// Ошибка хода оборачивает ErrBudgetExhausted (%w), как Runner из middleware.
+		return character.Outcome{}, fmt.Errorf("ход %d: генерация не удалась: %w", in.TurnID, runtime.ErrBudgetExhausted)
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE turns SET status = 'applied' WHERE id = $1`, in.TurnID); err != nil {
+		return character.Outcome{}, err
+	}
+	return character.Outcome{}, nil
+}
+
+func (r *budgetRunner) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+func (r *budgetRunner) allow() {
+	r.mu.Lock()
+	r.exhausted = false
+	r.mu.Unlock()
+}
+
+// deferUntil — локальная пауза повтора хода (ok=false — паузы нет).
+func deferUntil(w *Worker, turnID int64) (time.Time, bool) {
+	w.notBeforeMu.Lock()
+	defer w.notBeforeMu.Unlock()
+	nb, ok := w.notBefore[turnID]
+	return nb, ok
+}
+
+// clearDefer снимает локальную паузу — как рестарт процесса (notBefore живёт
+// в памяти) или наступление срока после границы суток.
+func clearDefer(w *Worker, turnID int64) {
+	w.notBeforeMu.Lock()
+	delete(w.notBefore, turnID)
+	w.notBeforeMu.Unlock()
+}
+
+func assertTurnState(t *testing.T, pool *pgxpool.Pool, ctx context.Context, turnID int64, wantStatus string, wantAttempts int) {
+	t.Helper()
+	var status string
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT status, attempts FROM turns WHERE id = $1`, turnID).
+		Scan(&status, &attempts); err != nil {
+		t.Fatalf("ход %d не читается: %v", turnID, err)
+	}
+	if status != wantStatus || attempts != wantAttempts {
+		t.Fatalf("ход %d: status=%s attempts=%d, хочу %s/%d", turnID, status, attempts, wantStatus, wantAttempts)
+	}
+}
+
+func assertNoTurnSkipped(t *testing.T, journal *character.TurnJournal, ctx context.Context, turnID int64) {
+	t.Helper()
+	evs, err := journal.History(ctx, turnID)
+	if err != nil {
+		t.Fatalf("журнал хода %d не читается: %v", turnID, err)
+	}
+	for _, ev := range evs {
+		if ev.EventType() == "turn_skipped" {
+			t.Fatalf("терминальный пропуск не должен появляться: ход %d", turnID)
+		}
+	}
+}
+
+// TestWorkerBudgetExhaustedDefersToNextDay — 16.7: исчерпание дневного бюджета
+// на прямом ходе — не сбой и не терминальный пропуск: попытка не сжигается, ход
+// стоит в очереди до следующего дня 00:05 UTC (паритет с фоном); после границы
+// суток ход доезжает.
+func TestWorkerBudgetExhaustedDefersToNextDay(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+
+	storage := runtime.NewPgStreamStorage(ctx, pool)
+	journal := character.NewTurnJournal(storage, nil)
+
+	turnID := seedTurn(t, pool, 3004, "private", "вопрос в конце лимитного дня")
+
+	runner := &budgetRunner{pool: pool, exhausted: true}
+	w := New(Deps{Pool: pool, Runner: runner, Journal: journal,
+		Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond, RetryBase: 20 * time.Millisecond, RetryMax: 100 * time.Millisecond})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now()
+	go func() { _ = w.Run(runCtx) }()
+
+	// Первая встреча с бюджетом: откладывание до завтра 00:05 UTC, попытка возвращена.
+	eventually(t, "ход отложен по бюджету", func() bool {
+		_, ok := deferUntil(w, turnID)
+		return ok
+	})
+	nb, _ := deferUntil(w, turnID)
+	if nb.UTC().Hour() != 0 || nb.UTC().Minute() != 5 || !nb.After(started) {
+		t.Fatalf("ход должен ждать следующего дня 00:05 UTC, ждёт до %v", nb.UTC())
+	}
+	assertTurnState(t, pool, ctx, turnID, "created", 0)
+	assertNoTurnSkipped(t, journal, ctx, turnID)
+
+	// «Рестарт» теряет notBefore — вторая встреча с бюджетом: попытки всё ещё
+	// не сжигаются, бесконечного терминального пропуска нет.
+	clearDefer(w, turnID)
+	eventually(t, "вторая встреча с бюджетом", func() bool {
+		return runner.callCount() >= 2
+	})
+	eventually(t, "ход снова отложен", func() bool {
+		_, ok := deferUntil(w, turnID)
+		return ok
+	})
+	assertTurnState(t, pool, ctx, turnID, "created", 0)
+	assertNoTurnSkipped(t, journal, ctx, turnID)
+
+	// Граница суток прошла (пауза снята, как сделал бы рестарт после 00:05) и
+	// бюджет нового дня доступен: ход доезжает, попытка ровно одна — успешная.
+	runner.allow()
+	clearDefer(w, turnID)
+	eventually(t, "ход выполнен на новом дне", func() bool {
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnID).Scan(&status); err != nil {
+			return false
+		}
+		return status == "applied"
+	})
+	w.StopDrain()
+	<-w.Done()
+
+	assertTurnState(t, pool, ctx, turnID, "applied", 1)
+	assertNoTurnSkipped(t, journal, ctx, turnID)
+	if got := runner.callCount(); got != 3 {
+		t.Fatalf("исполнитель вызван %d раз, хочу 3 (две бюджетные встречи + успех)", got)
 	}
 }
 

@@ -211,12 +211,32 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 		if err := s.wal.StepDone(ctx, unitID, stepApply, map[string]any{"applied": true}); err != nil {
 			return out, err
 		}
+		// Индексация эмбеддингов (§10.4, 16.8): summary эпизода попадает в
+		// семантический канал сразу после коммита. Лучшие усилия: ошибка
+		// индексации не роняет консолидацию, векторы догонят позже.
+		s.indexMemory(ctx)
 	}
 
 	_ = task.Complete(map[string]any{"events": len(ep.EventIDs)})
 	out.Outcome = "completed"
 	out.Latency = s.now().Sub(started)
 	return out, nil
+}
+
+// indexMemory — векторизация новых записей памяти после фоновой записи
+// (16.8): векторизатор инструментария памяти фона, без второго инстанса.
+func (s *Scheduler) indexMemory(ctx context.Context) {
+	if s.memory == nil {
+		return
+	}
+	n, err := s.memory.IndexPending(ctx, 0)
+	if err != nil {
+		s.logError("фон: индексация памяти отложена: %v", err)
+		return
+	}
+	if n > 0 {
+		s.logInfo("фон: проиндексировано записей памяти: %d", n)
+	}
 }
 
 // consolidationEvent — событие эпизода (текст и ход-источник).

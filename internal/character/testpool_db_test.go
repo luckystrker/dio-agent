@@ -66,8 +66,8 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 8 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 8/0", result.Applied, result.Skipped)
+	if result.Applied != 9 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 9/0", result.Applied, result.Skipped)
 	}
 	return pool
 }

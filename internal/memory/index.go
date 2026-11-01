@@ -86,3 +86,14 @@ func IndexPending(ctx context.Context, db DBTX, emb Embedder, items Items, limit
 	}
 	return indexed, nil
 }
+
+// IndexPending — прод-вызов индексации через инструментарий памяти (16.8):
+// векторизатор тот, с которым собран Toolset (второй инстанс не создаётся).
+// Векторизатор не настроен — семантика честно выключена: 0 без ошибки.
+// limit <= 0 — пакет по умолчанию (embedBatch, 32 записи за вызов).
+func (t *Toolset) IndexPending(ctx context.Context, limit int) (int, error) {
+	if t == nil || t.search == nil || t.search.Embedder == nil {
+		return 0, nil
+	}
+	return IndexPending(ctx, t.db, t.search.Embedder, t.items, limit)
+}
