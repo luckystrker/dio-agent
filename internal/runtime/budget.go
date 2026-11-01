@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +45,13 @@ func NewBudgetStore(pool *pgxpool.Pool) *BudgetStore {
 // limit <= 0 — без ограничения. Возвращает true, когда вызов разрешён: резерв
 // создан в пределах лимита или операция уже оплачена (retry той же операции —
 // §16). operationID должен быть детерминированным на попытку.
+//
+// Атомарность (блок 17.2): дубль operation_id отсекается INSERT ... ON CONFLICT
+// DO NOTHING (конкурентный retry ждёт первого коммита и видит RowsAffected=0 —
+// «уже оплачено», без ошибки 23505); счётчик дня читается под блокировкой строки
+// FOR UPDATE в той же транзакции — параллельные резервы (прямой ход + фон)
+// выстраиваются и сверх лимита не проходят. Превышение лимита откатывает и
+// только что вставленный резерв.
 func (s *BudgetStore) Reserve(ctx context.Context, operationID string, attempt int, pool string, count, limit int64) (bool, error) {
 	if count <= 0 {
 		count = 1
@@ -54,54 +62,92 @@ func (s *BudgetStore) Reserve(ctx context.Context, operationID string, attempt i
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// Уже оплачено? retry операции лимит не расходует.
-	var already bool
-	err = tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM budget_reservations WHERE operation_id = $1)`,
-		operationID).Scan(&already)
+	// Reserve — в той же транзакции с check (§16). Уже оплачено? Конкурентный
+	// retry того же operation_id упирается в уникальность и получает
+	// RowsAffected=0 — лимит повторно не расходуется.
+	reservedJSON, err := json.Marshal(map[string]int64{"calls": count})
 	if err != nil {
-		return false, fmt.Errorf("бюджет: резерв не проверяется: %w", err)
+		return false, fmt.Errorf("бюджет: резерв не сериализуется: %w", err)
 	}
-	if already {
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO budget_reservations (operation_id, attempt, pool, reserved, period)
+		 VALUES ($1, $2, $3, $4::jsonb, CURRENT_DATE)
+		 ON CONFLICT (operation_id) DO NOTHING`,
+		operationID, attempt, pool, string(reservedJSON))
+	if err != nil {
+		return false, fmt.Errorf("бюджет: резерв не создан: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Уже оплачено/зарезервировано: retry операции лимит не расходует.
+		if err := tx.Commit(ctx); err != nil {
+			return false, fmt.Errorf("бюджет: резерв не зафиксирован: %w", err)
+		}
 		return true, nil
 	}
 
-	// Check: сколько вызовов пула зарезервировано сегодня.
+	// Check под блокировкой строки счётчика: гонка с параллельным резервом
+	// видит закоммиченное значение, а не одновременное чтение одного нуля.
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO budget_counters (pool, period, reserved_calls, updated_at)
+		 VALUES ($1, CURRENT_DATE, 0, now())
+		 ON CONFLICT (pool, period) DO NOTHING`, pool); err != nil {
+		return false, fmt.Errorf("бюджет: счётчик не создан: %w", err)
+	}
 	var reserved int64
 	err = tx.QueryRow(ctx,
-		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = CURRENT_DATE`,
+		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = CURRENT_DATE FOR UPDATE`,
 		pool).Scan(&reserved)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil {
 		return false, fmt.Errorf("бюджет: счётчик не читается: %w", err)
 	}
 	if limit > 0 && reserved+count > limit {
 		return false, fmt.Errorf("%w: пул %s: зарезервировано %d, запрошено ещё %d при лимите %d",
 			ErrBudgetExhausted, pool, reserved, count, limit)
 	}
-
-	// Reserve — в той же транзакции с check (§16).
-	reservedJSON, err := json.Marshal(map[string]int64{"calls": count})
-	if err != nil {
-		return false, fmt.Errorf("бюджет: резерв не сериализуется: %w", err)
-	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO budget_reservations (operation_id, attempt, pool, reserved, period)
-		 VALUES ($1, $2, $3, $4::jsonb, CURRENT_DATE)`,
-		operationID, attempt, pool, string(reservedJSON)); err != nil {
-		return false, fmt.Errorf("бюджет: резерв не создан: %w", err)
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO budget_counters (pool, period, reserved_calls, updated_at)
-		 VALUES ($1, CURRENT_DATE, $2, now())
-		 ON CONFLICT (pool, period) DO UPDATE
-		   SET reserved_calls = budget_counters.reserved_calls + $2, updated_at = now()`,
-		pool, count); err != nil {
+		`UPDATE budget_counters SET reserved_calls = reserved_calls + $2, updated_at = now()
+		 WHERE pool = $1 AND period = CURRENT_DATE`, pool, count); err != nil {
 		return false, fmt.Errorf("бюджет: счётчик не увеличен: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("бюджет: резерв не зафиксирован: %w", err)
 	}
 	return true, nil
+}
+
+// Release возвращает неиспользованный резерв (§16, блок 17.3): вызов модели не
+// состоялся (отмена хода, сбой до фактического запроса) — счётчик дня не
+// выжигается храповиком. Идемпотентен: повторный вызов и уже оплаченная
+// операция (actual записан) — честный no-op. Счётчик своего дня опускается
+// не ниже нуля.
+func (s *BudgetStore) Release(ctx context.Context, operationID, pool string, count int64) error {
+	if count <= 0 {
+		count = 1
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("бюджет: транзакция не открыта: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var period time.Time
+	err = tx.QueryRow(ctx,
+		`DELETE FROM budget_reservations WHERE operation_id = $1 AND actual IS NULL RETURNING period`,
+		operationID).Scan(&period)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Возвращать нечего: резерв уже оплачен или уже возвращён.
+		return tx.Commit(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("бюджет: резерв не возвращается: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE budget_counters
+		 SET reserved_calls = GREATEST(0, reserved_calls - $2), updated_at = now()
+		 WHERE pool = $1 AND period = $3`, pool, count, period); err != nil {
+		return fmt.Errorf("бюджет: счётчик не возвращён: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // RecordActual фиксирует фактический usage операции (§16: отчётность различает

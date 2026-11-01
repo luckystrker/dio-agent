@@ -6,7 +6,7 @@ package migrations
 
 import "embed"
 
-// FS — встроенные SQL-миграции: 000001_extensions.sql … 000006_background.sql.
+// FS — встроенные SQL-миграции: 000001_extensions.sql … 000010_intention_dedupe_live.sql.
 // Применяются раннером internal/runtime.Migrate по порядку имён.
 //
 //go:embed *.sql

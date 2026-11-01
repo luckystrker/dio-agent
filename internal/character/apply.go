@@ -40,6 +40,16 @@ type ApplyResult struct {
 	OutboxIDs       []int64
 	MoodNext        *Mood
 	SkippedReaction bool // react без целевого сообщения — реакция пропущена
+	// DuplicateIntentions — предложения модели, отклонённые живым дублем
+	// (§14.1): причина дубля (какое намерение живо) видна оператору в логе.
+	DuplicateIntentions []DuplicateIntention
+}
+
+// DuplicateIntention — отклонённое живым дублем предложение намерения.
+type DuplicateIntention struct {
+	Kind       string
+	Topic      string
+	LiveStatus string // статус живого намерения с тем же dedupe-ключом
 }
 
 // ApplyOptions — вход транзакции применения.
@@ -172,7 +182,7 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 
 	// --- намерения (§14.1): предложения модели + defer → reply_later (§11.2) ---
 	for _, proposal := range opts.Result.Intentions {
-		id, created, err := createIntention(ctx, tx, intentionRow{
+		id, created, dup, err := createIntention(ctx, tx, intentionRow{
 			kind:          proposal.Kind,
 			chatID:        opts.ChatID,
 			scopeID:       opts.ScopeID,
@@ -187,6 +197,8 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+		} else if dup != nil {
+			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
 		}
 	}
 	if opts.Result.Decision == DecisionDefer {
@@ -194,7 +206,7 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 		if err != nil {
 			return ApplyResult{}, err
 		}
-		id, created, err := createIntention(ctx, tx, intentionRow{
+		id, created, dup, err := createIntention(ctx, tx, intentionRow{
 			kind:          "reply_later",
 			chatID:        opts.ChatID,
 			scopeID:       opts.ScopeID,
@@ -209,6 +221,8 @@ func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+		} else if dup != nil {
+			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
 		}
 	}
 
@@ -382,10 +396,11 @@ type IntentionParams struct {
 
 // CreateIntentionTx создаёт намерение внутри чужой транзакции с dedupe по
 // (kind, topic, chat) — перефразировки не размножают действие (§14.1).
+// Дубль считается только по живым намерениям (pending/running, блок 17.5).
 // Разрешение (provenance) назначает runtime по источнику хода (§9.1).
-// created=false — дубликат: намерение с таким dedupe-ключом уже есть.
+// created=false — живой дубль: намерение с таким dedupe-ключом уже есть.
 func CreateIntentionTx(ctx context.Context, tx pgx.Tx, p IntentionParams) (id int64, created bool, err error) {
-	return createIntention(ctx, tx, intentionRow{
+	id, created, _, err = createIntention(ctx, tx, intentionRow{
 		kind:          p.Kind,
 		chatID:        p.ChatID,
 		scopeID:       p.ScopeID,
@@ -394,17 +409,21 @@ func CreateIntentionTx(ctx context.Context, tx pgx.Tx, p IntentionParams) (id in
 		delayHours:    p.DelayHours,
 		relatedTurnID: p.RelatedTurnID,
 	})
+	return id, created, err
 }
 
 // createIntention вставляет намерение с dedupe по (kind, topic, chat) —
-// перефразировки не размножают действие (§14.1). Разрешение (provenance)
-// назначает runtime по источнику хода (§9.1). created=false — дубликат.
-func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, bool, error) {
+// перефразировки не размножают действие (§14.1). Уникальность dedupe_key —
+// частичная, только на живые намерения (pending/running, блок 17.5): конфликтом
+// считается дубль именно живого намерения, предикат повторяет индекс
+// intentions_dedupe_live_uidx. Разрешение (provenance) назначает runtime по
+// источнику хода (§9.1). created=false — живой дубль, причина — в Duplicate.
+func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, bool, *DuplicateIntention, error) {
 	ref := fmt.Sprintf("turn:%d", row.relatedTurnID)
 	provenanceID, err := (memory.SourceRepo{}).EnsureProvenance(ctx, tx,
 		memory.SourceJournalEvent, ref, []string{row.scopeID})
 	if err != nil {
-		return 0, false, fmt.Errorf("применение: разрешение намерения: %w", err)
+		return 0, false, nil, fmt.Errorf("применение: разрешение намерения: %w", err)
 	}
 	notBefore := time.Now().Add(time.Duration(row.delayHours * float64(time.Hour)))
 	expiresAt := notBefore.Add(intentionTTLHours * time.Hour)
@@ -414,18 +433,25 @@ func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, b
 	err = tx.QueryRow(ctx, `
 		INSERT INTO intentions (kind, target_chat_id, topic, reason, provenance_id, not_before, expires_at, dedupe_key, related_turn_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (dedupe_key) DO NOTHING
+		ON CONFLICT (dedupe_key) WHERE status IN ('pending', 'running') DO NOTHING
 		RETURNING id`,
 		row.kind, row.chatID, strings.TrimSpace(row.topic), row.reason, provenanceID,
 		notBefore, expiresAt, dedupe, row.relatedTurnID,
 	).Scan(&id)
 	if err == nil {
-		return id, true, nil
+		return id, true, nil, nil
 	}
 	if isNoRows(err) {
-		return 0, false, nil // дубликат — намерение уже существует
+		// Живой дубль: намерение уже есть — причина дубля видна оператору.
+		dup := &DuplicateIntention{Kind: row.kind, Topic: strings.TrimSpace(row.topic)}
+		if serr := tx.QueryRow(ctx,
+			`SELECT status FROM intentions WHERE dedupe_key = $1 AND status IN ('pending', 'running')`,
+			dedupe).Scan(&dup.LiveStatus); serr != nil {
+			dup.LiveStatus = "unknown"
+		}
+		return 0, false, dup, nil
 	}
-	return 0, false, fmt.Errorf("применение: намерение не создано: %w", err)
+	return 0, false, nil, fmt.Errorf("применение: намерение не создано: %w", err)
 }
 
 // intentionDedupeKey — JSON-склейка инъективна для любых строк (паритет TS).

@@ -378,6 +378,12 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 			r.logf("ход %d: проиндексировано записей памяти: %d", in.TurnID, n)
 		}
 	}
+	// Дубли намерений (§14.1, блок 17.5): причина отклонения предложения —
+	// в лог оператора, молчаливая потеря не видна ни в чате, ни в журнале.
+	for _, dup := range out.Apply.DuplicateIntentions {
+		r.logf("ход %d: намерение %s %q не создано — живое намерение с тем же dedupe-ключом уже есть (статус %s, §14.1)",
+			in.TurnID, dup.Kind, dup.Topic, dup.LiveStatus)
+	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
 		len(out.Apply.IntentionIDs), len(out.Apply.OutboxIDs), out.Recovered)

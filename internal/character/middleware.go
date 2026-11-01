@@ -91,6 +91,15 @@ func (m *BudgetMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.E
 
 	resp, err := next(evs, cx)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// Ход отменён — модельный вызов не состоялся: резерв возвращается
+			// (§16, блок 17.3), день не выжигается храповиком. Отмена ход
+			// остаётся в очереди (§12.2), повтор получит свой attempt ID.
+			if rerr := m.store.Release(context.Background(), operationID, m.pool, 1); rerr != nil {
+				m.logger.Printf("бюджет: резерв %s не возвращён после отмены хода: %v", operationID, rerr)
+			}
+			return nil, err
+		}
 		// Вызов не завершился: стоимость неизвестна, actual не пишется нулевым (§16).
 		_ = m.store.RecordActual(context.Background(), operationID, m.pool, 0, 1, true)
 		return nil, err

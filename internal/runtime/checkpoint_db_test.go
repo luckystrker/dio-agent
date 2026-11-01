@@ -85,6 +85,24 @@ func TestPgCheckpointStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestPgCheckpointStoreDiesWithItsContext — контракт дренаж-контекста
+// (блок 17.1, §5.3): все операции адаптера идут в контексте, заданном при
+// создании. Адаптер приложения строится на runCtx (отменяется ПОСЛЕ дренажа) —
+// проверка фиксирует, что отмена этого контекста действительно останавливает
+// запись чекпоинтов: иначе проводка 17.1 держится на пустом месте.
+func TestPgCheckpointStoreDiesWithItsContext(t *testing.T) {
+	ownCtx, cancel := context.WithCancel(context.Background())
+	store := NewPgCheckpointStore(ownCtx, newTestPool(t))
+
+	if err := store.Write("task-ctx", []byte(`{"step":1}`)); err != nil {
+		t.Fatalf("Write до отмены контекста адаптера: %v", err)
+	}
+	cancel()
+	if err := store.Write("task-ctx", []byte(`{"step":2}`)); err == nil {
+		t.Fatal("Write после отмены контекста адаптера обязан падать — адаптер должен жить на контексте конструирования (блок 17.1)")
+	}
+}
+
 // Возобновление долгой задачи средствами ago/task (§12.2 «Незавершённая
 // фоновая задача — продолжить с чекпоинта»): Checkpoint первой задачи читается
 // через WithResumeFrom второй.

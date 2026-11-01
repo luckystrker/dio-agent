@@ -95,16 +95,17 @@ type App struct {
 	opts   Options
 	logger *log.Logger
 
-	pool     *pgxpool.Pool
-	single   *runtime.Singleton
-	persona  character.Persona
-	journal  *character.TurnJournal
-	runner   *character.Runner
-	buffers  *telegram.ChatBufferManager
-	cognit   *worker.Worker
-	sched    *background.Scheduler
-	delivery *telegram.DeliveryLoop
-	poller   *telegram.TelegramPoller
+	pool        *pgxpool.Pool
+	single      *runtime.Singleton
+	persona     character.Persona
+	journal     *character.TurnJournal
+	checkpoints *runtime.PgCheckpointStore // чекпоинты задач §12.2 (дренаж-контекст 17.1)
+	runner      *character.Runner
+	buffers     *telegram.ChatBufferManager
+	cognit      *worker.Worker
+	sched       *background.Scheduler
+	delivery    *telegram.DeliveryLoop
+	poller      *telegram.TelegramPoller
 
 	runCtx       context.Context // весь процесс: потеря singleton/фатальная ошибка отменяют
 	cancelRun    context.CancelFunc
@@ -171,8 +172,13 @@ func (a *App) Start(ctx context.Context) error {
 	a.persona = persona
 
 	// --- память, журнал, бюджет ---
-	storage := runtime.NewPgStreamStorage(ctx, pool)
+	// Адаптеры журнала/WAL/чекпоинтов живут на runCtx, а не на пришедшем ctx:
+	// сигнал (SIGTERM) отменяет внешний контекст ДО graceful drain (§5.3), и
+	// записи дренажа — model_output сгенерированного ответа, WAL, чекпоинты —
+	// падали весь остаток хода. runCtx отменяется в Stop уже ПОСЛЕ дренажа.
+	storage := runtime.NewPgStreamStorage(a.runCtx, pool)
 	a.journal = character.NewTurnJournal(storage, a.logger)
+	a.checkpoints = runtime.NewPgCheckpointStore(a.runCtx, pool)
 
 	// --- модельный слой ---
 	model := a.opts.Model
@@ -275,7 +281,7 @@ func (a *App) Start(ctx context.Context) error {
 		Pool:            pool,
 		Journal:         a.journal,
 		WAL:             runtime.NewTaskWAL(storage),
-		Checkpoints:     runtime.NewPgCheckpointStore(ctx, pool),
+		Checkpoints:     a.checkpoints,
 		Budget:          runtime.NewBudgetStore(pool),
 		Memory:          toolset,
 		Web:             webset,

@@ -66,6 +66,10 @@ func (o Options) withDefaults() Options {
 // проактивность от любого сообщения за часы до срока).
 const InitiativeQuietWindow = 30 * time.Minute
 
+// consolidateCandidateFactor — во сколько раз пул кандидатов консолидации
+// шире лимита такта: cooldown-фильтр срезает до лимита уже после себя (17.4).
+const consolidateCandidateFactor = 5
+
 // Deps — зависимости планировщика.
 type Deps struct {
 	Pool            *pgxpool.Pool
@@ -113,10 +117,12 @@ type Scheduler struct {
 
 	// Наблюдаемость роста очереди (§20): между тактами.
 	lastBudgetWarn time.Time // варн об исчерпании бюджета — не чаще раза в сутки
-	mu             sync.Mutex
-	lastPending    int
-	growthStreak   int
-	growthWarned   bool
+	// lastReserveSweep — прошлая сверка застрявших резервов (§16): раз в сутки.
+	lastReserveSweep time.Time
+	mu               sync.Mutex
+	lastPending      int
+	growthStreak     int
+	growthWarned     bool
 }
 
 // New строит планировщик.
@@ -236,6 +242,10 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		s.logInfo("фон: отменено просроченных намерений: %d (§14.1 expiresAt)", expired)
 	}
 
+	// Суточная сверка застрявших резервов (§16): тоже не модельная работа —
+	// выполняется и при отложенном остальном фоне.
+	s.sweepStaleReserves(ctx)
+
 	// §5.2: при прямом обращении фон не запускается — следующий фоновый шаг
 	// откладывается; ingest и доставка продолжают свою работу.
 	if stats.PendingTurns > 0 {
@@ -263,10 +273,15 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		s.recordIntention(it, out)
 	}
 
-	episodes, err := s.dueEpisodes(ctx, s.opts.ConsolidateLimit)
+	// Кандидаты консолидации (§10.2): cooldown-фильтр идёт ДО обрезки лимитом
+	// такта — иначе два остывающих эпизода с наименьшими chat_id занимают оба
+	// слота, и остальные чаты не консолидируются сутки (блок 17.4). Пул
+	// кандидатов шире лимита; cooldown живёт в runtime_state (§18).
+	episodes, err := s.dueEpisodes(ctx, s.opts.ConsolidateLimit*consolidateCandidateFactor)
 	if err != nil {
 		return err
 	}
+	due := make([]Episode, 0, s.opts.ConsolidateLimit)
 	for _, ep := range episodes {
 		cooled, cerr := s.consolidationCooled(ctx, ep)
 		if cerr != nil {
@@ -275,6 +290,12 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		if cooled {
 			continue
 		}
+		due = append(due, ep)
+		if len(due) == s.opts.ConsolidateLimit {
+			break
+		}
+	}
+	for _, ep := range due {
 		// Изоляция задачи (16.2): паника одного эпизода — ошибка этой задачи.
 		out, rerr := s.runConsolidationGuarded(ctx, ep)
 		if rerr != nil {
