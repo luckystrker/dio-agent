@@ -507,6 +507,194 @@ func TestTurnToolLimitExceeded(t *testing.T) {
 	}
 }
 
+// toolRoundResp — ответ модели с одним обращением к памяти (для серий кругов).
+func toolRoundResp(id, query string) *events.ModelResponse {
+	return &events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{
+		{ID: id, Name: memory.ToolSearch, Arguments: `{"query":"` + query + `"}`},
+	}}}
+}
+
+// TestTurnToolLimitStopCrane — стоп-кран серии отказов (16.5): три подряд
+// отказа лимита обращений принудительно завершают ход (ResponseForce из
+// финального результата инструмента), число модельных вызовов ограничено —
+// модель не крутит платные круги над отказами. Ход завершается как ignore:
+// без сообщений пользователю.
+func TestTurnToolLimitStopCrane(t *testing.T) {
+	f, ctx := newFixture(t)
+	f.runner.ToolCallsLimit = 1
+	turnID := int64(213)
+	f.seedTurn(t, ctx, turnID, "поищи много раз")
+
+	// Первый круг в лимите исполняется; дальше модель упорствует — отказы c2,
+	// c3, c4, на третьем подряд срабатывает стоп-кран. Сценария на пятый вызов
+	// нет намеренно: без стоп-крана прогон исчерпает сценарий и ход упадёт.
+	script := f.withModel(
+		toolRoundResp("c1", "пластинки"),
+		toolRoundResp("c2", "ещё"),
+		toolRoundResp("c3", "и ещё"),
+		toolRoundResp("c4", "снова"),
+	)
+
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поищи много раз"}}})
+	if err != nil {
+		t.Fatalf("ход со стоп-краном упал: %v", err)
+	}
+	if out.Skipped || !out.Apply.Applied {
+		t.Fatalf("ход не применился: %+v", out)
+	}
+	// Модельных вызовов ровно четыре: разрешённый круг + три отказа; пятого
+	// платного круга над отказами не случилось.
+	if calls := len(script.Calls()); calls != 4 {
+		t.Fatalf("модельных вызовов %d, хочу 4 — стоп-кран не ограничил серию", calls)
+	}
+	if out.LLMCalls != 4 {
+		t.Fatalf("LLMCalls = %d, хочу 4", out.LLMCalls)
+	}
+	// Стоп-кран завершает ход молча: доставки нет.
+	var outbox int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&outbox); err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	if outbox != 0 {
+		t.Fatalf("стоп-кран не должен ставить сообщения в доставку, outbox=%d", outbox)
+	}
+	// Журнал: четыре обращения, отказов лимита два (c2, c3), финал стоп-крана —
+	// результат, а не ошибка.
+	calls, limitErrs, crane := 0, 0, false
+	evs, err := f.journal.History(ctx, turnID)
+	if err != nil {
+		t.Fatalf("журнал не читается: %v", err)
+	}
+	for _, ev := range evs {
+		switch e := events.AsValue(ev).(type) {
+		case ToolCallRecorded:
+			calls++
+		case ToolResultRecorded:
+			if e.Error != "" {
+				limitErrs++
+			}
+			if strings.Contains(e.Result, "стоп-кран") {
+				crane = true
+			}
+		}
+	}
+	if calls != 4 || limitErrs != 2 || !crane {
+		t.Fatalf("журнал: calls=%d отказов_лимита=%d стоп_кран=%v, хочу 4/2/true", calls, limitErrs, crane)
+	}
+}
+
+// TestTurnToolLimitStopCraneBatch — стоп-кран срабатывает и внутри одной пачки
+// вызовов (16.5): упорствующая модель может запросить несколько инструментов
+// одним ответом; когда третий подряд отказ лимита приходится на вызов из пачки,
+// executor ago получает финальный результат и замыкает ход без следующего
+// модельного вызова. Порядок исполнения пачки параллелен, поэтому детерминированы
+// счётчики (2 отказа + кран), а не имена вызовов.
+func TestTurnToolLimitStopCraneBatch(t *testing.T) {
+	f, ctx := newFixture(t)
+	f.runner.ToolCallsLimit = 1
+	turnID := int64(214)
+	f.seedTurn(t, ctx, turnID, "поищи пачкой")
+
+	// Круг 1 — один вызов в лимите; круг 2 — пачка из четырёх: все сверх лимита,
+	// серия доходит до крана прямо внутри пачки. Сценария на третий модельный
+	// вызов нет намеренно: без стоп-крана прогон исчерпает сценарий.
+	script := f.withModel(
+		toolRoundResp("c1", "пластинки"),
+		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{
+			{ID: "c2", Name: memory.ToolSearch, Arguments: `{"query":"а"}`},
+			{ID: "c3", Name: memory.ToolSearch, Arguments: `{"query":"б"}`},
+			{ID: "c4", Name: memory.ToolSearch, Arguments: `{"query":"в"}`},
+			{ID: "c5", Name: memory.ToolSearch, Arguments: `{"query":"г"}`},
+		}}},
+	)
+
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поищи пачкой"}}})
+	if err != nil {
+		t.Fatalf("ход со стоп-краном в пачке упал: %v", err)
+	}
+	if out.Skipped || !out.Apply.Applied {
+		t.Fatalf("ход не применился: %+v", out)
+	}
+	// Модельных вызовов ровно два: разрешённый круг + пачка, с которой пришёл
+	// кран; третьего платного круга нет.
+	if calls := len(script.Calls()); calls != 2 {
+		t.Fatalf("модельных вызовов %d, хочу 2 — кран не сработал в пачке", calls)
+	}
+	if out.LLMCalls != 2 {
+		t.Fatalf("LLMCalls = %d, хочу 2", out.LLMCalls)
+	}
+	var outbox int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&outbox); err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	if outbox != 0 {
+		t.Fatalf("стоп-кран не должен ставить сообщения в доставку, outbox=%d", outbox)
+	}
+	// Журнал: пять обращений (c1 + пачка), два отказа лимита, финал крана.
+	calls, limitErrs, cranes := 0, 0, 0
+	evs, err := f.journal.History(ctx, turnID)
+	if err != nil {
+		t.Fatalf("журнал не читается: %v", err)
+	}
+	for _, ev := range evs {
+		switch e := events.AsValue(ev).(type) {
+		case ToolCallRecorded:
+			calls++
+		case ToolResultRecorded:
+			if e.Error != "" {
+				limitErrs++
+			}
+			if strings.Contains(e.Result, "стоп-кран") {
+				cranes++
+			}
+		}
+	}
+	// Пачка из четырёх сверх лимита: отказы 1–2 — ошибки, 3–4 — кран (какие
+	// именно вызовы — решает планировщик горутин, число детерминировано).
+	if calls != 5 || limitErrs != 2 || cranes < 1 {
+		t.Fatalf("журнал: calls=%d отказов_лимита=%d кранов=%d, хочу 5/2/>=1", calls, limitErrs, cranes)
+	}
+}
+
+// TestTurnToolLimitTwoRejectsNoCrane — обратная граница стоп-крана (16.5): два
+// подряд отказа — ещё не кран; модель, услышав отказы, завершает ход финальным
+// ответом, и ответ доставляется. Преждевременный кран молча глотал бы ответ на
+// прямой вопрос (PHILOSOPHY п.8).
+func TestTurnToolLimitTwoRejectsNoCrane(t *testing.T) {
+	f, ctx := newFixture(t)
+	f.runner.ToolCallsLimit = 1
+	turnID := int64(215)
+	f.seedTurn(t, ctx, turnID, "поищи и ответь")
+
+	script := f.withModel(
+		toolRoundResp("c1", "пластинки"),
+		toolRoundResp("c2", "ещё"),
+		toolRoundResp("c3", "и ещё"),
+		&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["вот ответ"]}`}},
+	)
+
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поищи и ответь"}}})
+	if err != nil {
+		t.Fatalf("ход с двумя отказами упал: %v", err)
+	}
+	if out.Skipped || !out.Apply.Applied {
+		t.Fatalf("ход не применился: %+v", out)
+	}
+	if calls := len(script.Calls()); calls != 4 {
+		t.Fatalf("модельных вызовов %d, хочу 4 — кран сработал раньше третьего отказа", calls)
+	}
+	var text string
+	if err := f.pool.QueryRow(ctx, `SELECT payload->>'text' FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&text); err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	if text != "вот ответ" {
+		t.Fatalf("ответ модели не доставлен: %q", text)
+	}
+}
+
 func contains(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {

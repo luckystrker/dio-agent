@@ -1,5 +1,5 @@
 // Middleware хода (ago/middleware): бюджет §16, typing-пульс §13.3 и лимит
-// обращений к инструментам §11.2.
+// обращений к инструментам §11.2 со стоп-краном серии отказов (16.5).
 //
 // Бюджет: middleware не пропускает модельный вызов без резерва (§16) — check и
 // reserve выполняются до next(), исчерпание дневного лимита завершает ход
@@ -12,6 +12,7 @@ package character
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -229,14 +230,25 @@ func (m *TypingMiddleware) OnTurn(next middleware.TurnFunc, ev *events.ModelRequ
 // ToolLimitMiddleware — ограничение числа обращений к инструментам за ход
 // (§11.2: лимит конфигурируемый). Превышение отвечает модели ошибкой вместо
 // исполнения: модель видит отказ и обязана завершить ход финальным ответом.
+// Если модель отказ игнорирует, срабатывает стоп-кран (16.5): после
+// stopCraneRejects подряд отказов middleware возвращает финальный результат
+// инструмента (ToolResult с Final=true), который executor ago обращает в
+// ModelResponse с ResponseForce — агентский цикл завершается без нового
+// модельного вызова (живой смоук: серия отказов = серия платных вызовов).
 type ToolLimitMiddleware struct {
 	middleware.Base
 	limit  int
 	logger *log.Logger
 
-	mu   sync.Mutex
-	seen int
+	mu sync.Mutex
+	// seen — счётчик всех обращений за ход; rejects — текущая серия подряд
+	// идущих отказов лимита (обращение в лимите серию обнуляет).
+	seen    int
+	rejects int
 }
+
+// stopCraneRejects — сколько подряд отказов лимита замыкают ход принудительно.
+const stopCraneRejects = 3
 
 // NewToolLimitMiddleware строит middleware лимита обращений (0 = не ограничивать).
 func NewToolLimitMiddleware(limit int, logger *log.Logger) *ToolLimitMiddleware {
@@ -251,7 +263,38 @@ func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *
 	m.mu.Lock()
 	m.seen++
 	over := m.limit > 0 && m.seen > m.limit
+	if over {
+		m.rejects++
+	} else {
+		m.rejects = 0
+	}
+	crane := over && m.rejects >= stopCraneRejects
 	m.mu.Unlock()
+
+	if crane {
+		m.logger.Printf("стоп-кран: %d подряд отказов лимита обращений (%d) — ход завершается принудительно", m.rejects, m.limit)
+		// Финальный результат с телом валидного TurnResult (ignore): цикл
+		// инструментов закрывается ResponseForce без repair-вызова модели,
+		// ход применяется молча. Тело собирается из того же контракта §11.2,
+		// а не строкой — расхождение со схемой исключено.
+		body, err := json.Marshal(TurnResult{
+			Decision: DecisionIgnore,
+			Reason:   fmt.Sprintf("стоп-кран: %d подряд отказа лимита обращений к инструментам — ход завершён без ответа модели", stopCraneRejects),
+		})
+		if err != nil {
+			// Недостижимо (плоская структура), но финал не имеет права упасть.
+			m.logger.Printf("стоп-кран: результат не собран: %v", err)
+			return &events.ToolErrorEvent{
+				ToolResultEvent: events.ToolResultEvent{ParentID: ev.ID, Name: ev.Name},
+				Error:           "лимит обращений к инструментам за ход исчерпан — завершай ход финальным ответом",
+			}, nil
+		}
+		return &events.ToolResultEvent{
+			ParentID: ev.ID,
+			Name:     ev.Name,
+			Result:   events.NewToolResult(true, string(body)),
+		}, nil
+	}
 	if over {
 		m.logger.Printf("лимит обращений к инструментам исчерпан (%d) — вызов %q отклонён", m.limit, ev.Name)
 		return &events.ToolErrorEvent{
