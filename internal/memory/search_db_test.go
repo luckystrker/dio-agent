@@ -440,3 +440,38 @@ func (m multiEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 	}
 	return out, nil
 }
+
+// TestSearchFTSHyphenQuery — 17.13: дефисный запрос ищет слова по отдельности
+// с OR-семантикой: «арка-фанера» находит раздельное написание «арка из
+// фанеры» (до фикса дефис оставался в токене и to_tsquery получал фразовую
+// семантику — проверено на живой БД). Обычные многословные запросы не
+// регрессируют: ранжирование покрытием запроса прежнее.
+func TestSearchFTSHyphenQuery(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	separate := seedItem(t, ctx, pool, scopeA, "Мастер сделал арку из фанеры за вечер", seedOpts{salience: 0.7})
+	hyphen := seedItem(t, ctx, pool, scopeA, "Чертёж арка-фанера утверждён без правок", seedOpts{salience: 0.5})
+
+	found, err := (Items{}).SearchFTS(ctx, pool, scopeA, "арка-фанера", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS(арка-фанера): %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("дефисный запрос нашёл %d записей, хочу 2 (раздельное и дефисное написание): %v",
+			len(found), texts(found))
+	}
+	// Раздельное написание покрыто обоими словами запроса — выше рангом.
+	if found[0].ID != separate.ID || found[1].ID != hyphen.ID {
+		t.Fatalf("порядок = %v, хочу сначала раздельное написание %d", itemIDs(found), separate.ID)
+	}
+
+	// Обычный запрос без дефиса работает как раньше.
+	plain, err := (Items{}).SearchFTS(ctx, pool, scopeA, "чертёж", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS(чертёж): %v", err)
+	}
+	if len(plain) != 1 || plain[0].ID != hyphen.ID {
+		t.Fatalf("обычный запрос регрессировал: %v", texts(plain))
+	}
+}

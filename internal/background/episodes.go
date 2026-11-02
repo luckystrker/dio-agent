@@ -19,6 +19,14 @@ const (
 	EpisodeSilenceGroup = time.Hour
 	// EpisodeMaxEvents — максимум событий одного эпизода (дальше — разбивка).
 	EpisodeMaxEvents = 100
+
+	// episodeSelectFactor — потолок выборки событий такта: limit эпизодов
+	// умножается на 50 (17.14). Один эпизод — до 100 событий, но выборка идёт
+	// по всем чатам вперемешку; запас ×50 покрывает десятки чатов с длинными
+	// сериями, не отдавая выборку обратно в полный скан: стоимость такта не
+	// должна расти с историей (индекс 000012 держит только необработанный
+	// хвост). Хвост сверх потолка подберётся следующими тактами.
+	episodeSelectFactor = 50
 )
 
 // episodeEvent — событие, участвующее в разметке эпизодов.
@@ -126,13 +134,17 @@ func sortEpisodes(evts []episodeEvent) {
 }
 
 // pendingEpisodes читает необработанные processed-события и возвращает готовые
-// эпизоды (проверка планировщика — сама модель не вызывает, §14.2).
+// эпизоды (проверка планировщика — сама модель не вызывает, §14.2). Выборка
+// ограничена потолком limit*50 (17.14): лимит эпизодов применялся после
+// выборки, и такт сканировал всю историю; теперь хвост сверх потолка
+// подбирается следующими тактами.
 func pendingEpisodes(ctx context.Context, q queryer, now time.Time, limit int) ([]Episode, error) {
 	rows, err := q.Query(ctx, `
 		SELECT id, chat_id, chat_type, occurred_at
 		FROM social_events
 		WHERE status = 'processed' AND summarized_at IS NULL
-		ORDER BY chat_id, occurred_at, id`)
+		ORDER BY chat_id, occurred_at, id
+		LIMIT $1`, limit*episodeSelectFactor)
 	if err != nil {
 		return nil, fmt.Errorf("эпизоды: события не читаются: %w", err)
 	}

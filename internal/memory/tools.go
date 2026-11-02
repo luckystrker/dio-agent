@@ -45,6 +45,13 @@ const (
 	// «разнообразие оснований» (§10.4 п.5), иначе лимит забирает серия
 	// записей одного источника
 	cardMemoriesPool = 3 * cardMemoriesLimit
+
+	// Потолки объёма выдачи (17.15): контекст хода не раздувается десятками
+	// тысяч символов у «ветерана»; записи сверх потолка не выдаются, счётчики
+	// честные, порядок «лучшие первыми» сохранён.
+	toolSearchRunesBudget = 12000
+	cardRunesBudget       = 12000
+	stanceBasisLimit      = 10
 )
 
 // ForcedOnDirectQuestion — маркер инструмента, чей вызов на прямом обращении
@@ -193,15 +200,17 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 
 	// Все видимые записи карточки (связанные + основания stances) собираются
 	// в одну пачку: источники грузятся одним запросом и попадают в выдачу
-	// (§10.4 п.6: компактная карточка с источниками).
+	// (§10.4 п.6: компактная карточка с источниками). Основания сверх лимита
+	// на stance не грузятся вовсе (17.15): срез по salience — Basis отсортирован.
 	var allItems []Item
 	for _, st := range stances {
 		basis, hidden, err := t.stances.Basis(ctx, t.db, t.items, audience, st.ID)
 		if err != nil {
 			return "", fmt.Errorf("memory_entity_card: основания stance %d: %w", st.ID, err)
 		}
+		basis, cut := trimStanceBasis(basis, stanceBasisLimit)
 		allItems = append(allItems, basis...)
-		stanceBasis[st.ID] = basisWithHidden{basis: basis, hidden: hidden}
+		stanceBasis[st.ID] = basisWithHidden{basis: basis, hidden: hidden, cut: cut}
 	}
 	memories, err := t.items.ItemsForEntities(ctx, t.db, audience, []int64{id}, cardMemoriesPool)
 	if err != nil {
@@ -244,6 +253,7 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 			Revision:    st.Revision,
 			Basis:       basisJSONs,
 			HiddenBasis: part.hidden,
+			BasisCut:    part.cut,
 		})
 	}
 
@@ -251,6 +261,10 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 	for _, m := range ordered {
 		memoryJSONs = append(memoryJSONs, itemToJSON(m, -1, cites[m.ID]))
 	}
+
+	// Общий потолок карточки (17.15): «ветеран» с десятками stances и сотнями
+	// оснований не раздувает контекст хода неограниченно.
+	stanceJSONs, memoryJSONs = trimCardToBudget(stanceJSONs, memoryJSONs, cardRunesBudget)
 
 	return marshalJSON(cardResultJSON{
 		Entity:   entityJSON{ID: strconv.FormatInt(entity.ID, 10), Kind: entity.Kind, Name: entity.CanonicalName, Scope: entity.ScopeID},
@@ -290,7 +304,14 @@ func (t *Toolset) searchMemory(ctx context.Context, audience, query string, limi
 		}
 		items = append(items, itemToJSON(r.Item, r.Distance, cites[r.ID]))
 	}
-	return marshalJSON(searchResultJSON{Items: items, Semantic: semanticUsed})
+	// Потолок объёма (17.15): записи сверх бюджета не выдаются, счётчик
+	// честный — модель знает, что память шире показанного.
+	kept := capSearchItems(items, toolSearchRunesBudget)
+	shown := ""
+	if len(kept) < len(items) {
+		shown = fmt.Sprintf("показано %d из %d", len(kept), len(items))
+	}
+	return marshalJSON(searchResultJSON{Items: kept, Shown: shown, Semantic: semanticUsed})
 }
 
 // --- JSON-формы выдачи модели (имена полей — контракт для модели) ------------
@@ -332,13 +353,18 @@ type stanceJSON struct {
 	Revision    int         `json:"revision"`
 	Basis       []basisJSON `json:"basis"`
 	HiddenBasis int         `json:"hidden_basis"`
+	// BasisCut — видимые основания, не показанные из-за лимита/потолка (17.15):
+	// честный счётчик рядом с hidden_basis (недоступные аудитории).
+	BasisCut int `json:"basis_cut,omitempty"`
 }
 
-// basisWithHidden — основания stance и число скрытых (не видимых аудитории),
-// чтобы ответ мог честно сказать «часть оснований недоступна».
+// basisWithHidden — основания stance, число скрытых (не видимых аудитории,
+// чтобы ответ мог честно сказать «часть оснований недоступна») и срезанных
+// лимитом/потолком карточки (17.15).
 type basisWithHidden struct {
 	basis  []Item
 	hidden int
+	cut    int
 }
 
 type entitiesResultJSON struct {
@@ -352,8 +378,78 @@ type cardResultJSON struct {
 }
 
 type searchResultJSON struct {
-	Items    []itemJSON `json:"items"`
-	Semantic bool       `json:"semantic"`
+	Items []itemJSON `json:"items"`
+	// Shown — «показано N из M», когда потолок объёма срезал выдачу (17.15):
+	// модель знает, что память шире показанного.
+	Shown    string `json:"shown,omitempty"`
+	Semantic bool   `json:"semantic"`
+}
+
+// capSearchItems держит суммарный объём текстов выдачи в бюджете (рунах,
+// 17.15): записи добавляются по порядку ранжирования, первая показывается
+// даже одиночно сверх бюджета — выдача не пустеет; срез — хвост (лучшие
+// первыми).
+func capSearchItems(items []itemJSON, budget int) []itemJSON {
+	total := 0
+	for i := range items {
+		n := len([]rune(items[i].Text))
+		if i == 0 || total+n <= budget {
+			total += n
+			continue
+		}
+		return items[:i]
+	}
+	return items
+}
+
+// trimStanceBasis — лимит оснований на stance: Basis приходит из SQL
+// отсортированным по salience, срез — хвост; вторым значением — сколько срезано.
+func trimStanceBasis(basis []Item, limit int) ([]Item, int) {
+	if len(basis) <= limit {
+		return basis, 0
+	}
+	return basis[:limit], len(basis) - limit
+}
+
+// trimCardToBudget — общий потолок карточки (рунах текстов, 17.15): сначала
+// режутся основания с конца внутри stance (срез честно в basis_cut), затем
+// записи memories с конца, затем целые stances с конца; заголовок первой
+// stance и её первое основание остаются всегда — карточка не пустеет.
+func trimCardToBudget(stances []stanceJSON, memories []itemJSON, budget int) ([]stanceJSON, []itemJSON) {
+	used := 0
+	keepStances := make([]stanceJSON, 0, len(stances))
+	for si := range stances {
+		st := stances[si]
+		summary := len([]rune(st.Summary))
+		if si > 0 && used+summary > budget {
+			break
+		}
+		used += summary
+		keptBasis := make([]basisJSON, 0, len(st.Basis))
+		for bi := range st.Basis {
+			n := len([]rune(st.Basis[bi].Text))
+			if (si == 0 && bi == 0) || used+n <= budget {
+				used += n
+				keptBasis = append(keptBasis, st.Basis[bi])
+				continue
+			}
+			st.BasisCut += len(st.Basis) - bi
+			break
+		}
+		st.Basis = keptBasis
+		keepStances = append(keepStances, st)
+	}
+	keepMemories := len(memories)
+	for i := range memories {
+		n := len([]rune(memories[i].Text))
+		if used+n <= budget {
+			used += n
+			continue
+		}
+		keepMemories = i
+		break
+	}
+	return keepStances, memories[:keepMemories]
 }
 
 // citeJSON рендерит цитаты источников; пустой список — пустой массив, чтобы

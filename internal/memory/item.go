@@ -147,8 +147,11 @@ func scanItem(row pgxRow) (Item, error) {
 
 // orTsQuery собирает tsquery с OR-семантикой из слов запроса; символы вне
 // слов отбрасываются — синтаксис to_tsquery из пользовательского ввода не
-// собирается. Пусто — искать нечего.
-var orQueryWordRe = regexp.MustCompile(`[\p{L}\p{N}_-]+`)
+// собирается. Дефис — разделитель, не часть слова (17.13): токен с дефисом
+// получал во to_tsquery фразовую семантику, и «арка-фанера» не находила
+// «арку из фанеры»; два токена с OR — находят оба написания. Пусто — искать
+// нечего.
+var orQueryWordRe = regexp.MustCompile(`[\p{L}\p{N}_]+`)
 
 func orTsQuery(query string) string {
 	words := orQueryWordRe.FindAllString(query, -1)

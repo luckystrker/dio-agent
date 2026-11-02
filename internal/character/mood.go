@@ -107,6 +107,12 @@ func DescribeMood(mood, baseline Mood) string {
 // round3 округляет до 3 знаков: артефакты плавающей точки не попадают в хранилище.
 func round3(v float64) float64 { return math.Round(v*1000) / 1000 }
 
+// moodDecayWriteEps — порог заметности затухания (17.11): изменение меньше
+// порога хранилище не трогает. Чтение с затуханием зовёт каждая сборка
+// контекста (включая горутину планировщика) — слепая запись на каждый чих
+// лезет в строку, которую в этот же момент применяет ход.
+const moodDecayWriteEps = 0.001
+
 // MoodRepo — физическое настроение живёт в character_state (singleton id=1,
 // миграция 000005); затухание к baseline вычисляется при чтении (§7.2).
 type MoodRepo struct{}
@@ -115,8 +121,12 @@ type MoodRepo struct{}
 func NewMoodRepo() *MoodRepo { return &MoodRepo{} }
 
 // ReadDecayed читает настроение с затуханием от времени последнего обновления
-// и записывает затухнувшее значение обратно (следующая дельта ложится на свежую
-// базу). Отсутствие строки = базовая линия persona.
+// и фиксирует затухнувшее значение в хранилище — но не вслепую (17.11):
+// запись только когда затухание реально изменило значения (больше порога
+// moodDecayWriteEps) и строку с момента чтения никто не трогал (CAS по
+// updated_at — параллельный ApplyDelta закоммитил свежее значение, наше
+// затухание устарело и права затирать дельту не имеет). Отсутствие строки =
+// базовая линия persona.
 func (r *MoodRepo) ReadDecayed(ctx context.Context, db DBTX, baseline Mood) (Mood, time.Time, error) {
 	var (
 		valence, arousal, social float64
@@ -133,10 +143,16 @@ func (r *MoodRepo) ReadDecayed(ctx context.Context, db DBTX, baseline Mood) (Moo
 	}
 	stored := Mood{Valence: valence, Arousal: arousal, SocialEnergy: social}
 	decayed := DecayMood(stored, baseline, time.Since(updatedAt), MoodDecayLambdaPerHour)
+	if math.Abs(decayed.Valence-stored.Valence) <= moodDecayWriteEps &&
+		math.Abs(decayed.Arousal-stored.Arousal) <= moodDecayWriteEps &&
+		math.Abs(decayed.SocialEnergy-stored.SocialEnergy) <= moodDecayWriteEps {
+		return decayed, time.Now(), nil
+	}
 	_, err = db.Exec(ctx,
 		`UPDATE character_state
 		 SET valence = $1, arousal = $2, social_energy = $3, updated_at = now()
-		 WHERE id = 1`, decayed.Valence, decayed.Arousal, decayed.SocialEnergy)
+		 WHERE id = 1 AND updated_at = $4`,
+		decayed.Valence, decayed.Arousal, decayed.SocialEnergy, updatedAt)
 	if err != nil {
 		return Mood{}, time.Time{}, fmt.Errorf("mood: затухнувшее значение не записано: %w", err)
 	}
@@ -145,6 +161,9 @@ func (r *MoodRepo) ReadDecayed(ctx context.Context, db DBTX, baseline Mood) (Moo
 
 // ApplyDelta применяет дельту хода ВНУТРИ транзакции применения (после сжатия):
 // хранимое значение затухает к baseline, дельта ложится на свежую базу.
+// SELECT ... FOR UPDATE (17.11) блокирует строку до конца транзакции
+// вызывающего: параллельные применения сериализуются, а слепая запись
+// ReadDecayed ждёт блокировку и затем откатывается своим CAS.
 func (r *MoodRepo) ApplyDelta(ctx context.Context, db DBTX, baseline Mood, delta MoodDelta) (Mood, error) {
 	var (
 		valence, arousal, social float64
@@ -152,7 +171,7 @@ func (r *MoodRepo) ApplyDelta(ctx context.Context, db DBTX, baseline Mood, delta
 		has                      bool
 	)
 	err := db.QueryRow(ctx,
-		`SELECT valence, arousal, social_energy, updated_at FROM character_state WHERE id = 1`,
+		`SELECT valence, arousal, social_energy, updated_at FROM character_state WHERE id = 1 FOR UPDATE`,
 	).Scan(&valence, &arousal, &social, &updatedAt)
 	switch {
 	case isNoRows(err):

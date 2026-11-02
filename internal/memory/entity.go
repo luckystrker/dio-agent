@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Виды сущностей (§8.1).
@@ -40,8 +42,25 @@ type Entity struct {
 // EntityRepo — entities и entity_aliases.
 type EntityRepo struct{}
 
-// FindOrCreate находит сущность по имени (регистр нечувствителен) в скоупе
-// или создаёт новую. Вызывается в транзакции записи.
+// entityKeyExpr — SQL-выражение нормализованного ключа имени; зеркало
+// generated-колонки entities.name_key (миграция 000011): приведение к NFC
+// (легаси-строки могли лечь в NFD — macOS/Telegram отдают разложенную форму),
+// сжатие пробельных серий в один пробел, обрезка краёв, lower, затем ё→е —
+// именно в этом порядке: replace до lower() пропускал заглавную «Ё»
+// (приёмка 17.12). Вычисляется на обеих сторонах сравнения — ключ запроса и
+// хранилища всегда в одной нормализации, рассинхрона Go/SQL не бывает.
+// NFC в самом выражении: сравнение идёт с ключом ХРАНИМОГО имени, нормализация
+// параметра в коде этого не спасала. normalize() — PG13+, immutable.
+const entityKeyExpr = `replace(lower(btrim(regexp_replace(normalize(%s, NFC), '\s+', ' ', 'g'))), 'ё', 'е')`
+
+func entityKeySQL(column string) string { return fmt.Sprintf(entityKeyExpr, column) }
+
+// FindOrCreate находит сущность по нормализованному имени или алиасу в скоупе
+// записи или создаёт новую. Нормализация (17.12): регистр, ё/е, внутренние и
+// хвостовые пробелы, NFC — «Алёна» и «АЛЕНА» одна сущность; сокращение
+// («Данил» для «Данила») находит по алиасу. Вызывается в транзакции записи;
+// уникальный индекс (scope_id, name_key) + ON CONFLICT сводят гонку двух
+// ходов в одну строку.
 func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID string) (Entity, error) {
 	if !entityKinds[kind] {
 		return Entity{}, fmt.Errorf("%w: неизвестный вид сущности %q", ErrInvalidCandidate, kind)
@@ -53,13 +72,18 @@ func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID
 	if !IsValidScope(scopeID) {
 		return Entity{}, fmt.Errorf("%w: %q", ErrInvalidScope, scopeID)
 	}
+	canonical := norm.NFC.String(trimmed)
 
-	lower := strings.ToLower(trimmed)
 	const cols = "id, kind, canonical_name, scope_id"
 	var e Entity
 	err := db.QueryRow(ctx,
-		`SELECT `+cols+` FROM entities WHERE scope_id = $1 AND lower(canonical_name) = $2 LIMIT 1`,
-		scopeID, lower).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
+		`SELECT `+cols+` FROM entities e
+		 WHERE e.scope_id = $1 AND e.name_key = `+entityKeySQL("$2")+`
+		    OR e.id IN (
+		      SELECT a.entity_id FROM entity_aliases a
+		      WHERE a.scope_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`)
+		 LIMIT 1`,
+		scopeID, canonical).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
 	if err == nil {
 		return e, nil
 	}
@@ -67,10 +91,14 @@ func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID
 		return Entity{}, fmt.Errorf("entities: поиск по имени: %w", err)
 	}
 
+	// Гонка двух ходов: оба прошли поиск вхолостую и вставляют — конфликт
+	// уникального индекса возвращает существующую строку (no-op DO UPDATE
+	// нужен только чтобы RETURNING дал строку).
 	err = db.QueryRow(ctx,
 		`INSERT INTO entities (kind, canonical_name, scope_id) VALUES ($1, $2, $3)
+		 ON CONFLICT (scope_id, name_key) DO UPDATE SET scope_id = entities.scope_id
 		 RETURNING `+cols,
-		kind, trimmed, scopeID).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
+		kind, canonical, scopeID).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
 	if err != nil {
 		return Entity{}, fmt.Errorf("entities: вставка: %w", err)
 	}
@@ -86,8 +114,8 @@ func (EntityRepo) ResolveByName(ctx context.Context, db DBTX, name, audience str
 	if !IsValidScope(audience) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidScope, audience)
 	}
-	lower := strings.ToLower(strings.TrimSpace(name))
-	if lower == "" {
+	key := norm.NFC.String(strings.TrimSpace(name))
+	if key == "" {
 		return nil, nil
 	}
 
@@ -96,10 +124,10 @@ func (EntityRepo) ResolveByName(ctx context.Context, db DBTX, name, audience str
 		 FROM entities e
 		 LEFT JOIN entity_aliases a ON a.entity_id = e.id
 		 WHERE ($1 = 'internal' OR e.scope_id IN ($1, 'public'))
-		   AND (lower(e.canonical_name) = $2
-		        OR (lower(a.alias) = $2 AND (a.scope_id = $1 OR a.scope_id = 'public')))
+		   AND (e.name_key = `+entityKeySQL("$2")+`
+		        OR (`+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+` AND (a.scope_id = $1 OR a.scope_id = 'public')))
 		 LIMIT 10`,
-		audience, lower)
+		audience, key)
 	if err != nil {
 		return nil, fmt.Errorf("entities: поиск по имени/алиасу: %w", err)
 	}
@@ -137,9 +165,10 @@ func (EntityRepo) Get(ctx context.Context, db DBTX, id int64, audience string) (
 }
 
 // AddAlias добавляет алиас сущности. Алиас наследует скоуп сущности
-// (поведение TS-справочника); повтор той же пары — no-op.
+// (поведение TS-справочника); повтор той же пары — no-op (сравнение в
+// нормализации ключа имени, 17.12: «Даня» и «ДАНЯ » — один алиас).
 func (EntityRepo) AddAlias(ctx context.Context, db DBTX, entityID int64, alias string) error {
-	trimmed := strings.TrimSpace(alias)
+	trimmed := norm.NFC.String(strings.TrimSpace(alias))
 	if trimmed == "" {
 		return fmt.Errorf("%w: пустой алиас", ErrInvalidCandidate)
 	}
@@ -147,7 +176,8 @@ func (EntityRepo) AddAlias(ctx context.Context, db DBTX, entityID int64, alias s
 		`INSERT INTO entity_aliases (entity_id, alias, scope_id)
 		 SELECT $1, $2, e.scope_id FROM entities e WHERE e.id = $1
 		 AND NOT EXISTS (
-		   SELECT 1 FROM entity_aliases a WHERE a.entity_id = $1 AND lower(a.alias) = lower($2)
+		   SELECT 1 FROM entity_aliases a
+		   WHERE a.entity_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`
 		 )`,
 		entityID, trimmed)
 	if err != nil {
