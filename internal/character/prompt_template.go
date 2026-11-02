@@ -1,7 +1,7 @@
 // Каркас системного промпта (config/system-prompt.md) — редактируемый шаблон
-// (§7.1). Метки {{persona}}, {{mood}}, {{relationship}}, {{memory}} заменяются
-// на состояние из БД. Абзац, содержащий пустую метку, исчезает целиком:
-// недоступная часть состояния не оставляет сирот-инструкций. HTML-комментарии
+// (§7.1). Метки {{persona}}, {{mood}}, {{relationship}}, {{actor}}, {{memory}}
+// заменяются на состояние из БД. Абзац, содержащий пустую метку, исчезает
+// целиком: недоступная часть состояния не оставляет сирот-инструкций. HTML-комментарии
 // вырезаются — в них можно оставлять подсказки редактору. Неизвестная метка
 // (опечатка) валит запуск. Поведение перенесено из TS-справочника
 // src/character/prompt-template.ts (этап 7.1, находки приёмки учтены:
@@ -16,14 +16,17 @@ import (
 
 // DefaultSystemPromptTemplate — встроенный каркас; используется, когда
 // config/system-prompt.md не задан (паритет DEFAULT_SYSTEM_PROMPT_TEMPLATE TS).
-// Живое состояние ({{mood}}/{{relationship}}) — в самом конце: статика остаётся
-// байт-в-байт между ходами, смена банды перекэширует у провайдера только хвост.
+// Живое состояние ({{actor}}/{{mood}}/{{relationship}}) — в самом конце:
+// статика остаётся байт-в-байт между ходами, смена банды перекэширует
+// у провайдера только хвост.
 const DefaultSystemPromptTemplate = `{{persona}}
 
 Твоя долговременная память об этом чате (используй естественно, не выдумывай сверх записанного и не цитируй формат):
 {{memory}}
 
 Сообщения пользователя идут пачкой одного собеседника — отвечай на пачку целиком.
+
+Ты говоришь с: {{actor}}.
 
 Твоё состояние сейчас: {{mood}}.
 
@@ -33,6 +36,9 @@ const DefaultSystemPromptTemplate = `{{persona}}
 type PromptExtras struct {
 	MoodLine         string
 	RelationshipLine string
+	// ActorLine — имя собеседника (17.10): пусто (пачка нескольких авторов
+	// или актора нет) — абзац {{actor}} исчезает из промпта.
+	ActorLine string
 	// MemoryBlock — всегда пуст в базовом контексте v0.7 (§11.1): карточки
 	// памяти модель добирает сама инструментами §10.4, а не заранее.
 	MemoryBlock string
@@ -84,6 +90,7 @@ func RenderSystemPrompt(template string, persona Persona, extras PromptExtras) (
 		"persona":      RenderPersonaBlock(persona),
 		"mood":         extras.MoodLine,
 		"relationship": extras.RelationshipLine,
+		"actor":        extras.ActorLine,
 		"memory":       extras.MemoryBlock,
 	}
 
@@ -94,7 +101,7 @@ func RenderSystemPrompt(template string, persona Persona, extras PromptExtras) (
 	}
 	// Порядок перечисления допустимых меток — фиксированный, не из карты:
 	// сообщение об ошибке не зависит от порядка обхода map в Go.
-	knownOrdered := []string{"persona", "mood", "relationship", "memory"}
+	knownOrdered := []string{"persona", "mood", "relationship", "actor", "memory"}
 	for _, name := range placeholderNames(clean) {
 		if _, ok := values[name]; !ok {
 			return "", fmt.Errorf(

@@ -98,7 +98,9 @@ func TestDeliveryLoopSendsMessage(t *testing.T) {
 }
 
 func TestDeliveryLoopSendsBubblesInOrder(t *testing.T) {
-	// §13.1 порядок внутри чата + §13.3 пауза между bubbles.
+	// §13.1 порядок внутри чата + §13.3 пауза между bubbles. После 17.7 клейм
+	// берёт голову очереди чата: пузыри уходят по одному за такт, следующий —
+	// после исхода предыдущего, порядок не может перевернуться.
 	pool := newTestPool(t)
 	ctx := context.Background()
 	stub := &telegramStub{}
@@ -112,14 +114,18 @@ func TestDeliveryLoopSendsBubblesInOrder(t *testing.T) {
 
 	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{BubbleGap: 30 * time.Millisecond})
 	start := time.Now()
-	if err := loop.Tick(ctx); err != nil {
-		t.Fatalf("такт не удался: %v", err)
+	// Такты до полной отправки (голова очереди за такт); зависание — падение
+	// по дедлайну, а не вечное ожидание.
+	for len(stub.sentMessages()) < 3 {
+		if time.Since(start) > 5*time.Second {
+			t.Fatalf("отправлено %d пузырей из 3 — очередь встала", len(stub.sentMessages()))
+		}
+		if err := loop.Tick(ctx); err != nil {
+			t.Fatalf("такт не удался: %v", err)
+		}
 	}
 
 	sent := stub.sentMessages()
-	if len(sent) != 3 {
-		t.Fatalf("отправлено %d пузырей, хочу 3", len(sent))
-	}
 	for i, want := range []string{"раз", "два", "три"} {
 		if sent[i]["text"] != want {
 			t.Fatalf("пузырь %d = %v, хочу %q", i, sent[i]["text"], want)
@@ -129,10 +135,10 @@ func TestDeliveryLoopSendsBubblesInOrder(t *testing.T) {
 	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
 		t.Fatalf("пауза между bubbles не выдержана: %v", elapsed)
 	}
-	var pending int
+	var sentCount int
 	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM delivery_outbox WHERE status = 'sent'`).Scan(&pending); err != nil || pending != 3 {
-		t.Fatalf("sent строк: %d (err=%v)", pending, err)
+		`SELECT count(*) FROM delivery_outbox WHERE status = 'sent'`).Scan(&sentCount); err != nil || sentCount != 3 {
+		t.Fatalf("sent строк: %d (err=%v)", sentCount, err)
 	}
 }
 

@@ -50,22 +50,25 @@ func mustClaim(t *testing.T, repo *OutboxRepo, limit int) []OutboxItem {
 }
 
 func TestClaimDueOrderAndNoDoubleClaim(t *testing.T) {
-	// §13.1: перед сетью sending; порядок внутри чата (chat, turn, position);
-	// захваченное не выдаётся второму такту — дублей доставки нет.
+	// §13.1: перед сетью sending; порядок внутри чата (chat, turn, position).
+	// После 17.7 клейм берёт только «головы» очередей чатов: поздний пузырь
+	// не обгоняет ранний, следующий уходит после исхода предыдущего.
 	pool := newTestPool(t)
+	ctx := context.Background()
 	repo := NewOutboxRepo(pool)
 
 	idB1 := insertOutbox(t, pool, 11, -5, 0, `{"kind":"message","text":"группа"}`)
 	idA0 := insertOutbox(t, pool, 10, 42, 0, `{"kind":"message","text":"первый"}`)
 	idA1 := insertOutbox(t, pool, 10, 42, 1, `{"kind":"message","text":"второй"}`)
 
+	// Первый захват — по голове каждой очереди: группа -5 раньше лички 42
+	// (числовой порядок chat_id, паритет сортировки TS); пузырь 1 лички
+	// держит пузырь 2 того же turn.
 	claimed := mustClaim(t, repo, 10)
-	if len(claimed) != 3 {
-		t.Fatalf("захвачено %d, хочу 3", len(claimed))
+	if len(claimed) != 2 {
+		t.Fatalf("захвачено %d, хочу 2 головы очередей: %+v", len(claimed), claimed)
 	}
-	// Порядок доставки: по числовому возрастанию chat_id (группа -5 раньше
-	// лички 42 — паритет сортировки TS), внутри чата — по позиции.
-	if claimed[0].ID != idB1 || claimed[1].ID != idA0 || claimed[2].ID != idA1 {
+	if claimed[0].ID != idB1 || claimed[1].ID != idA0 {
 		t.Fatalf("порядок доставки нарушен: %+v", claimed)
 	}
 	for _, item := range claimed {
@@ -74,9 +77,19 @@ func TestClaimDueOrderAndNoDoubleClaim(t *testing.T) {
 		}
 	}
 
-	// Повторный захват пуст: строки в sending не пере захватываются.
+	// Повторный захват пуст: строки в sending не перезахватываются, а
+	// зависимый пузырь 2 ждёт исхода пузыря 1.
 	if again := mustClaim(t, repo, 10); len(again) != 0 {
-		t.Fatalf("второй захват выдал те же строки: %+v", again)
+		t.Fatalf("второй захват выдал те же/очередные строки: %+v", again)
+	}
+
+	// Первый пузырь лички ушёл — пузырь 2 освобождён и уходит следующим.
+	if _, err := pool.Exec(ctx, `UPDATE delivery_outbox SET status = 'sent' WHERE id = $1`, idA0); err != nil {
+		t.Fatalf("sent не выставлен: %v", err)
+	}
+	claimed = mustClaim(t, repo, 10)
+	if len(claimed) != 1 || claimed[0].ID != idA1 {
+		t.Fatalf("после sent первого должен уходить второй: %+v", claimed)
 	}
 }
 
@@ -99,6 +112,51 @@ func TestClaimDueRespectsRetryWaitNotBefore(t *testing.T) {
 	}
 	if claimed := mustClaim(t, repo, 10); len(claimed) != 1 {
 		t.Fatalf("наступивший retry_wait не захвачен: %+v", claimed)
+	}
+}
+
+// TestClaimDueEarlyBubbleBlocksLater — 17.7: более ранний нетерминальный
+// пузырь чата (pending/sending/retry_wait) держит поздние: без этого поздний
+// отправлялся первым и ответ читался навыворот («…и поэтому» до «Привет!»).
+// Фильтр видимости not_before на блокировку не влияет: ранняя строка во
+// флуд-паузе с будущим not_before всё равно старше и не даёт обгонять себя.
+func TestClaimDueEarlyBubbleBlocksLater(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := NewOutboxRepo(pool)
+
+	earlyID := insertOutbox(t, pool, 70, 42, 0, `{"kind":"message","text":"Привет!"}`)
+	lateID := insertOutbox(t, pool, 71, 42, 0, `{"kind":"message","text":"…и поэтому"}`)
+	// Ранний пузырь — во флуд-паузе (retry_wait, not_before в будущем).
+	if _, err := pool.Exec(ctx,
+		`UPDATE delivery_outbox SET status = 'retry_wait', not_before = now() + interval '1 hour' WHERE id = $1`, earlyID); err != nil {
+		t.Fatalf("retry_wait не выставлен: %v", err)
+	}
+	if claimed := mustClaim(t, repo, 10); len(claimed) != 0 {
+		t.Fatalf("поздний пузырь обогнал ранний retry_wait: %+v", claimed)
+	}
+
+	// Ранняя строка восстановилась (not_before наступил) — уходит первой;
+	// поздний ждёт её исхода, пока она sending.
+	if _, err := pool.Exec(ctx,
+		`UPDATE delivery_outbox SET not_before = now() - interval '1 second' WHERE id = $1`, earlyID); err != nil {
+		t.Fatalf("not_before не передвинут: %v", err)
+	}
+	claimed := mustClaim(t, repo, 10)
+	if len(claimed) != 1 || claimed[0].ID != earlyID {
+		t.Fatalf("первым должен уходить ранний пузырь: %+v", claimed)
+	}
+	if again := mustClaim(t, repo, 10); len(again) != 0 {
+		t.Fatalf("поздний обогнал отправляемый ранний (sending): %+v", again)
+	}
+
+	// Ранний ушёл (терминальный sent) — поздний свободен: порядок соблюдён.
+	if _, err := pool.Exec(ctx, `UPDATE delivery_outbox SET status = 'sent' WHERE id = $1`, earlyID); err != nil {
+		t.Fatalf("sent не выставлен: %v", err)
+	}
+	claimed = mustClaim(t, repo, 10)
+	if len(claimed) != 1 || claimed[0].ID != lateID {
+		t.Fatalf("после раннего должен уходить поздний: %+v", claimed)
 	}
 }
 
@@ -152,10 +210,11 @@ func TestMarkUnknownCancelsDependents(t *testing.T) {
 	// Чужой turn того же чата не зависит от чужой последовательности.
 	other := insertOutbox(t, pool, 41, 42, 0, `{"kind":"message","text":"другой ход"}`)
 
-	// Захват пачки (§13.1: перед сетью — sending) включает все четыре строки.
-	claimed := mustClaim(t, repo, 10)
-	if len(claimed) != 4 {
-		t.Fatalf("захвачено %d, хочу 4", len(claimed))
+	// Все четыре строки — sending (после 17.7 клейм берёт голову очереди
+	// чата, а здесь проверяется машина unknown, а не порядок клейма).
+	if _, err := pool.Exec(ctx,
+		`UPDATE delivery_outbox SET status = 'sending', attempts = 1`); err != nil {
+		t.Fatalf("sending не выставлен: %v", err)
 	}
 	if changed, deps, err := repo.MarkUnknown(ctx, id0, "context deadline exceeded"); err != nil || !changed {
 		t.Fatalf("unknown не записан: changed=%v deps=%d err=%v", changed, deps, err)
@@ -264,5 +323,44 @@ func TestRecoverStaleSending(t *testing.T) {
 	}
 	if statuses[fresh] != "sending" {
 		t.Fatalf("свежее sending затронуто: %s", statuses[fresh])
+	}
+}
+
+// TestClaimDueBlockedChatDoesNotBlockOthers — приёмка 17.7: блокировка
+// «раньше голова очереди» — строго в пределах чата: флуд-пауза одного чата
+// не должна морить голом соседние (EXISTS-фильтр коррелирован по chat_id).
+// Терминальный failed ранней строки поздних не держит — очередь движется.
+func TestClaimDueBlockedChatDoesNotBlockOthers(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := NewOutboxRepo(pool)
+
+	// Чат 42: ранняя строка во флуд-паузе, поздняя ждёт.
+	early := insertOutbox(t, pool, 80, 42, 0, `{"kind":"message","text":"ранний"}`)
+	insertOutbox(t, pool, 81, 42, 0, `{"kind":"message","text":"поздний"}`)
+	if _, err := pool.Exec(ctx,
+		`UPDATE delivery_outbox SET status = 'retry_wait', not_before = now() + interval '1 hour' WHERE id = $1`, early); err != nil {
+		t.Fatalf("retry_wait не выставлен: %v", err)
+	}
+	// Чат 43: обычная готовая строка — должна уйти, пока чат 42 в паузе.
+	other := insertOutbox(t, pool, 82, 43, 0, `{"kind":"message","text":"сосед"}`)
+
+	claimed := mustClaim(t, repo, 10)
+	if len(claimed) != 1 || claimed[0].ID != other {
+		t.Fatalf("заблокированный чат 42 должен держать только свои строки, а не соседний чат: %+v", claimed)
+	}
+
+	// Ранняя строка чата 42 исчерпала попытки (failed — терминальный):
+	// поздняя строка освобождается.
+	if _, err := pool.Exec(ctx,
+		`UPDATE delivery_outbox SET status = 'failed' WHERE id = $1`, early); err != nil {
+		t.Fatalf("failed не выставлен: %v", err)
+	}
+	claimed = mustClaim(t, repo, 10)
+	if len(claimed) != 1 {
+		t.Fatalf("после failed ранней строки поздняя должна быть доступна: %+v", claimed)
+	}
+	if claimed[0].ChatID != 42 {
+		t.Fatalf("должна уйти строка чата 42: %+v", claimed[0])
 	}
 }

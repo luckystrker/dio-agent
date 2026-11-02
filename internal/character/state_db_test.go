@@ -419,6 +419,39 @@ func TestAssembleContextMultiActorConstraint(t *testing.T) {
 	}
 }
 
+// TestAssembleContextActorNameInSystem — 17.10: имя собеседника доезжает
+// до модели — в личке оно строкой в базовом контексте (system). Раньше Actor
+// заполнялся, но имя никуда не шло: модель не знала, с кем говорит.
+func TestAssembleContextActorNameInSystem(t *testing.T) {
+	f, ctx := newFixture(t)
+	assembler := &Assembler{Mood: NewMoodRepo(), Relationships: NewRelationshipRepo(),
+		HistoryMessages: 10, HistoryMaxChars: 1000}
+	bctx, err := assembler.Assemble(ctx, f.pool, f.persona, testScopeID, testChatID,
+		[]BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "привет"}}, 0)
+	if err != nil {
+		t.Fatalf("контекст не собран: %v", err)
+	}
+	if !strings.Contains(bctx.System, "Коля") {
+		t.Fatalf("имя собеседника не в system-промпте:\n%s", bctx.System)
+	}
+	// Группа с несколькими авторами: имена различаются префиксами пачки,
+	// а «Ты говоришь с» одного имени не утверждает (пусто — абзац исчезает).
+	bctx, err = assembler.Assemble(ctx, f.pool, f.persona, testScopeID, testChatID,
+		[]BatchEvent{
+			{EventID: 2, ActorID: 777, ActorName: "Коля", Text: "раз"},
+			{EventID: 3, ActorID: 888, ActorName: "Аня", Text: "два"},
+		}, 0)
+	if err != nil {
+		t.Fatalf("контекст не собран: %v", err)
+	}
+	if strings.Contains(bctx.System, "Ты говоришь с") {
+		t.Fatalf("в пачке нескольких авторов строка «Ты говоришь с» вводит в заблуждение:\n%s", bctx.System)
+	}
+	if len(bctx.Batch) != 2 || bctx.Batch[0] != "Коля: раз" || bctx.Batch[1] != "Аня: два" {
+		t.Fatalf("реплики группы без префиксов авторов: %v", bctx.Batch)
+	}
+}
+
 // TestTurnDirectQuestionToolRound — прямой вопрос: ход проходит с
 // инструментным кругом памяти (forced tool-calling провода проверяется юнитом
 // TestChatClientForcedToolChoiceFirstCallOnly); тут — что ход с forced-конфигом

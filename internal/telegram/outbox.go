@@ -76,9 +76,14 @@ type OutboxRepo struct {
 func NewOutboxRepo(pool *pgxpool.Pool) *OutboxRepo { return &OutboxRepo{Pool: pool} }
 
 // ClaimDue захватывает к отправке pending/retry_wait с наступившим not_before
-// — по порядку внутри чата (§13.1: chat_id, turn_id, position). FOR UPDATE
-// SKIP LOCKED: второй процесс не берёт чужие строки. Захваченное переводится
-// в sending (перед сетью — §13.1), attempts растёт.
+// — по порядку внутри чата (§13.1: chat_id, turn_id, position). Строка не
+// берётся, если в том же чате есть более ранняя нетерминальная строка
+// (pending/sending/retry_wait с меньшим turn_id/position, 17.7): без этого
+// поздний пузырь обгонял ранний во флуд-паузе, и ответ читался навыворот.
+// Блокировка не зависит от not_before ранней строки — «время ещё не пришло»
+// не значит «уже можно обгонять». FOR UPDATE SKIP LOCKED: второй процесс не
+// берёт чужие строки. Захваченное переводится в sending (перед сетью — §13.1),
+// attempts растёт.
 func (r *OutboxRepo) ClaimDue(ctx context.Context, limit int) ([]OutboxItem, error) {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
@@ -88,9 +93,15 @@ func (r *OutboxRepo) ClaimDue(ctx context.Context, limit int) ([]OutboxItem, err
 
 	var ids []int64
 	rows, err := tx.Query(ctx, `
-		SELECT id FROM delivery_outbox
-		WHERE status IN ('pending', 'retry_wait') AND not_before <= now()
-		ORDER BY chat_id ASC, turn_id ASC, position ASC
+		SELECT id FROM delivery_outbox o
+		WHERE o.status IN ('pending', 'retry_wait') AND o.not_before <= now()
+		  AND NOT EXISTS (
+		    SELECT 1 FROM delivery_outbox prev
+		    WHERE prev.chat_id = o.chat_id
+		      AND prev.status IN (`+deliverableStatuses+`)
+		      AND (prev.turn_id, prev.position) < (o.turn_id, o.position)
+		  )
+		ORDER BY o.chat_id ASC, o.turn_id ASC, o.position ASC
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED`, limit)
 	if err != nil {

@@ -129,10 +129,14 @@ func ParseTurnResult(raw []byte) (TurnResult, error) {
 	if dec.More() {
 		return TurnResult{}, fmt.Errorf("turnresult: после JSON-объекта есть лишний текст")
 	}
+	// Инертные противоречия вычищаются ДО валидации (17.8): мусор в полях без
+	// эффекта при выбранном decision не должен ронять проверку диапазона —
+	// ответ, валидный по смыслу, уходил в repair и терминальный пропуск хода.
+	r = stripInertContradictions(r)
 	if err := r.Validate(); err != nil {
 		return TurnResult{}, err
 	}
-	return stripInertContradictions(r), nil
+	return r, nil
 }
 
 func rangeErr(what string, v, min, max float64) error {

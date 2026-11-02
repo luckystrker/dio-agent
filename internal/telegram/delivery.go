@@ -34,6 +34,11 @@ type DB interface {
 // порог, что у startup-recovery приложения (internal/app).
 const staleSendingAfter = time.Minute
 
+// maxRetryAfterWait — потолок паузы 429 (17.6): Telegram может прислать
+// retry_after в час — держать строку в очереди час по одной ошибке флуда
+// затягивает доставку остального чата. Пауза выше потолка обрезается до него.
+const maxRetryAfterWait = 5 * time.Minute
+
 // DeliveryOptions — настройки delivery loop.
 type DeliveryOptions struct {
 	// Interval — период такта (по умолчанию 500 мс, паритет TS).
@@ -364,7 +369,8 @@ type sendOutcome struct {
 }
 
 // classifySendError — чистая функция политики §13.2 (юнит-тестируется):
-//   - 429 с retry_after — повтор после паузы (honor retry_after);
+//   - 429 с retry_after — повтор после паузы (honor retry_after), но пауза
+//     ограничена maxRetryAfterWait, а попытки — тем же потолком, что у 5xx (17.6);
 //   - 5xx — повтор с экспоненциальной паузой до лимита попыток, дальше failed;
 //   - прочие подтверждённые ошибки API (4xx) — постоянные: failed;
 //   - всё, что не получило ответа (timeout, обрыв соединения, отмена) —
@@ -375,9 +381,17 @@ func classifySendError(err error, attempts, maxAttempts int, retryBase time.Dura
 		return sendOutcome{kind: outcomeUnknown}
 	}
 	if apiErr.HTTPStatus == 429 {
+		// Тот же потолок попыток, что у 5xx (17.6): вечный флуд-контроль
+		// по одной строке не должен жить в очереди бесконечно.
+		if attempts >= maxAttempts {
+			return sendOutcome{kind: outcomeFailed}
+		}
 		wait := apiErr.RetryAfter
 		if wait <= 0 {
 			wait = time.Second // паритет TS: retry_after не передан — 1 с
+		}
+		if wait > maxRetryAfterWait {
+			wait = maxRetryAfterWait
 		}
 		return sendOutcome{kind: outcomeRetryWait, wait: wait}
 	}

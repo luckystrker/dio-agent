@@ -109,6 +109,37 @@ func TestTurnResultStripsConfidenceOffClaim(t *testing.T) {
 	}
 }
 
+// TestParseTurnResultInertFieldsBeforeValidate — 17.8: инертные поля
+// вычищаются ДО валидации. Ответ со смыслом answer и мусорным defer_hours=0
+// раньше валиден по смыслу, но валился проверкой диапазона → repair →
+// терминальный пропуск хода. Содержательные нарушения (§11.2) остаются
+// терминальными.
+func TestParseTurnResultInertFieldsBeforeValidate(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["ок"],"defer_hours":0}`))
+	if err != nil {
+		t.Fatalf("answer с инертным defer_hours=0 отвергнут: %v", err)
+	}
+	if r.DeferHours != nil {
+		t.Fatalf("defer_hours при answer должен вычищаться: %+v", r.DeferHours)
+	}
+	// Реакция при не-react/не-answer — инертная, вычищается до валидации.
+	r, err = ParseTurnResult([]byte(`{"decision":"ignore","reaction":"👍"}`))
+	if err != nil || r.Reaction != "" {
+		t.Fatalf("ignore с инертной реакцией должен проходить без reaction: %+v %v", r, err)
+	}
+	// Содержательные нарушения остаются терминальными.
+	if _, err := ParseTurnResult([]byte(`{"decision":"react"}`)); err == nil {
+		t.Fatal("react без реакции должен оставаться ошибкой")
+	}
+	if _, err := ParseTurnResult([]byte(`{"decision":"defer"}`)); err == nil {
+		t.Fatal("defer без defer_hours должен оставаться ошибкой")
+	}
+	// Диапазон defer_hours при самом defer — содержательное нарушение.
+	if _, err := ParseTurnResult([]byte(`{"decision":"defer","defer_hours":0}`)); err == nil {
+		t.Fatal("defer_hours=0 при defer должен оставаться ошибкой диапазона")
+	}
+}
+
 // TestParseTurnResultDoubleColonRepair — известный изъян модели: двойное
 // двоеточие после ключа чинится до валидации (TS-линия c0a986d).
 func TestParseTurnResultDoubleColonRepair(t *testing.T) {
@@ -290,5 +321,43 @@ func TestSchemaMatchesValidatorLimits(t *testing.T) {
 	}
 	if schema["additionalProperties"] != false {
 		t.Fatalf("схема допускает лишние поля, валидатор — нет")
+	}
+}
+
+// TestParseTurnResultInertOutOfRangeStrippedBeforeValidate — приёмка 17.8:
+// инертные поля с ЗНАЧЕНИЯМИ ВНЕ ДИАПАЗОНА вычищаются до валидации — раньше
+// именно диапазонная проверка роняла смысл-валидный ответ в repair. Диапазон
+// значимого поля при своём decision остаётся терминальным.
+func TestParseTurnResultInertOutOfRangeStrippedBeforeValidate(t *testing.T) {
+	// react с мусорным defer_hours=999: часы инертны при react.
+	r, err := ParseTurnResult([]byte(`{"decision":"react","reaction":"👍","defer_hours":999}`))
+	if err != nil {
+		t.Fatalf("react с инертным defer_hours=999 отвергнут: %v", err)
+	}
+	if r.DeferHours != nil {
+		t.Fatalf("defer_hours при react должен вычищаться: %+v", r.DeferHours)
+	}
+	// ignore со сверхдлинной инертной реакцией (лимит 64 руны — проверка длины).
+	long := strings.Repeat("👍", maxReactionLen+1)
+	r, err = ParseTurnResult([]byte(`{"decision":"ignore","reaction":"` + long + `"}`))
+	if err != nil {
+		t.Fatalf("ignore со сверхдлинной инертной реакцией отвергнут: %v", err)
+	}
+	if r.Reaction != "" {
+		t.Fatalf("reaction при ignore должен вычищаться: %q", r.Reaction)
+	}
+	// answer с experience-кандидатом и confidence вне диапазона: confidence
+	// осмыслен только у claim — вычищается до валидации, кандидат остаётся.
+	r, err = ParseTurnResult([]byte(
+		`{"decision":"answer","messages":["ок"],"memory":[{"kind":"experience","text":"прочитал","confidence":5}]}`))
+	if err != nil {
+		t.Fatalf("experience с confidence=5 отвергнут целиком: %v", err)
+	}
+	if len(r.Memory) != 1 || r.Memory[0].Confidence != nil {
+		t.Fatalf("confidence у experience должен вычищаться до валидации: %+v", r.Memory)
+	}
+	// Диапазон значимого поля при своём decision — терминален (§11.2).
+	if _, err := ParseTurnResult([]byte(`{"decision":"defer","defer_hours":999}`)); err == nil {
+		t.Fatal("defer_hours=999 при defer должен оставаться ошибкой диапазона")
 	}
 }

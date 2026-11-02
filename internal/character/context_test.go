@@ -36,3 +36,76 @@ func TestBatchTexts(t *testing.T) {
 		t.Fatalf("сырой update не должен утекать в текст: %q", got[1])
 	}
 }
+
+// TestConstraintsMultiActorByDistinctAuthors — 17.9: пометка «в пачке
+// несколько участников» ставится по числу РАЗЛИЧНЫХ авторов, а не по размеру
+// пачки: после поднятия окон лички 2–4 реплики одного человека — норма, и
+// ложное «несколько участников» сбивало модель на каждом таком ходе.
+func TestConstraintsMultiActorByDistinctAuthors(t *testing.T) {
+	one := []BatchEvent{
+		{ActorID: 7, Text: "раз"},
+		{ActorID: 7, Text: "два"},
+		{ActorID: 7, Text: "три"},
+	}
+	if got := constraintsSection(one); strings.Contains(got, "несколько участников") {
+		t.Fatalf("пачка одного автора не «несколько участников»: %s", got)
+	}
+	two := []BatchEvent{
+		{ActorID: 7, Text: "раз"},
+		{ActorID: 888, Text: "два"},
+	}
+	if got := constraintsSection(two); !strings.Contains(got, "несколько участников") {
+		t.Fatalf("пачка двух авторов без пометки: %s", got)
+	}
+}
+
+// TestBatchTextsMultiActorPrefixes — 17.10: в пачке нескольких авторов
+// реплики получают префикс «Имя: » — без него модель в группе не различает,
+// кто что сказал. Пачка одного автора (личка) — без префиксов.
+func TestBatchTextsMultiActorPrefixes(t *testing.T) {
+	got := batchTexts([]BatchEvent{
+		{ActorID: 7, ActorName: "Коля", Text: "раз"},
+		{ActorID: 888, ActorName: "Аня", Text: "два"},
+	})
+	if len(got) != 2 || got[0] != "Коля: раз" || got[1] != "Аня: два" {
+		t.Fatalf("префиксы авторов неверны: %v", got)
+	}
+	// Один автор — без префиксов.
+	got = batchTexts([]BatchEvent{
+		{ActorID: 7, ActorName: "Коля", Text: "раз"},
+		{ActorID: 7, ActorName: "Коля", Text: "два"},
+	})
+	if len(got) != 2 || got[0] != "раз" || got[1] != "два" {
+		t.Fatalf("личка должна быть без префиксов: %v", got)
+	}
+}
+
+// TestDistinctActorsIgnoresServiceEvents — приёмка 17.9: автором считается
+// только реальный actor_id; служебные события (ActorID 0) авторами не
+// считаются и не создают ложное «несколько участников».
+func TestDistinctActorsIgnoresServiceEvents(t *testing.T) {
+	if got := distinctActors([]BatchEvent{{ActorID: 0}, {ActorID: 7}, {ActorID: 7}}); got != 1 {
+		t.Fatalf("служебные события не должны считаться авторами: %d", got)
+	}
+	if got := distinctActors([]BatchEvent{{ActorID: 0}, {ActorID: 7}, {ActorID: 888}}); got != 2 {
+		t.Fatalf("два реальных автора должны давать 2: %d", got)
+	}
+	// Пачка «один автор + служебное» — без пометки нескольких участников.
+	one := []BatchEvent{{ActorID: 0}, {ActorID: 7, Text: "раз"}, {ActorID: 7, Text: "два"}}
+	if got := constraintsSection(one); strings.Contains(got, "несколько участников") {
+		t.Fatalf("ложная пометка нескольких участников: %s", got)
+	}
+}
+
+// TestBatchTextsMultiActorPrefixFallback — приёмка 17.10: у автора без имени
+// в профиле префикс — идентификатор user:<id> (как в карточке сущности):
+// в группе без имени модель всё равно различает авторов.
+func TestBatchTextsMultiActorPrefixFallback(t *testing.T) {
+	got := batchTexts([]BatchEvent{
+		{ActorID: 7, ActorName: "Коля", Text: "раз"},
+		{ActorID: 888, Text: "два"},
+	})
+	if len(got) != 2 || got[0] != "Коля: раз" || got[1] != "user:888: два" {
+		t.Fatalf("фолбэк префикса без имени неверен: %v", got)
+	}
+}

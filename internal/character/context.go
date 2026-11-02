@@ -48,6 +48,10 @@ type BaseContext struct {
 	MoodLine string
 	// RelationshipLine — отношение к собеседнику (пусто — абзац шаблона исчезает).
 	RelationshipLine string
+	// ActorLine — имя собеседника для метки {{actor}} (17.10): в личке модель
+	// знает, с кем говорит. Пусто (несколько авторов пачки или актора нет) —
+	// абзац шаблона исчезает.
+	ActorLine string
 	// Actor — карточка человека-собеседника (§7.3); nil — актора нет.
 	Actor *memory.Entity
 }
@@ -89,6 +93,12 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 			return BaseContext{}, fmt.Errorf("контекст: отношения: %w", err)
 		}
 		out.RelationshipLine = DescribeRelationship(rel)
+		// Имя собеседника (17.10): пока в пачке один автор — «Ты говоришь с
+		// Имя»; несколько авторов — имена различают префиксы пачки, и одно
+		// имя в system вводило бы в заблуждение (пусто — абзац исчезает).
+		if distinctActors(batch) <= 1 {
+			out.ActorLine = actor.CanonicalName
+		}
 	}
 
 	// --- недавний разговор (8.1) ---
@@ -105,6 +115,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	system, err := BuildSystemPrompt(persona, PromptExtras{
 		MoodLine:         out.MoodLine,
 		RelationshipLine: out.RelationshipLine,
+		ActorLine:        out.ActorLine,
 	}, a.PromptTemplate)
 	if err != nil {
 		return BaseContext{}, err
@@ -117,20 +128,36 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 // batchTexts — тексты пачки для контекста: пустой текст не теряется, а
 // помечается плейсхолдером (TS-паритет); фото без подписи помечается как фото —
 // картинка уходит частями Ask, плейсхолдер объясняет, почему «без текста»
-// (находка приёмки Р).
+// (находка приёмки Р). Когда авторов больше одного (группа, 17.10), реплика
+// получает префикс «Имя: » — модель различает, кто что сказал.
 func batchTexts(batch []BatchEvent) []string {
+	multi := distinctActors(batch) > 1
 	out := make([]string, 0, len(batch))
 	for _, ev := range batch {
+		var text string
 		switch {
 		case strings.TrimSpace(ev.Text) != "":
-			out = append(out, ev.Text)
+			text = ev.Text
 		case telegram.PhotoFileIDFromUpdate(ev.Raw) != "":
-			out = append(out, "[фото без подписи]")
+			text = "[фото без подписи]"
 		default:
-			out = append(out, "[сообщение без текста]")
+			text = "[сообщение без текста]"
 		}
+		if multi && ev.ActorID != 0 {
+			text = batchAuthorLabel(ev) + ": " + text
+		}
+		out = append(out, text)
 	}
 	return out
+}
+
+// batchAuthorLabel — имя автора строки пачки для префикса (17.10): без имени
+// в Telegram-профиле — идентификатор user:<id>, как в карточке сущности.
+func batchAuthorLabel(ev BatchEvent) string {
+	if ev.ActorName != "" {
+		return ev.ActorName
+	}
+	return fmt.Sprintf("user:%d", ev.ActorID)
 }
 
 // resolveActor находит или создаёт сущность человека-актора (первый актор
@@ -164,8 +191,23 @@ func constraintsSection(batch []BatchEvent) string {
 	b.WriteString("- decision=defer требует defer_hours; вернёшься к ответу позже.\n")
 	b.WriteString("- mood_delta и relationship_delta — изменения (дельты), а не абсолютные значения; значимое изменение — с кратким основанием reason.\n")
 	b.WriteString("- Результаты инструментов памяти — часть контекста хода, а не отправляемый текст; не цитируй их формат.\n")
-	if len(batch) > 1 {
+	if distinctActors(batch) > 1 {
 		b.WriteString("- В пачке несколько участников: отвечай на пачку целиком, а не только последнему.\n")
 	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// distinctActors — число различных авторов пачки (по actor_id, 17.9): после
+// поднятия окон лички (3с/10с) пачка из 2–4 реплик ОДНОГО человека — норма,
+// и пометка «несколько участников» должна ставиться по авторам, а не по
+// размеру пачки. События без актора (ActorID 0, служебные) авторами не
+// считаются.
+func distinctActors(batch []BatchEvent) int {
+	seen := make(map[int64]struct{}, len(batch))
+	for _, ev := range batch {
+		if ev.ActorID != 0 {
+			seen[ev.ActorID] = struct{}{}
+		}
+	}
+	return len(seen)
 }
