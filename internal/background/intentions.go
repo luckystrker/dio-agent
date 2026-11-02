@@ -177,15 +177,37 @@ func (r *IntentionRepo) Release(ctx context.Context, id int64, notBefore time.Ti
 }
 
 // Cancel отменяет намерение с причиной; терминальные статусы не трогает.
+// Связанный ход инициативы (related_turn_id, ещё created) помечается skipped —
+// иначе ход-сирота навсегда оседает created без событий (блок 18.7).
 // Ложь (нечего отменять) — не ошибка: повторный гейт безвреден.
 func (r *IntentionRepo) Cancel(ctx context.Context, id int64, reason string) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("намерения: транзакция не открыта: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var related *int64
+	err = tx.QueryRow(ctx,
 		`UPDATE intentions SET status = 'cancelled', reason = $2, updated_at = now()
-		 WHERE id = $1 AND status IN ('pending', 'running')`, id, reason)
+		 WHERE id = $1 AND status IN ('pending', 'running')
+		 RETURNING related_turn_id`, id, reason).Scan(&related)
+	if isNoRows(err) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("намерения: отмена не удалась: %w", err)
 	}
-	return tag.RowsAffected() > 0, nil
+	if related != nil {
+		if _, err := tx.Exec(ctx,
+			`UPDATE turns SET status = 'skipped' WHERE id = $1 AND status = 'created'`, *related); err != nil {
+			return false, fmt.Errorf("намерения: ход-сирота %d не помечен: %w", *related, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("намерения: отмена не зафиксирована: %w", err)
+	}
+	return true, nil
 }
 
 // Fail помечает намерение неудачей (терминально; §14.1 статус failed) —
@@ -206,14 +228,51 @@ func (r *IntentionRepo) Fail(ctx context.Context, id int64, reason string) error
 
 // ExpireOverdue отменяет просроченные pending-намерения (cleanup §14.2,
 // «устаревшие планы получают expiry» §10.5): claim их всё равно не берёт.
+// Связанные created-ходы помечаются skipped — ход-сирота не оседает вечно
+// (блок 18.7).
 func (r *IntentionRepo) ExpireOverdue(ctx context.Context) (int, error) {
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE intentions SET status = 'cancelled', reason = 'срок истёк (expiresAt)', updated_at = now()
-		 WHERE status = 'pending' AND expires_at <= now()`)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("намерения: транзакция не открыта: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		UPDATE intentions SET status = 'cancelled', reason = 'срок истёк (expiresAt)', updated_at = now()
+		 WHERE status = 'pending' AND expires_at <= now()
+		 RETURNING related_turn_id`)
 	if err != nil {
 		return 0, fmt.Errorf("намерения: истечение не применено: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	defer rows.Close()
+
+	var orphans []int64
+	cancelled := 0
+	for rows.Next() {
+		var related *int64
+		if err := rows.Scan(&related); err != nil {
+			return 0, fmt.Errorf("намерения: строка истечения не читается: %w", err)
+		}
+		cancelled++
+		if related != nil {
+			orphans = append(orphans, *related)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("намерения: истечение не дочитано: %w", err)
+	}
+	rows.Close()
+
+	if len(orphans) > 0 {
+		if _, err := tx.Exec(ctx,
+			`UPDATE turns SET status = 'skipped' WHERE id = ANY($1) AND status = 'created'`, orphans); err != nil {
+			return 0, fmt.Errorf("намерения: ходы-сироты не помечены: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("намерения: истечение не зафиксировано: %w", err)
+	}
+	return cancelled, nil
 }
 
 // ResetRunning возвращает все running-намерения в pending — восстановление при

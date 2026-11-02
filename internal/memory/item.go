@@ -179,6 +179,11 @@ func visCond(alias string, aud int) string {
 
 // Insert записывает кандидата от имени runtime: item + источник + связи,
 // одной транзакцией вызывающего (§10.1). Скоуп назначает runtime.
+// Точный дубль активной записи (тот же скоуп, текст с точностью до регистра
+// и краёв) не вставляется и не плодит строку: уникальное выражение
+// (scope_id, md5(lower(btrim(text)))) WHERE status='active' + ON CONFLICT DO
+// NOTHING (блок 18.8) — возврат существующей записи без ошибки, честный
+// пропуск без дописывания источника и связей.
 func (r Items) Insert(ctx context.Context, db DBTX, item NewItem, scopeID string) (Item, error) {
 	if err := item.Validate(); err != nil {
 		return Item{}, err
@@ -194,15 +199,33 @@ func (r Items) Insert(ctx context.Context, db DBTX, item NewItem, scopeID string
 	it, err := scanItem(db.QueryRow(ctx,
 		`INSERT INTO memory_items (kind, text, scope_id, provenance_id, status, salience, confidence, occurred_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (scope_id, md5(lower(btrim(text)))) WHERE status = 'active' DO NOTHING
 		 RETURNING `+itemCols,
 		item.Kind, item.Text, scopeID, item.ProvenanceID, status, item.Salience,
 		item.Confidence, item.OccurredAt))
 	if err != nil {
+		if isNoRows(err) {
+			return findActiveByText(ctx, db, scopeID, item.Text)
+		}
 		return Item{}, fmt.Errorf("memory_items: вставка: %w", err)
 	}
 
 	if err := r.attachMeta(ctx, db, it.ID, item, scopeID); err != nil {
 		return Item{}, err
+	}
+	return it, nil
+}
+
+// findActiveByText возвращает существующую активную запись с тем же
+// нормализованным текстом (путь пропуска дубля, блок 18.8).
+func findActiveByText(ctx context.Context, db DBTX, scopeID, text string) (Item, error) {
+	it, err := scanItem(db.QueryRow(ctx,
+		`SELECT `+itemCols+` FROM memory_items
+		 WHERE scope_id = $1 AND status = 'active'
+		   AND md5(lower(btrim(text))) = md5(lower(btrim($2)))
+		 ORDER BY id LIMIT 1`, scopeID, text))
+	if err != nil {
+		return Item{}, fmt.Errorf("memory_items: существующий дубль не читается: %w", err)
 	}
 	return it, nil
 }

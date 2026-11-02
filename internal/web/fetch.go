@@ -9,6 +9,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // MaxRedirects — потолок redirect-хопов по умолчанию (§15: ограничить hops).
@@ -33,6 +35,13 @@ const DefaultMaxBytes = 256 << 10 // 256 KiB
 // DefaultTimeout — потолок одного fetch по умолчанию.
 const DefaultTimeout = 20 * time.Second
 
+// MaxTextRunes — потолок текста страницы в выдаче модели (блок 18.9): раньше
+// до 256 КиБ текста уходило целиком, без обрезки и без пометки.
+const MaxTextRunes = 10_000
+
+// truncationMarker — честная пометка обрезки в конце выдачи (блок 18.9).
+const truncationMarker = "[страница обрезана]"
+
 // allowedContentTypes — allowlist §15: только текст/документ/JSON; бинарное
 // и неизвестное — отказ.
 var allowedContentTypes = map[string]bool{
@@ -40,13 +49,31 @@ var allowedContentTypes = map[string]bool{
 	"application/xhtml+xml": true, "application/json": true,
 }
 
+// forbiddenPrefixes — запрещённые префиксы сверх встроенных категорий: CGNAT
+// 100.64.0.0/10 (переводная NAT-сеть провайдера — не публичный хост) и NAT64
+// 64:ff9b::/96 (отображение IPv4 в IPv6; в него маскируются и приватные
+// адреса) — блок 18.10: оба проходили проверки netip как «публичные».
+var forbiddenPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+}
+
 // addrAllowed — запрет §15 по одному адресу: loopback, private, link-local
-// (включая metadata-эндпоинты), multicast, unspecified. Публичный — разрешён.
+// (включая metadata-эндпоинты), multicast, unspecified, CGNAT, NAT64.
+// Публичный — разрешён. IPv4-mapped форма (::ffff:a.b.c.d) нормализуется
+// (Unmap) до проверок: netip.Prefix.Contains не матчит 4-in-6 адрес к
+// v4-префиксу, и CGNAT в mapped форме обходил запрет (18.10, находка приёмки).
 func addrAllowed(ip netip.Addr) bool {
+	ip = ip.Unmap()
 	if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() ||
 		ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() {
 		return false
+	}
+	for _, p := range forbiddenPrefixes {
+		if p.Contains(ip) {
+			return false
+		}
 	}
 	return true
 }
@@ -174,9 +201,12 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	}
 	defer resp.Body.Close() //nolint:errcheck // чтение уже завершено
 
-	ct := strings.TrimSpace(strings.SplitN(resp.Header.Get("Content-Type"), ";", 2)[0])
-	if ct != "" && !allowedContentTypes[strings.ToLower(ct)] {
-		return nil, fmt.Errorf("web: content-type %q вне allowlist (§15)", ct)
+	mediaType, charset := parseContentType(resp.Header.Get("Content-Type"))
+	if mediaType == "" {
+		return nil, fmt.Errorf("web: пустой content-type вне allowlist (§15, блок 18.9)")
+	}
+	if !allowedContentTypes[mediaType] {
+		return nil, fmt.Errorf("web: content-type %q вне allowlist (§15)", mediaType)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("web: статус %d", resp.StatusCode)
@@ -186,8 +216,64 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("web: тело не дочитано: %w", err)
 	}
-	text := ExtractText(string(body))
-	return &Page{URL: resp.Request.URL.String(), ContentType: ct, Text: text, Bytes: len(body)}, nil
+	text := truncateMarked(ExtractText(decodeBody(body, charset)), MaxTextRunes)
+	return &Page{URL: resp.Request.URL.String(), ContentType: mediaType, Text: text, Bytes: len(body)}, nil
+}
+
+// parseContentType — медиа-тип (нижний регистр, без пробелов) и charset из
+// полного заголовка Content-Type: "text/html; charset=windows-1251" →
+// ("text/html", "windows-1251") (блок 18.9: charset раньше игнорировался).
+func parseContentType(header string) (mediaType, charset string) {
+	parts := strings.Split(header, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(parts[0]))
+	for _, p := range parts[1:] {
+		name, val, ok := strings.Cut(p, "=")
+		if ok && strings.ToLower(strings.TrimSpace(name)) == "charset" {
+			charset = strings.ToLower(strings.Trim(strings.TrimSpace(val), `"`))
+		}
+	}
+	return mediaType, charset
+}
+
+// utf8BOM — маркер порядка байт UTF-8, снимается до извлечения текста.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// decodeBody — тело ответа в текст (блок 18.9): декодирование charset
+// (cp1251 — мини-таблица внутри пакета), снятие UTF-8 BOM и подрезка обрыва
+// многобайтной руны, оставшегося от байтового потолка (LimitReader режет
+// посередине символа).
+func decodeBody(body []byte, charset string) string {
+	switch charset {
+	case "windows-1251", "cp1251":
+		return decodeWindows1251(body)
+	default: // utf-8 и неуказанный — utf-8-совместимая обработка
+		b := bytes.TrimPrefix(body, utf8BOM)
+		return string(trimBrokenRuneTail(b))
+	}
+}
+
+// trimBrokenRuneTail отрезает незавершённую многобайтную последовательность
+// в конце байт. Честный U+FFFD (три байта) не трогается: битым хвостом считается
+// только одинокий некодируемый байт.
+func trimBrokenRuneTail(b []byte) []byte {
+	for len(b) > 0 {
+		r, size := utf8.DecodeLastRune(b)
+		if r != utf8.RuneError || size != 1 {
+			return b
+		}
+		b = b[:len(b)-1]
+	}
+	return b
+}
+
+// truncateMarked — обрезка до limit рун по границе руны с честным маркером
+// обрезки в конце (блок 18.9).
+func truncateMarked(s string, limit int) string {
+	r := []rune(s)
+	if len(r) <= limit {
+		return s
+	}
+	return string(r[:limit]) + truncationMarker
 }
 
 var (

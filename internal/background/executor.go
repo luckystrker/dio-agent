@@ -488,13 +488,20 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 }
 
 // createInitiativeTurn создаёт строку хода инициативы (turn_started придёт из
-// журнала; статус поднимет CAS применения §12.1).
+// журнала; статус поднимет CAS применения §12.1) и сразу связывает намерение с
+// ходом: до применения ход живёт только в чекпоинте задачи, а отмена/истечение
+// намерения находят его по related_turn_id и помечают skipped (блок 18.7).
 func (s *Scheduler) createInitiativeTurn(ctx context.Context, it Intention) (int64, error) {
 	var turnID int64
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO turns (chat_id) VALUES ($1) RETURNING id`, it.TargetChatID).Scan(&turnID)
 	if err != nil {
 		return 0, fmt.Errorf("фон: ход инициативы %d не создан: %w", it.ID, err)
+	}
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE intentions SET related_turn_id = $2, updated_at = now() WHERE id = $1`,
+		it.ID, turnID); err != nil {
+		return 0, fmt.Errorf("фон: намерение %d не связано с ходом %d: %w", it.ID, turnID, err)
 	}
 	return turnID, nil
 }

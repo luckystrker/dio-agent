@@ -117,10 +117,12 @@ type Scheduler struct {
 	lastBudgetWarn time.Time // варн об исчерпании бюджета — не чаще раза в сутки
 	// lastReserveSweep — прошлая сверка застрявших резервов (§16): раз в сутки.
 	lastReserveSweep time.Time
-	mu               sync.Mutex
-	lastPending      int
-	growthStreak     int
-	growthWarned     bool
+	// lastRetentionSweep — прошлая чистка ретенции (блок 18.6): раз в сутки.
+	lastRetentionSweep time.Time
+	mu                 sync.Mutex
+	lastPending        int
+	growthStreak       int
+	growthWarned       bool
 }
 
 // New строит планировщик.
@@ -240,9 +242,19 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		s.logInfo("фон: отменено просроченных намерений: %d (§14.1 expiresAt)", expired)
 	}
 
+	// Страховка ходов-сирот (блок 18.7): created-ходы без событий терминальных
+	// намерений → skipped; тоже не модельная работа.
+	if err := s.skipOrphanInitiativeTurns(ctx); err != nil {
+		return err
+	}
+
 	// Суточная сверка застрявших резервов (§16): тоже не модельная работа —
 	// выполняется и при отложенном остальном фоне.
 	s.sweepStaleReserves(ctx)
+
+	// Суточная чистка ретенции (блок 18.6): не модельная работа — выполняется
+	// и при отложенном остальном фоне, и без настроенной модели.
+	s.sweepRetention(ctx)
 
 	// §5.2: при прямом обращении фон не запускается — следующий фоновый шаг
 	// откладывается; ingest и доставка продолжают свою работу.
