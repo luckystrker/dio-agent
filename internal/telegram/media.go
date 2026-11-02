@@ -23,20 +23,26 @@ const MaxImagesPerTurn = 3
 
 // PhotoFileIDFromUpdate — file_id крупнейшего PhotoSize из raw_update
 // (по площади; Telegram отдаёт размеры по возрастанию). Пусто — фото нет.
+// Фото может быть в самом сообщении или в цитируемом reply_to_message:
+// normalize пишет «[в ответ на X: (фото)]», и без этого картинка не доходила
+// до модели (bug 2026-11-02). Собственное фото сообщения приоритетнее.
 func PhotoFileIDFromUpdate(raw []byte) string {
 	var shape struct {
-		Message           *struct{ Photo []photoSizeJSON } `json:"message"`
-		EditedMessage     *struct{ Photo []photoSizeJSON } `json:"edited_message"`
-		ChannelPost       *struct{ Photo []photoSizeJSON } `json:"channel_post"`
-		EditedChannelPost *struct{ Photo []photoSizeJSON } `json:"edited_channel_post"`
+		Message           *messagePhotoJSON `json:"message"`
+		EditedMessage     *messagePhotoJSON `json:"edited_message"`
+		ChannelPost       *messagePhotoJSON `json:"channel_post"`
+		EditedChannelPost *messagePhotoJSON `json:"edited_channel_post"`
 	}
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		return ""
 	}
 	var photos []photoSizeJSON
-	for _, m := range []*struct{ Photo []photoSizeJSON }{shape.Message, shape.EditedMessage, shape.ChannelPost, shape.EditedChannelPost} {
-		if m != nil && len(m.Photo) > 0 {
-			photos = m.Photo
+	for _, m := range []*messagePhotoJSON{shape.Message, shape.EditedMessage, shape.ChannelPost, shape.EditedChannelPost} {
+		if m == nil {
+			continue
+		}
+		photos = m.photoSizes()
+		if len(photos) > 0 {
 			break
 		}
 	}
@@ -52,6 +58,24 @@ func PhotoFileIDFromUpdate(raw []byte) string {
 		}
 	}
 	return best
+}
+
+// messagePhotoJSON — минимальная форма сообщения для поиска фото: своё .photo
+// и фото цитируемого reply_to_message.
+type messagePhotoJSON struct {
+	Photo          []photoSizeJSON   `json:"photo"`
+	ReplyToMessage *messagePhotoJSON `json:"reply_to_message"`
+}
+
+// photoSizes — фото сообщения; собственное приоритетнее цитируемого.
+func (m *messagePhotoJSON) photoSizes() []photoSizeJSON {
+	if len(m.Photo) > 0 {
+		return m.Photo
+	}
+	if m.ReplyToMessage != nil {
+		return m.ReplyToMessage.Photo
+	}
+	return nil
 }
 
 type photoSizeJSON struct {

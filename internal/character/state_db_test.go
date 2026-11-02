@@ -689,6 +689,44 @@ func TestTurnToolLimitStopCrane(t *testing.T) {
 	}
 }
 
+// TestTurnToolLimitStopCraneDirectReacts — прямой ход на стоп-кране отдаёт
+// видимую реакцию «🤔» (bug 2026-11-02): раньше молчаливый ignore терял вопрос.
+// Reaction попадает в outbox как отдельный пузырь, сообщений нет.
+func TestTurnToolLimitStopCraneDirectReacts(t *testing.T) {
+	f, ctx := newFixture(t)
+	f.runner.ToolCallsLimit = 1
+	turnID := int64(216)
+	f.seedTurn(t, ctx, turnID, "ответь на прямой вопрос")
+
+	script := f.withModel(
+		toolRoundResp("c1", "пластинки"),
+		toolRoundResp("c2", "ещё"),
+		toolRoundResp("c3", "и ещё"),
+		toolRoundResp("c4", "снова"),
+	)
+
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID, Direct: true,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "ответь на прямой вопрос"}}})
+	if err != nil {
+		t.Fatalf("прямой ход со стоп-краном упал: %v", err)
+	}
+	if out.Skipped || !out.Apply.Applied {
+		t.Fatalf("ход не применился: %+v", out)
+	}
+	if calls := len(script.Calls()); calls != 4 {
+		t.Fatalf("модельных вызовов %d, хочу 4", calls)
+	}
+	var kind, reaction string
+	if err := f.pool.QueryRow(ctx,
+		`SELECT payload->>'kind', payload->>'reaction' FROM delivery_outbox WHERE turn_id = $1`,
+		turnID).Scan(&kind, &reaction); err != nil {
+		t.Fatalf("reaction не в outbox: %v", err)
+	}
+	if kind != "reaction" || reaction != "🤔" {
+		t.Fatalf("стоп-кран прямого хода: kind=%q reaction=%q, хочу reaction/🤔", kind, reaction)
+	}
+}
+
 // TestTurnToolLimitStopCraneBatch — стоп-кран срабатывает и внутри одной пачки
 // вызовов (16.5): упорствующая модель может запросить несколько инструментов
 // одним ответом; когда третий подряд отказ лимита приходится на вызов из пачки,

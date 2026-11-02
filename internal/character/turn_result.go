@@ -200,6 +200,9 @@ func (r TurnResult) Validate() error {
 	if r.Reaction != "" && runeLen(r.Reaction) > maxReactionLen {
 		return fmt.Errorf("turnresult: reaction до %d символов", maxReactionLen)
 	}
+	if r.Reaction != "" && !validReaction(r.Reaction) {
+		return fmt.Errorf("turnresult: reaction %q не входит в ReactionTypeEmoji Telegram", r.Reaction)
+	}
 	if len(r.Intentions) > maxIntentions {
 		return fmt.Errorf("turnresult: не более %d предложений намерений, получено %d", maxIntentions, len(r.Intentions))
 	}
@@ -289,6 +292,19 @@ func stripInertContradictions(r TurnResult) TurnResult {
 	}
 	if r.Decision != DecisionReact && r.Decision != DecisionAnswer {
 		r.Reaction = ""
+	} else if r.Reaction != "" {
+		switch {
+		case validReaction(r.Reaction):
+			// Каноническая форма: ❤️ → ❤ (Telegram принимает обе, но в outbox
+			// и журнал пишем документированную).
+			r.Reaction = normalizeReaction(r.Reaction)
+		case r.Decision == DecisionAnswer:
+			// При answer реакция — необязательное дополнение: мусор тихо
+			// обнуляется, ход живёт (bug 2026-11-02: ": " ронял доставку).
+			r.Reaction = ""
+		}
+		// При react недопустимую реакцию оставляем Validate: это смысл хода,
+		// ошибка ведёт в repair-retry, а не в молчаливую отправку.
 	}
 	for i := range r.Memory {
 		if r.Memory[i].Kind != "claim" {

@@ -244,6 +244,8 @@ func (m *TypingMiddleware) OnTurn(next middleware.TurnFunc, ev *events.ModelRequ
 // инструмента (ToolResult с Final=true), который executor ago обращает в
 // ModelResponse с ResponseForce — агентский цикл завершается без нового
 // модельного вызова (живой смоук: серия отказов = серия платных вызовов).
+// На прямом ходе тело крана — react «🤔», на непрямом/фоновом — ignore
+// (bug 2026-11-02: молчаливый ignore терял прямой вопрос).
 type ToolLimitMiddleware struct {
 	middleware.Base
 	limit  int
@@ -254,6 +256,14 @@ type ToolLimitMiddleware struct {
 	// идущих отказов лимита (обращение в лимите серию обнуляет).
 	seen    int
 	rejects int
+	// onExhausted — колбэк харнесса на первый отказ лимита: он выключает
+	// инструменты на конфиге хода, чтобы СЛЕДУЮЩИЙ вызов модели шёл без них.
+	onExhausted func()
+	// exhausted — колбэк уже позвали (ровно один раз за ход).
+	exhausted bool
+	// direct — прямой ход (§5.2 приоритет 1): стоп-кран отдаёт видимую
+	// реакцию вместо молчаливого ignore (bug 2026-11-02).
+	direct bool
 }
 
 // stopCraneRejects — сколько подряд отказов лимита замыкают ход принудительно.
@@ -267,29 +277,66 @@ func NewToolLimitMiddleware(limit int, logger *log.Logger) *ToolLimitMiddleware 
 	return &ToolLimitMiddleware{limit: limit, logger: logger}
 }
 
+// SetOnExhausted подписывает харнесс на первый отказ лимита (выключение
+// инструментов на конфиге хода). Вызывается до запуска агента.
+func (m *ToolLimitMiddleware) SetOnExhausted(fn func()) {
+	m.mu.Lock()
+	m.onExhausted = fn
+	m.mu.Unlock()
+}
+
+// SetDirect отмечает прямой ход: стоп-кран ответит видимой реакцией.
+func (m *ToolLimitMiddleware) SetDirect(direct bool) {
+	m.mu.Lock()
+	m.direct = direct
+	m.mu.Unlock()
+}
+
 // OnToolExecution считает обращения и гасит лишние.
 func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
 	m.mu.Lock()
 	m.seen++
 	over := m.limit > 0 && m.seen > m.limit
+	firstReject := false
 	if over {
 		m.rejects++
+		if !m.exhausted {
+			m.exhausted = true
+			firstReject = true
+		}
 	} else {
 		m.rejects = 0
 	}
 	crane := over && m.rejects >= stopCraneRejects
+	direct := m.direct
+	onExhausted := m.onExhausted
 	m.mu.Unlock()
+
+	// Первый отказ: харнесс выключает инструменты — следующий модельный вызов
+	// получит пустой opts.Tools и обязан выдать финальный TurnResult.
+	if firstReject && onExhausted != nil {
+		onExhausted()
+	}
 
 	if crane {
 		m.logger.Printf("стоп-кран: %d подряд отказов лимита обращений (%d) — ход завершается принудительно", m.rejects, m.limit)
-		// Финальный результат с телом валидного TurnResult (ignore): цикл
-		// инструментов закрывается ResponseForce без repair-вызова модели,
-		// ход применяется молча. Тело собирается из того же контракта §11.2,
-		// а не строкой — расхождение со схемой исключено.
-		body, err := json.Marshal(TurnResult{
+		// Финальный результат с телом валидного TurnResult: цикл инструментов
+		// закрывается ResponseForce без repair-вызова модели. На прямом ходе
+		// (2026-11-02) — decision=react с «🤔»: видимый сигнал вместо молчания
+		// (сгенерировать текст без модели нельзя, а ошибка генерации зациклила
+		// бы повторы); на непрямом/фоновом — ignore, как раньше.
+		result := TurnResult{
 			Decision: DecisionIgnore,
 			Reason:   fmt.Sprintf("стоп-кран: %d подряд отказа лимита обращений к инструментам — ход завершён без ответа модели", stopCraneRejects),
-		})
+		}
+		if direct {
+			result = TurnResult{
+				Decision: DecisionReact,
+				Reaction: "🤔",
+				Reason:   fmt.Sprintf("стоп-кран: %d подряд отказа лимита обращений к инструментам — прямой ход завершён видимой реакцией", stopCraneRejects),
+			}
+		}
+		body, err := json.Marshal(result)
 		if err != nil {
 			// Недостижимо (плоская структура), но финал не имеет права упасть.
 			m.logger.Printf("стоп-кран: результат не собран: %v", err)

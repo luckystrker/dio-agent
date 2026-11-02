@@ -321,6 +321,49 @@ func TestToolThroughAgoMachinery(t *testing.T) {
 	})
 }
 
+// TestToolSearchNewItemsHint — поиск по памяти даёт модели сигнал остановки
+// (bug 2026-11-02): первый поиск в ходе отмечает записи как новые, повторный
+// поиск тех же записей возвращает new_items=0 и hint «не ищи дальше».
+func TestToolSearchNewItemsHint(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts := newMemoryFixture(t, ctx, pool)
+	state := NewSearchState()
+
+	raw, err := ts.searchMemoryWithSeen(ctx, scopeA, "шкатулка", nil, state)
+	if err != nil {
+		t.Fatalf("первый поиск: %v", err)
+	}
+	var first searchResultJSON
+	if err := json.Unmarshal([]byte(raw), &first); err != nil {
+		t.Fatalf("первая выдача не разбирается: %v: %s", err, raw)
+	}
+	if len(first.Items) == 0 {
+		t.Fatalf("первый поиск ничего не нашёл: %s", raw)
+	}
+	if first.NewItems != len(first.Items) {
+		t.Fatalf("new_items первого поиска = %d, хочу %d (все новые)", first.NewItems, len(first.Items))
+	}
+	if first.Hint != "" {
+		t.Fatalf("у первого поиска не должно быть hint: %q", first.Hint)
+	}
+
+	raw, err = ts.searchMemoryWithSeen(ctx, scopeA, "шкатулка", nil, state)
+	if err != nil {
+		t.Fatalf("повторный поиск: %v", err)
+	}
+	var second searchResultJSON
+	if err := json.Unmarshal([]byte(raw), &second); err != nil {
+		t.Fatalf("повторная выдача не разбирается: %v: %s", err, raw)
+	}
+	if second.NewItems != 0 {
+		t.Fatalf("повторный поиск: new_items = %d, хочу 0", second.NewItems)
+	}
+	if !strings.Contains(second.Hint, "не ищи дальше") {
+		t.Fatalf("повторный поиск без сигнала остановки: %q", second.Hint)
+	}
+}
+
 // §10.4 п.5–6 в memory_search: записи цитируют источники; фактор
 // «разнообразие оснований» применяется до среза limit — серия записей
 // одного источника не забирает всю выдачу.

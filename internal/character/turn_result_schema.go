@@ -58,7 +58,9 @@ func TurnResultJSONSchema() map[string]any {
 			},
 			"reaction": map[string]any{
 				"type": "string", "minLength": 1, "maxLength": maxReactionLen,
-				"description": "Эмодзи-реакция на последнее сообщение: при decision=react — сама реакция, при decision=answer — необязательное дополнение к тексту",
+				"enum": reactionEnum(),
+				"description": "Эмодзи-реакция на последнее сообщение: при decision=react — сама реакция, при decision=answer — необязательное дополнение к тексту. " +
+					"Только эмодзи из списка ReactionTypeEmoji Telegram — не текст и не произвольный символ.",
 			},
 			"intentions": map[string]any{
 				"type":     "array",

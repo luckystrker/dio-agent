@@ -144,6 +144,22 @@ func TestToolRejectsMissingOrInvalidAudience(t *testing.T) {
 	}
 }
 
+// TestSearchStateCountsOnlyNewIDs — состояние хода помнит уже выданные id:
+// повторный поиск тех же записей даёт new_items=0 (модель получает сигнал
+// «ничего нового, не перефразируй»), смешанная выдача считает только новые.
+func TestSearchStateCountsOnlyNewIDs(t *testing.T) {
+	st := NewSearchState()
+	if got := st.MarkNew([]string{"1", "2"}); got != 2 {
+		t.Fatalf("первый поиск: new = %d, хочу 2", got)
+	}
+	if got := st.MarkNew([]string{"1", "2"}); got != 0 {
+		t.Fatalf("повтор тех же id: new = %d, хочу 0", got)
+	}
+	if got := st.MarkNew([]string{"2", "3", "3"}); got != 1 {
+		t.Fatalf("смешанная выдача: new = %d, хочу 1 (id 3 один раз)", got)
+	}
+}
+
 func TestSearchMemoryValidatesArgs(t *testing.T) {
 	ts := newTestToolset(t, nil)
 

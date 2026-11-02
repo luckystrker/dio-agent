@@ -18,8 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
+	agocontext "github.com/luckystrker/ago/context"
 	agotools "github.com/luckystrker/ago/tools"
 )
 
@@ -34,7 +36,48 @@ const (
 	// инструментов; отсутствующая зависимость честно валит вызов —
 	// память без аудитории не выдаётся (§9.2).
 	ScopeDependency = "memory_scope"
+
+	// SearchStateDependency — ключ зависимости хода: какие записи
+	// memory_search уже выдал В ЭТОМ ХОДЕ (bug 2026-11-02). Инструмент
+	// регистрируется на процесс, поэтому состояние живёт в зависимостях
+	// хода, а не на Toolset.
+	SearchStateDependency = "memory_search_seen"
 )
+
+// SearchState — множество id записей, уже выданных memory_search в одном ходе.
+// Состояние создаётся на ход и кладётся в зависимости ago; мьютекс нужен,
+// потому что пачка параллельных tool_call'ов исполняется конкурентно.
+type SearchState struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// NewSearchState создаёт пустое состояние поиска на ход.
+func NewSearchState() *SearchState {
+	return &SearchState{seen: map[string]struct{}{}}
+}
+
+// MarkNew отмечает id и возвращает, сколько из них не выдавались ранее в ходе
+// (дубли внутри одного вызова считаются один раз).
+func (s *SearchState) MarkNew(ids []string) int {
+	if s == nil {
+		return len(ids)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = map[string]struct{}{}
+	}
+	fresh := 0
+	for _, id := range ids {
+		if _, ok := s.seen[id]; ok {
+			continue
+		}
+		s.seen[id] = struct{}{}
+		fresh++
+	}
+	return fresh
+}
 
 // Лимиты выдачи инструментов.
 const (
@@ -120,13 +163,20 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 	}
 
 	search, err := agotools.NewFunctionTool(ToolSearch,
-		"Полнотекстовый и семантический поиск по памяти: факты, события, мнения. На прямой вопрос о памяти вызывается первым.",
+		"Полнотекстовый и семантический поиск по памяти: факты, события, мнения. На прямой вопрос о памяти вызывается первым. "+
+			"Обычно хватает 1–2 поисков. Пустой результат или те же записи — значит, этого в памяти нет; не перефразируй, отвечай.",
 		func(args struct {
 			Query string `json:"query" agschema:"description=Поисковый запрос обычными словами"`
 			Limit *int   `json:"limit,omitempty" agschema:"description=Сколько записей вернуть (по умолчанию 10 максимум 50)"`
 			Scope string `aginject:"memory_scope"`
-		}) (string, error) {
-			return t.searchMemory(context.Background(), args.Scope, args.Query, args.Limit)
+		}, cx *agocontext.Context) (string, error) {
+			var seen *SearchState
+			if cx != nil {
+				if v, ok := cx.Dependency(SearchStateDependency); ok {
+					seen, _ = v.(*SearchState)
+				}
+			}
+			return t.searchMemoryWithSeen(context.Background(), args.Scope, args.Query, args.Limit, seen)
 		}, agotools.WithTimeout(defaultToolTimeout))
 	if err != nil {
 		return nil, fmt.Errorf("memory: инструмент %s: %w", ToolSearch, err)
@@ -273,9 +323,15 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 	})
 }
 
-// searchMemory — реализация memory_search: full-text всегда, семантика при
-// настроенном векторизаторе; о выключенной семантике ответ сообщает честно.
+// searchMemory — реализация memory_search без состояния хода (юнит-вызовы и
+// старые тесты): каждый вызов считает все записи новыми.
 func (t *Toolset) searchMemory(ctx context.Context, audience, query string, limit *int) (string, error) {
+	return t.searchMemoryWithSeen(ctx, audience, query, limit, nil)
+}
+
+// searchMemoryWithSeen — memory_search с состоянием хода: new_items показывает,
+// сколько id не выдавались ранее в этом ходе, а при zero — hint остановиться.
+func (t *Toolset) searchMemoryWithSeen(ctx context.Context, audience, query string, limit *int, seen *SearchState) (string, error) {
 	if !IsValidScope(audience) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidScope, audience)
 	}
@@ -311,8 +367,23 @@ func (t *Toolset) searchMemory(ctx context.Context, audience, query string, limi
 	if len(kept) < len(items) {
 		shown = fmt.Sprintf("показано %d из %d", len(kept), len(items))
 	}
-	return marshalJSON(searchResultJSON{Items: kept, Shown: shown, Semantic: semanticUsed})
+	ids := make([]string, 0, len(kept))
+	for i := range kept {
+		ids = append(ids, kept[i].ID)
+	}
+	newItems := len(ids)
+	if seen != nil {
+		newItems = seen.MarkNew(ids)
+	}
+	out := searchResultJSON{Items: kept, Shown: shown, Semantic: semanticUsed, NewItems: newItems}
+	if newItems == 0 {
+		out.Hint = searchNoNewHint
+	}
+	return marshalJSON(out)
 }
+
+// searchNoNewHint — сигнал модели остановить перефразирование поиска.
+const searchNoNewHint = "ничего нового сверх прошлых поисков — не ищи дальше, отвечай"
 
 // --- JSON-формы выдачи модели (имена полей — контракт для модели) ------------
 
@@ -383,6 +454,10 @@ type searchResultJSON struct {
 	// модель знает, что память шире показанного.
 	Shown    string `json:"shown,omitempty"`
 	Semantic bool   `json:"semantic"`
+	// NewItems — сколько id выдачи не встречались в прошлых поисках этого хода.
+	NewItems int `json:"new_items"`
+	// Hint — при new_items=0: дальше искать бессмысленно, пора отвечать.
+	Hint string `json:"hint,omitempty"`
 }
 
 // capSearchItems держит суммарный объём текстов выдачи в бюджете (рунах,

@@ -95,6 +95,46 @@ func TestToolLimitStopCraneThreshold(t *testing.T) {
 	}
 }
 
+// TestToolLimitStopCraneDirectReacts — на прямом ходе стоп-кран отдаёт
+// decision=react с «🤔» вместо ignore (bug 2026-11-02): молчание выглядело как
+// потерянный вопрос; видимая реакция — честный сигнал, а текст без модели не
+// сгенерировать (ошибка генерации зациклила бы повторы).
+func TestToolLimitStopCraneDirectReacts(t *testing.T) {
+	m := NewToolLimitMiddleware(1, nil)
+	m.SetDirect(true)
+	executed := 0
+	next := stubToolExec(&executed)
+
+	call := func(id string) events.Event {
+		t.Helper()
+		out, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: id, Name: "memory_search"}, nil)
+		if err != nil {
+			t.Fatalf("вызов %s: OnToolExecution ошибся: %v", id, err)
+		}
+		return out
+	}
+
+	call("c1") // в лимите
+	call("c2") // отказ 1
+	call("c3") // отказ 2
+	ev := call("c4")
+	tr, ok := ev.(*events.ToolResultEvent)
+	if !ok || !tr.Result.Final {
+		t.Fatalf("стоп-кран не сработал на прямом ходе: %T", ev)
+	}
+	part, ok := events.AsValue(tr.Result.Parts[0]).(events.TextInput)
+	if !ok {
+		t.Fatalf("part стоп-крана не текст: %T", tr.Result.Parts[0])
+	}
+	res, err := ParseTurnResult([]byte(part.Content))
+	if err != nil {
+		t.Fatalf("тело стоп-крана не прошло разбор: %v (%s)", err, part.Content)
+	}
+	if res.Decision != DecisionReact || res.Reaction != "🤔" {
+		t.Fatalf("стоп-кран на прямом ходе = %+v, хочу react/🤔", res)
+	}
+}
+
 // TestToolLimitZeroDisablesCrane — лимит 0 = не ограничивать (§11.2): сколько бы
 // вызовов ни было, все уходят в исполнитель, отказов и крана нет.
 func TestToolLimitZeroDisablesCrane(t *testing.T) {

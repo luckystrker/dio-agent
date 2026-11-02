@@ -51,6 +51,36 @@ func TestCollectPhotosCapsAndTolerates(t *testing.T) {
 	}
 }
 
+// TestCollectPhotosFromReply — фото цитируемого сообщения коллекционируется:
+// сообщение с текстом и без собственного .photo не должно оставлять модель
+// без картинки (bug 2026-11-02).
+func TestCollectPhotosFromReply(t *testing.T) {
+	batch := []BatchEvent{{
+		EventID: 1,
+		Text:    "картинку то видишь?",
+		Raw: json.RawMessage(`{"message":{"text":"картинку то видишь?",
+			"reply_to_message":{"photo":[
+				{"file_id":"a","width":40,"height":40},
+				{"file_id":"b","width":570,"height":570}
+			]}}}`),
+	}}
+	var gotID string
+	fetcher := &recordingPhotoFetcher{record: func(id string) { gotID = id }}
+	photos := CollectPhotos(context.Background(), batch, fetcher, 3)
+	if len(photos) != 1 || gotID != "b" {
+		t.Fatalf("фото из reply: собрано %d, file_id %q; хочу 1/b", len(photos), gotID)
+	}
+}
+
+type recordingPhotoFetcher struct {
+	record func(string)
+}
+
+func (f *recordingPhotoFetcher) FetchPhotoByFileID(_ context.Context, fileID string) (*telegram.PhotoMedia, error) {
+	f.record(fileID)
+	return &telegram.PhotoMedia{Mime: "image/jpeg", Base64: "eHk="}, nil
+}
+
 // TestAskMsgs — части Ask: текст + BinaryInput-фото (ago рендерит image_url).
 func TestAskMsgs(t *testing.T) {
 	msgs := askMsgs("смотри что снял", []Photo{

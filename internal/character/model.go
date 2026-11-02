@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/luckystrker/ago/config"
@@ -32,7 +33,8 @@ import (
 // вызовов, поэтому forced tool_choice встаёт только на самый первый вызов.
 type ChatConfig struct {
 	params config.CompatParams
-	// inner — готовый клиент (тесты); если задан, Create отдаёт его как есть.
+	// inner — готовый клиент (тесты); Create оборачивает его chatClient'ом,
+	// чтобы очистка opts.Tools при исчерпанном лимите была видна и здесь.
 	inner config.LLMClient
 	// ForcedTool — имя инструмента, чей вызов провайдер требует первым
 	// (tool_choice). Пусто — обычный режим, модель решает сама.
@@ -44,6 +46,12 @@ type ChatConfig struct {
 
 	mu    sync.Mutex
 	calls int
+	// toolsOff — лимит обращений к инструментам исчерпан (bug 2026-11-02):
+	// следующий модельный вызов уходит без tools и без forced tool_choice,
+	// чтобы модель выдала финальный TurnResult. Флаг ставит middleware хода
+	// через колбэк; atomic — модельные вызовы и middleware живут в разных
+	// горутинах агентского цикла.
+	toolsOff atomic.Bool
 }
 
 // compile-time проверка контрактов провайдера.
@@ -68,8 +76,11 @@ func NewChatConfig(endpoint, apiKey, model string, maxOutputTokens int64, timeou
 }
 
 // NewChatConfigWithClient оборачивает готовый LLMClient (скриптовый дубль
-// agotesting в тестах, чужой клиент в экспериментах). Скриптовый дубль провода
-// не видит, поэтому механика tool_choice проверяется тестом chatClient напрямую.
+// agotesting в тестах, чужой клиент в экспериментах). Create всё равно отдаёт
+// chatClient-обёртку: флаг «инструменты отключены» должен наблюдаться и на
+// тестовых клиентах (opts.Tools очищается до делегирования), а не только на
+// реальном проводе. Скриптовый дубль провода не видит, поэтому механика
+// tool_choice проверяется тестом chatClient напрямую.
 func NewChatConfigWithClient(client config.LLMClient) *ChatConfig {
 	return &ChatConfig{inner: client}
 }
@@ -84,11 +95,15 @@ func (c *ChatConfig) Model() string { return c.params.Model }
 // на ход (ago создаёт клиента на каждый запуск, включая repair) — все они
 // консультируют один счётчик конфига.
 func (c *ChatConfig) Create() (config.LLMClient, error) {
-	if c.inner != nil {
-		return c.inner, nil
-	}
-	return &chatClient{cfg: c, params: c.params}, nil
+	return &chatClient{cfg: c, params: c.params, inner: c.inner}, nil
 }
+
+// DisableTools — харнесс исчерпал лимит обращений к инструментам за ход:
+// следующие модельные вызовы идут без инструментов (потокобезопасно).
+func (c *ChatConfig) DisableTools() { c.toolsOff.Store(true) }
+
+// ToolsDisabled — отключены ли инструменты на этом конфиге хода.
+func (c *ChatConfig) ToolsDisabled() bool { return c.toolsOff.Load() }
 
 // nextCall отмечает очередной модельный вызов хода и отвечает, должен ли он
 // быть принудительным (tool_choice): только самый первый вызов при заданном
@@ -130,21 +145,36 @@ func (c *ChatConfig) Clone(overrides map[string]any) (config.ModelConfig, error)
 
 // chatClient — клиент одного запуска агента: решение о tool_choice принимает
 // общий счётчик конфига хода (см. nextCall), поэтому принуждение срабатывает
-// один раз за ход независимо от числа запусков.
+// один раз за ход независимо от числа запусков. inner — готовый клиент теста:
+// ему передаются те же (возможно, очищенные) CallOptions.
 type chatClient struct {
 	cfg    *ChatConfig
 	params config.CompatParams
+	inner  config.LLMClient
 }
 
 // Call выполняет один модельный вызов (LLMClient).
 func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *agocontext.Context, opts config.CallOptions) (*events.ModelResponse, error) {
+	// Лимит инструментов исчерпан: провайдер-независимо убираем схемы и НЕ
+	// ставим forced tool_choice (bug 2026-11-02) — модель обязана выдать
+	// финальный TurnResult, а не звать инструменты дальше.
+	toolsOff := c.cfg.ToolsDisabled()
+	if toolsOff {
+		opts.Tools = nil
+	}
+	if c.inner != nil {
+		return c.inner.Call(ctx, messages, conv, opts)
+	}
+
 	params := c.params
-	if force, tool := c.cfg.nextCall(); force {
-		params.Extra = map[string]any{
-			"tool_choice": map[string]any{
-				"type":     "function",
-				"function": map[string]any{"name": tool},
-			},
+	if !toolsOff {
+		if force, tool := c.cfg.nextCall(); force {
+			params.Extra = map[string]any{
+				"tool_choice": map[string]any{
+					"type":     "function",
+					"function": map[string]any{"name": tool},
+				},
+			}
 		}
 	}
 	if c.cfg.SessionID != "" {

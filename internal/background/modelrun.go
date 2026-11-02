@@ -120,6 +120,17 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 		"- ignore — без сообщений; результаты инструментов памяти — контекст, а не отправляемый текст.",
 	}
 
+	// Clone возвращает *character.ChatConfig; на нём выключаем инструменты,
+	// когда лимит исчерпан (bug 2026-11-02) — следующий вызов идёт без tools.
+	toolMW := character.NewToolLimitMiddleware(s.toolLimit, s.logger)
+	chatCfg, ok := cfg.(*character.ChatConfig)
+	if !ok {
+		// s.model — *character.ChatConfig, его Clone всегда возвращает тот же
+		// тип; другая реализация сломала бы выключение инструментов молча.
+		return turnModelRun{}, fmt.Errorf("фон: конфиг модели не *character.ChatConfig: %T", cfg)
+	}
+	toolMW.SetOnExhausted(chatCfg.DisableTools)
+
 	counting := &usageCounter{}
 	opts := []agent.Option{
 		agent.WithConfig(cfg),
@@ -135,9 +146,12 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 					runtime.BudgetPoolBackground, s.logger)
 			},
 			func() agomiddleware.Middleware { return counting },
-			func() agomiddleware.Middleware { return character.NewToolLimitMiddleware(s.toolLimit, s.logger) },
+			func() agomiddleware.Middleware { return toolMW },
 		),
-		agent.WithDependencies(map[string]any{memory.ScopeDependency: scopeID}),
+		agent.WithDependencies(map[string]any{
+			memory.ScopeDependency:       scopeID,
+			memory.SearchStateDependency: memory.NewSearchState(),
+		}),
 	}
 	if len(tools) > 0 {
 		opts = append(opts, agent.WithTools(tools...))

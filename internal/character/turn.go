@@ -266,6 +266,11 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// лимитом вызовы тоже были зафиксированы; typing §13.3 — на весь ход.
 	budgetMW := NewBudgetMiddleware(r.Budget, operation, r.DailyCallsLimit, r.Logger)
 	toolMW := NewToolLimitMiddleware(r.ToolCallsLimit, r.Logger)
+	// Исчерпание лимита отключает инструменты на конфиге хода: следующий
+	// модельный вызов идёт без tools и без forced tool_choice (bug 2026-11-02).
+	toolMW.SetOnExhausted(cfg.DisableTools)
+	// Прямой ход на стоп-кране отвечает видимой реакцией, а не молчанием.
+	toolMW.SetDirect(in.Direct)
 	mws := []agomiddleware.Factory{func() agomiddleware.Middleware { return budgetMW }}
 	if r.Memory != nil {
 		mws = append(mws,
@@ -278,7 +283,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	}
 	opts = append(opts, agent.WithMiddleware(mws...))
 	// DI аудитории хода: инструменты памяти фильтруют приватность до выдачи (§9.2).
-	opts = append(opts, agent.WithDependencies(map[string]any{memory.ScopeDependency: in.ScopeID}))
+	// Состояние поиска памяти — своё на ход: new_items/hint считают только
+	// записи, уже выданные в этом ходе (bug 2026-11-02).
+	opts = append(opts, agent.WithDependencies(map[string]any{
+		memory.ScopeDependency:       in.ScopeID,
+		memory.SearchStateDependency: memory.NewSearchState(),
+	}))
 
 	a := agent.New("dio", bctx.System, opts...)
 	// Части Ask: текст пачки + фото BinaryInput (находка приёмки Р: фото

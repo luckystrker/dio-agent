@@ -141,6 +141,42 @@ func TestChatConfigForceOnlyOnceAcrossRuns(t *testing.T) {
 	}
 }
 
+// TestChatClientDisabledToolsDropSchemasAndForce — после исчерпания лимита
+// инструментов вызов уходит провайдеру без tools и без tool_choice (bug
+// 2026-11-02): провайдер-независимое требование, чтобы модель отвечала
+// финальным TurnResult, а не звала инструменты бесконечно.
+func TestChatClientDisabledToolsDropSchemasAndForce(t *testing.T) {
+	var bodies []map[string]any
+	server := captureServer(t, &bodies)
+
+	tool := testTool(t, "memory_search")
+	schemas, err := tool.Schemas(nil)
+	if err != nil {
+		t.Fatalf("схема инструмента не получена: %v", err)
+	}
+	opts := config.CallOptions{Tools: schemas}
+
+	cfg := NewChatConfig(server.URL, "test-key", "test-model", 100, 0, 0)
+	cfg.ForcedTool = "memory_search"
+	cfg.DisableTools()
+	client, err := cfg.Create()
+	if err != nil {
+		t.Fatalf("клиент не создан: %v", err)
+	}
+	if _, err := client.Call(t.Context(), nil, nil, opts); err != nil {
+		t.Fatalf("вызов упал: %v", err)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("сервер получил %d запросов, хочу 1", len(bodies))
+	}
+	if _, has := bodies[0]["tools"]; has {
+		t.Fatalf("при исчерпанном лимите tools ушли на провод: %v", bodies[0]["tools"])
+	}
+	if _, has := bodies[0]["tool_choice"]; has {
+		t.Fatalf("при исчерпанном лимите остался forced tool_choice: %v", bodies[0]["tool_choice"])
+	}
+}
+
 func TestChatClientNoForceWithoutTool(t *testing.T) {
 	var bodies []map[string]any
 	server := captureServer(t, &bodies)

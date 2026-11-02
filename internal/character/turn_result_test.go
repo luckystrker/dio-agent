@@ -178,11 +178,11 @@ func TestWantForcedTool(t *testing.T) {
 // разрешена»); правило «только при react» из TS-реализации противоречило
 // спеке — вскрыто живым смоуком 2026-10-30.
 func TestTurnResultAnswerWithReaction(t *testing.T) {
-	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["Ага, понятно"],"reaction":"😂"}`))
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["Ага, понятно"],"reaction":"🤣"}`))
 	if err != nil {
 		t.Fatalf("answer с реакцией отвергнут: %v", err)
 	}
-	if r.Decision != DecisionAnswer || r.Reaction != "😂" || len(r.Messages) != 1 {
+	if r.Decision != DecisionAnswer || r.Reaction != "🤣" || len(r.Messages) != 1 {
 		t.Fatalf("поля прочитаны неверно: %+v", r)
 	}
 }
@@ -284,9 +284,66 @@ func TestTurnResultDeferredValidPath(t *testing.T) {
 }
 
 func TestTurnResultReactValidPath(t *testing.T) {
-	raw := `{"decision":"react","reaction":"😂"}`
+	raw := `{"decision":"react","reaction":"🤣"}`
 	if _, err := ParseTurnResult([]byte(raw)); err != nil {
 		t.Fatalf("валидная реакция отвергнута: %v", err)
+	}
+}
+
+// TestTurnResultReactionAllowlist — reaction валидируется allowlist'ом
+// ReactionTypeEmoji Bot API (bug 2026-11-02): мусор «: » не должен доходить до
+// Telegram (400 REACTION_INVALID и навсегда failed доставка).
+func TestTurnResultReactionAllowlist(t *testing.T) {
+	// При answer недопустимая реакция — инертное поле: тихо обнуляется, ход жив.
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["ок"],"reaction":": "}`))
+	if err != nil {
+		t.Fatalf("answer с мусорной реакцией отвергнут целиком: %v", err)
+	}
+	if r.Reaction != "" {
+		t.Fatalf("мусорная реакция при answer должна обнуляться: %q", r.Reaction)
+	}
+
+	// При react реакция — смысл хода: недопустимая — ошибка валидации (repair).
+	if _, err := ParseTurnResult([]byte(`{"decision":"react","reaction":": "}`)); err == nil ||
+		!strings.Contains(err.Error(), "reaction") {
+		t.Fatalf("react с мусорной реакцией не пойман: %v", err)
+	}
+
+	// Валидные эмодзи из списка проходят; ❤️ нормализуется к документированному ❤.
+	r, err = ParseTurnResult([]byte(`{"decision":"react","reaction":"👀"}`))
+	if err != nil || r.Reaction != "👀" {
+		t.Fatalf("👀 отвергнут: %+v %v", r, err)
+	}
+	r, err = ParseTurnResult([]byte(`{"decision":"react","reaction":"❤️"}`))
+	if err != nil || r.Reaction != "❤" {
+		t.Fatalf("❤️ не нормализован к ❤: %+v %v", r, err)
+	}
+	// Тон кожи не входит в ReactionTypeEmoji — ошибка, а не тихая отправка.
+	if _, err := ParseTurnResult([]byte(`{"decision":"react","reaction":"👍🏽"}`)); err == nil {
+		t.Fatal("👍🏽 не должен проходить allowlist")
+	}
+}
+
+// TestTurnResultSchemaReactionEnum — в JSON-схеме reaction — enum допустимых
+// эмодзи (включая оба варианта ❤/❤️), а не свободная строка.
+func TestTurnResultSchemaReactionEnum(t *testing.T) {
+	props := TurnResultJSONSchema()["properties"].(map[string]any)
+	reaction := props["reaction"].(map[string]any)
+	enum, ok := reaction["enum"].([]string)
+	if !ok || len(enum) == 0 {
+		t.Fatalf("в схеме reaction нет enum: %T %v", reaction["enum"], reaction["enum"])
+	}
+	allowed := map[string]bool{}
+	for _, e := range enum {
+		allowed[e] = true
+	}
+	for _, want := range []string{"👀", "❤", "❤️"} {
+		if !allowed[want] {
+			t.Errorf("enum реакции не содержит %q", want)
+		}
+	}
+	if allowed[":"] || allowed[": "] {
+		t.Error("enum реакции содержит мусор \": \"")
 	}
 }
 

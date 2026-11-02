@@ -662,7 +662,7 @@ func TestTurnAnswerWithReaction(t *testing.T) {
 		t.Fatalf("turn не вставлен: %v", err)
 	}
 
-	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["Ха, согласен","Держи реакцию"],"reaction":"😂"}`}})
+	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["Ха, согласен","Держи реакцию"],"reaction":"🤣"}`}})
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
 		Batch: []BatchEvent{{EventID: 1, ActorID: 777, Text: "ну и новость"}}})
 	if err != nil {
@@ -707,8 +707,8 @@ func TestTurnAnswerWithReaction(t *testing.T) {
 		turnID).Scan(&reaction, &target); err != nil {
 		t.Fatalf("реакция не читается: %v", err)
 	}
-	if reaction != "😂" || target != "555" {
-		t.Fatalf("реакция payload: reaction=%q target=%s, хочу 😂/555", reaction, target)
+	if reaction != "🤣" || target != "555" {
+		t.Fatalf("реакция payload: reaction=%q target=%s, хочу 🤣/555", reaction, target)
 	}
 }
 
@@ -729,7 +729,7 @@ func TestTurnReactionTargetMissing(t *testing.T) {
 		t.Fatalf("turn не вставлен: %v", err)
 	}
 
-	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"react","reaction":"😂"}`}})
+	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"react","reaction":"🤣"}`}})
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
 		Batch: []BatchEvent{{EventID: 1, ActorID: 777, Text: "хм"}}})
 	if err != nil {

@@ -26,6 +26,32 @@ func TestPhotoFileIDFromUpdateLargest(t *testing.T) {
 	}
 }
 
+// TestPhotoFileIDFromUpdateReplyToMessage — фото в reply_to_message доходит до
+// модели (bug 2026-11-02): normalize пишет «[в ответ на X: (фото)]», но
+// file_id брался только из собственного .photo сообщения — картинка терялась.
+func TestPhotoFileIDFromUpdateReplyToMessage(t *testing.T) {
+	raw := []byte(`{"message":{"text":"картинку то видишь?","reply_to_message":{"photo":[
+		{"file_id":"a","width":40,"height":40},
+		{"file_id":"b","width":570,"height":570}
+	]}}}`)
+	if got := PhotoFileIDFromUpdate(raw); got != "b" {
+		t.Fatalf("file_id из reply_to_message = %q, хочу b", got)
+	}
+}
+
+// TestPhotoFileIDFromUpdateOwnPhotoBeatsReply — собственное фото сообщения
+// приоритетнее фото цитируемого: модель должна видеть то, что прислали сейчас.
+func TestPhotoFileIDFromUpdateOwnPhotoBeatsReply(t *testing.T) {
+	raw := []byte(`{"message":{
+		"text":"смотри",
+		"photo":[{"file_id":"own","width":20,"height":20}],
+		"reply_to_message":{"photo":[{"file_id":"quoted","width":900,"height":900}]}
+	}}`)
+	if got := PhotoFileIDFromUpdate(raw); got != "own" {
+		t.Fatalf("file_id = %q, хочу собственное фото own", got)
+	}
+}
+
 // TestNormalizePhotoCaption — фото: kind=photo, текст = caption.
 func TestNormalizePhotoCaption(t *testing.T) {
 	raw := []byte(`{"update_id":3,"message":{"message_id":7,"date":1,
