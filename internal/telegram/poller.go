@@ -19,7 +19,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // PollerOptions — настройки polling.
@@ -51,7 +52,7 @@ type OnPendingEvent func(PendingEvent)
 
 // TelegramPoller — цикл getUpdates → ingest → буферы.
 type TelegramPoller struct {
-	pool      *pgxpool.Pool
+	pool      *runtime.Pool
 	api       API
 	onPending OnPendingEvent
 	logger    *log.Logger
@@ -60,7 +61,7 @@ type TelegramPoller struct {
 
 // NewTelegramPoller строит poller. pool — пул PostgreSQL; onPending —
 // добавление события в буфер чата (nil — события только сохраняются).
-func NewTelegramPoller(pool *pgxpool.Pool, api API, onPending OnPendingEvent, logger *log.Logger, opts PollerOptions) *TelegramPoller {
+func NewTelegramPoller(pool *runtime.Pool, api API, onPending OnPendingEvent, logger *log.Logger, opts PollerOptions) *TelegramPoller {
 	if logger == nil {
 		logger = log.New(discardWriter{}, "", 0)
 	}

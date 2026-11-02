@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // telegramStub — заглушка Bot API с записью вызовов sendMessage.
@@ -389,7 +391,7 @@ func TestDeliveryLoopDBErrorBeforeSendRequeues(t *testing.T) {
 	singleCfg.MaxConns = 1
 	singleCfg.MinConns = 0
 	singleCfg.HealthCheckPeriod = time.Hour
-	single, err := pgxpool.NewWithConfig(ctx, singleCfg)
+	single, err := runtime.NewPoolFromConfig(ctx, singleCfg)
 	if err != nil {
 		t.Fatalf("пул доставки не создан: %v", err)
 	}

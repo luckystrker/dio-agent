@@ -24,8 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -75,7 +73,7 @@ type TurnRunner interface {
 
 // Deps — зависимости worker.
 type Deps struct {
-	Pool    *pgxpool.Pool
+	Pool    *runtime.Pool
 	Runner  TurnRunner
 	Journal *character.TurnJournal // терминальный пропуск после исчерпания попыток (§12.1)
 	Logger  *log.Logger
@@ -92,7 +90,7 @@ type claimedTurn struct {
 // Worker — когнитивный цикл. Run — единственная горутина обработки;
 // Wake/Stop безопасны из других горутин.
 type Worker struct {
-	pool    *pgxpool.Pool
+	pool    *runtime.Pool
 	runner  TurnRunner
 	journal *character.TurnJournal
 	logger  *log.Logger

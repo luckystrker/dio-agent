@@ -130,10 +130,10 @@ func (s *stubAPI) pushMention(updateID, chatID int64, actorID int64, actorName, 
 	defer s.mu.Unlock()
 	s.msgID++
 	raw := fmt.Sprintf(
-		`{"update_id":%d,"message":{"message_id":%d,"date":1,"text":%q,`+
+		`{"update_id":%d,"message":{"message_id":%d,"date":%d,"text":%q,`+
 			`"entities":[{"type":"mention","offset":0,"length":4}],`+
 			`"from":{"id":%d,"first_name":%q},"chat":{"id":%d,"type":"group"}}}`,
-		updateID, s.msgID, text, actorID, actorName, chatID)
+		updateID, s.msgID, time.Now().Unix(), text, actorID, actorName, chatID)
 	s.updates = append(s.updates, telegram.Update{UpdateID: updateID, Raw: json.RawMessage(raw)})
 }
 

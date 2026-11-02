@@ -89,10 +89,13 @@ type Config struct {
 	DatabaseURL string
 	LogLevel    LogLevel
 	NodeEnv     NodeEnv
-	Model       *ModelSettings
-	Telegram    *TelegramSettings
-	Embedding   *EmbeddingSettings
-	Web         *WebSettings
+	// DBMaxConns — потолок соединений пула PostgreSQL (DB_MAX_CONNS, 18.5);
+	// LoadConfig всегда заполняет поле (дефолт 8), 0 — незаполненная группа.
+	DBMaxConns int
+	Model      *ModelSettings
+	Telegram   *TelegramSettings
+	Embedding  *EmbeddingSettings
+	Web        *WebSettings
 }
 
 // WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
@@ -137,6 +140,13 @@ func LoadConfig(env Getenv) (Config, error) {
 		return Config{}, err
 	}
 
+	// Пул соединений (18.5): потолок явный, дефолт pgx (max(4, NumCPU)) растёт
+	// с машиной и не контролируется оператором.
+	dbMaxConns, err := positiveInt(env, "DB_MAX_CONNS", DefaultMaxConns)
+	if err != nil {
+		return Config{}, err
+	}
+
 	model, err := parseModelSettings(env)
 	if err != nil {
 		return Config{}, err
@@ -161,6 +171,7 @@ func LoadConfig(env Getenv) (Config, error) {
 		DatabaseURL: databaseURL,
 		LogLevel:    logLevel,
 		NodeEnv:     nodeEnv,
+		DBMaxConns:  dbMaxConns,
 		Model:       model,
 		Telegram:    telegram,
 		Embedding:   embedding,

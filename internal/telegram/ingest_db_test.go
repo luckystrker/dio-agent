@@ -7,7 +7,9 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestIngestInsertsEventAndMovesOffset(t *testing.T) {
@@ -127,6 +129,55 @@ func TestIngestUnparsableUpdateRejected(t *testing.T) {
 	offset, _, err := ReadOffset(ctx, pool)
 	if err != nil || offset != 501 {
 		t.Fatalf("offset не должен измениться ошибкой нормализации: %d (err=%v)", offset, err)
+	}
+}
+
+// TestIngestOccurredAtFromUpdateDate — 18.1: occurred_at = время сообщения
+// (message.date), не время приёма. После простоя накопленная пачка приходила
+// «свежей по часам ingest»: границы эпизодов (4ч/1ч тишины) и проверки «чат
+// ушёл вперёд» считались от времени приёма. Правка (edited_message) — тем же
+// правилом; update без date — fallback now() (DEFAULT колонки).
+func TestIngestOccurredAtFromUpdateDate(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	sentAt := time.Now().Add(-36 * time.Hour).Truncate(time.Second)
+	raw := fmt.Sprintf(`{"update_id":700,"message":{"message_id":1,"date":%d,"from":{"id":42,"first_name":"Коля"},"chat":{"id":42,"type":"private"},"text":"старое сообщение"}}`,
+		sentAt.Unix())
+	res := mustIngest(t, pool, []byte(raw))
+
+	var occurred time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT occurred_at FROM social_events WHERE id = $1`, res.EventID).Scan(&occurred); err != nil {
+		t.Fatalf("occurred_at не читается: %v", err)
+	}
+	if got := occurred.UTC().Unix(); got != sentAt.Unix() {
+		t.Fatalf("occurred_at = %v, хочу дату апдейта %v (время сообщения, не приёма)", occurred, sentAt)
+	}
+
+	// Правка: date edited_message — та же семантика.
+	editedAt := sentAt.Add(2 * time.Hour)
+	rawEdited := fmt.Sprintf(`{"update_id":701,"edited_message":{"message_id":2,"date":%d,"from":{"id":42,"first_name":"Коля"},"chat":{"id":42,"type":"private"},"text":"правка"}}`,
+		editedAt.Unix())
+	resEdited := mustIngest(t, pool, []byte(rawEdited))
+	var occurredEdited time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT occurred_at FROM social_events WHERE id = $1`, resEdited.EventID).Scan(&occurredEdited); err != nil {
+		t.Fatalf("occurred_at правки не читается: %v", err)
+	}
+	if got := occurredEdited.UTC().Unix(); got != editedAt.Unix() {
+		t.Fatalf("occurred_at правки = %v, хочу дату апдейта %v", occurredEdited, editedAt)
+	}
+
+	// Fallback: update без date — время приёма (DEFAULT now()), не нулевой epoch.
+	resNoDate := mustIngest(t, pool, []byte(`{"update_id":702,"message":{"message_id":3,"from":{"id":42,"first_name":"Коля"},"chat":{"id":42,"type":"private"},"text":"без даты"}}`))
+	var occurredNoDate time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT occurred_at FROM social_events WHERE id = $1`, resNoDate.EventID).Scan(&occurredNoDate); err != nil {
+		t.Fatalf("occurred_at без даты не читается: %v", err)
+	}
+	if since := time.Since(occurredNoDate); since > time.Minute || since < -time.Minute {
+		t.Fatalf("occurred_at без даты = %v, хочу now() (fallback), прошло %v", occurredNoDate, since)
 	}
 }
 

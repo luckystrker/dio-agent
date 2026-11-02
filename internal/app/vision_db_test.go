@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/luckystrker/ago/events"
 
@@ -34,10 +35,10 @@ func (s *stubAPI) pushPhoto(updateID, chatID int64, caption, fileID string) {
 	defer s.mu.Unlock()
 	s.msgID++
 	raw := fmt.Sprintf(
-		`{"update_id":%d,"message":{"message_id":%d,"date":1,"caption":%q,
+		`{"update_id":%d,"message":{"message_id":%d,"date":%d,"caption":%q,
 		"photo":[{"file_id":"thumb","width":90,"height":90},{"file_id":%q,"width":1280,"height":720}],
 		"from":{"id":777,"first_name":"Коля"},"chat":{"id":%d,"type":"private"}}}`,
-		updateID, s.msgID, caption, fileID, chatID)
+		updateID, s.msgID, time.Now().Unix(), caption, fileID, chatID)
 	s.updates = append(s.updates, telegram.Update{UpdateID: updateID, Raw: json.RawMessage(raw)})
 }
 

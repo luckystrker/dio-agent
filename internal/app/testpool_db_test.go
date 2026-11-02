@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/ago/events"
 	agotest "github.com/luckystrker/ago/testing"
@@ -77,10 +76,12 @@ func (s *stubAPI) pushAs(updateID, chatID int64, chatType string, actorID int64,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.msgID++
+	// date — реальное время (18.1: occurred_at = дата сообщения; date:1 давал
+	// 1970-й и мгновенно «готовые» эпизоды консолидации по границе тишины).
 	raw := fmt.Sprintf(
-		`{"update_id":%d,"message":{"message_id":%d,"date":1,"text":%q,`+
+		`{"update_id":%d,"message":{"message_id":%d,"date":%d,"text":%q,`+
 			`"from":{"id":%d,"first_name":%q},"chat":{"id":%d,"type":%q}}}`,
-		updateID, s.msgID, text, actorID, actorName, chatID, chatType)
+		updateID, s.msgID, time.Now().Unix(), text, actorID, actorName, chatID, chatType)
 	s.updates = append(s.updates, telegram.Update{UpdateID: updateID, Raw: json.RawMessage(raw)})
 }
 
@@ -172,7 +173,7 @@ func (c *clock) set(at time.Time) {
 // harness — приложение целиком на чистой тестовой базе.
 type harness struct {
 	t      *testing.T
-	pool   *pgxpool.Pool
+	pool   *runtime.Pool
 	dsn    string
 	api    *stubAPI
 	script *agotest.TestConfig
@@ -232,7 +233,7 @@ func newTestDB(t *testing.T) string {
 }
 
 // poolFor открывает пул к базе по DSN (второй «процесс»).
-func poolFor(t *testing.T, dsn string) *pgxpool.Pool {
+func poolFor(t *testing.T, dsn string) *runtime.Pool {
 	t.Helper()
 	pool, err := runtime.NewPool(context.Background(), dsn)
 	if err != nil {
@@ -377,7 +378,7 @@ func queryNilableString(h *harness, sql string, args ...any) *string {
 
 // newTestPool создаёт пул к свежей тестовой базе с полной схемой §18
 // (копия помощника 9.2–9.6: пакеты не зависят от внутренностей чужих тестов).
-func newTestPool(t *testing.T) (*pgxpool.Pool, string) {
+func newTestPool(t *testing.T) (*runtime.Pool, string) {
 	t.Helper()
 	ctx := context.Background()
 

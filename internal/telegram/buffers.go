@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // Windows — окно буфера одного сценария (§6.2).
@@ -69,7 +69,7 @@ type StartTurnFunc func(ctx context.Context, chatID int64, eventIDs []int64) (tu
 
 // BufferDeps — зависимости менеджера буферов.
 type BufferDeps struct {
-	Pool *pgxpool.Pool
+	Pool *runtime.Pool
 	// Logger; nil — log.Discard.
 	Logger *log.Logger
 	// OnTurnReady — уведомление о созданном turn (точка подключения

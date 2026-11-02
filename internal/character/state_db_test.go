@@ -342,6 +342,78 @@ func TestRecentHistoryBothSidesAndTurnExclusion(t *testing.T) {
 	}
 }
 
+// TestRecentHistoryExcludesPendingUserEvents — 18.2: событие, ещё сидящее в
+// буфере (pending, turn_id IS NULL), не попадает в «недавний разговор»
+// текущего хода — иначе оно приходит дважды (пачкой своего хода и историей),
+// и модель реагирует на сообщение до его очереди. После закрытия пачки
+// (buffered + turn_id) событие появляется в истории следующего хода.
+func TestRecentHistoryExcludesPendingUserEvents(t *testing.T) {
+	f, ctx := newFixture(t)
+	pool := f.pool
+	chat := testChatID
+
+	// pending-событие в живом буфере (пачка ещё не закрыта).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, actor_id, kind, text, raw_update, status)
+		VALUES (10, $1, 'private', 777, 'message', 'ещё в буфере', '{}'::jsonb, 'pending')`, chat); err != nil {
+		t.Fatalf("pending-событие не вставлено: %v", err)
+	}
+	// Закрытая пачка чужого хода — та обязана быть в истории.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, actor_id, kind, text, raw_update, status, turn_id)
+		VALUES (11, $1, 'private', 777, 'message', 'закрытая реплика', '{}'::jsonb, 'processed', 33)`, chat); err != nil {
+		t.Fatalf("processed-событие не вставлено: %v", err)
+	}
+
+	history, err := RecentHistory(ctx, pool, chat, 1000, 0)
+	if err != nil {
+		t.Fatalf("история не читается: %v", err)
+	}
+	for _, m := range history {
+		if m.Content == "ещё в буфере" {
+			t.Fatalf("pending-событие просочилось в историю хода (дубль контекста): %+v", m)
+		}
+	}
+	found := false
+	for _, m := range history {
+		if m.Content == "закрытая реплика" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("закрытая реплика пропала из истории: %+v", history)
+	}
+
+	// Пачка закрылась в ход 33: событие — в истории следующего хода
+	// (exclude 0), но исключено из истории самого хода 33.
+	if _, err := pool.Exec(ctx, `
+		UPDATE social_events SET turn_id = 33, status = 'buffered' WHERE telegram_update_id = 10`); err != nil {
+		t.Fatalf("пачка не закрыта: %v", err)
+	}
+	history, err = RecentHistory(ctx, pool, chat, 1000, 0)
+	if err != nil {
+		t.Fatalf("история после закрытия не читается: %v", err)
+	}
+	reappeared := false
+	for _, m := range history {
+		if m.Content == "ещё в буфере" {
+			reappeared = true
+		}
+	}
+	if !reappeared {
+		t.Fatalf("после закрытия пачки события нет в истории следующего хода: %+v", history)
+	}
+	history, err = RecentHistory(ctx, pool, chat, 1000, 33)
+	if err != nil {
+		t.Fatalf("история хода 33 не читается: %v", err)
+	}
+	for _, m := range history {
+		if m.Content == "ещё в буфере" {
+			t.Fatalf("событие хода 33 не исключено из его собственной истории: %+v", m)
+		}
+	}
+}
+
 // TestAssembleContext — секции §11.1: persona в system, mood-строка,
 // отношение к собеседнику, ограничения отдельной секцией, batch с плейсхолдером.
 func TestAssembleContext(t *testing.T) {

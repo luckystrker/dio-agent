@@ -12,7 +12,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // isNoRows отличает «строки нет» от прочих ошибок запроса.
@@ -97,11 +98,11 @@ func ProactiveAllowed(isPrivate bool, usage proactiveUsage, now time.Time) (bool
 
 // IntentionRepo — работа с таблицей intentions.
 type IntentionRepo struct {
-	pool *pgxpool.Pool
+	pool *runtime.Pool
 }
 
 // NewIntentionRepo строит репозиторий поверх пула.
-func NewIntentionRepo(pool *pgxpool.Pool) *IntentionRepo {
+func NewIntentionRepo(pool *runtime.Pool) *IntentionRepo {
 	return &IntentionRepo{pool: pool}
 }
 

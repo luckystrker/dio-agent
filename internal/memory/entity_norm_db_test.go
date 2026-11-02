@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/migrations"
@@ -185,7 +184,7 @@ func TestEntityFindOrCreateByAlias(t *testing.T) {
 // newEntityPoolAt — чистая база с миграциями до upTo включительно: тест
 // сведения дубликатов сеет «прошлые» данные схемой до 000011 (без name_key
 // и уникальности), затем применяет полную схему — как живая база при деплое.
-func newEntityPoolAt(t *testing.T, upTo string) *pgxpool.Pool {
+func newEntityPoolAt(t *testing.T, upTo string) *runtime.Pool {
 	t.Helper()
 	ctx := context.Background()
 

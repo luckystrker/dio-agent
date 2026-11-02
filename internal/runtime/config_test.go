@@ -328,3 +328,35 @@ func TestLoadConfigEmbedding(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadConfigDBMaxConns — 18.5: DB_MAX_CONNS парсится positiveInt-стилем —
+// дефолт 8, явное значение, невалидное — явная ошибка старта с именем
+// переменной.
+func TestLoadConfigDBMaxConns(t *testing.T) {
+	t.Run("не задан — дефолт 8", func(t *testing.T) {
+		cfg, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x"}))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.DBMaxConns != 8 {
+			t.Errorf("DBMaxConns = %d, хочу дефолт 8", cfg.DBMaxConns)
+		}
+	})
+
+	t.Run("явное значение", func(t *testing.T) {
+		cfg, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "DB_MAX_CONNS": "16"}))
+		if err != nil {
+			t.Fatalf("неожиданная ошибка: %v", err)
+		}
+		if cfg.DBMaxConns != 16 {
+			t.Errorf("DBMaxConns = %d, хочу 16", cfg.DBMaxConns)
+		}
+	})
+
+	for _, raw := range []string{"abc", "0", "-2", "1.5"} {
+		_, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "DB_MAX_CONNS": raw}))
+		if err == nil || !strings.Contains(err.Error(), "DB_MAX_CONNS") {
+			t.Errorf("DB_MAX_CONNS=%q: ожидаю ошибку с именем переменной, получено: %v", raw, err)
+		}
+	}
+}

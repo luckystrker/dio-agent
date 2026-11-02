@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -34,7 +33,7 @@ const defaultTestDSN = "postgres://dio:dio@localhost:5432/dio?sslmode=disable"
 // fakeRunner — двойной исполнитель хода: пишет порядок вызовов, умеет падать
 // первые N раз.
 type fakeRunner struct {
-	pool    *pgxpool.Pool
+	pool    *runtime.Pool
 	mu      sync.Mutex
 	order   []int64
 	fails   map[int64]int // turn_id → сколько раз упасть
@@ -76,7 +75,7 @@ func (r *fakeRunner) called() []int64 {
 }
 
 // seedTurn — ход в очереди с одним событием (чат, тип, текст).
-func seedTurn(t *testing.T, pool *pgxpool.Pool, chatID int64, chatType, text string) int64 {
+func seedTurn(t *testing.T, pool *runtime.Pool, chatID int64, chatType, text string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	var turnID int64
@@ -95,7 +94,7 @@ func seedTurn(t *testing.T, pool *pgxpool.Pool, chatID int64, chatType, text str
 
 // newWorkerPool — чистая тестовая база с полной схемой §18
 // (копия помощника 9.2–9.6: пакеты не зависят от внутренностей чужих тестов).
-func newWorkerPool(t *testing.T) *pgxpool.Pool {
+func newWorkerPool(t *testing.T) *runtime.Pool {
 	t.Helper()
 	ctx := context.Background()
 
@@ -245,7 +244,7 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 // budgetRunner — двойной исполнитель, отвечающий исчерпанием дневного бюджета
 // (§16), пока тест не разрешит успех: имитирует вопрос в конце лимитного дня.
 type budgetRunner struct {
-	pool      *pgxpool.Pool
+	pool      *runtime.Pool
 	mu        sync.Mutex
 	exhausted bool
 	calls     int
@@ -294,7 +293,7 @@ func clearDefer(w *Worker, turnID int64) {
 	w.notBeforeMu.Unlock()
 }
 
-func assertTurnState(t *testing.T, pool *pgxpool.Pool, ctx context.Context, turnID int64, wantStatus string, wantAttempts int) {
+func assertTurnState(t *testing.T, pool *runtime.Pool, ctx context.Context, turnID int64, wantStatus string, wantAttempts int) {
 	t.Helper()
 	var status string
 	var attempts int

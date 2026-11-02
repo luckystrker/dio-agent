@@ -2,6 +2,8 @@
 // сторон из БД — журнал входящих + доставленные ответы — не только память и не
 // пара последних реплик. §13.3/§13.5: в разговор попадают только доставленные
 // ответы; pending outbox доступен runtime, но не как состоявшийся опыт.
+// pending-входящие (событие ещё в буфере, 18.2) тоже не «состоявшийся опыт»:
+// они придут пачкой своего хода и не должны дублироваться историей.
 // Поведение перенесено из TS-справочника src/character/recent-history.ts.
 package character
 
@@ -32,6 +34,7 @@ func RecentHistory(ctx context.Context, db DBTX, chatID int64, limit int, exclud
 		  SELECT 'user' AS role, text AS content, occurred_at AS ts
 		  FROM social_events
 		  WHERE chat_id = $1 AND text IS NOT NULL AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo')
+		    AND status <> 'pending'
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL
 		  SELECT 'assistant' AS role, payload->>'text' AS content, created_at AS ts

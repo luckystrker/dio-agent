@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/ago/events"
 	agotest "github.com/luckystrker/ago/testing"
@@ -40,7 +39,7 @@ const (
 
 // fixture — готовый фон: схема, персона, журнал, WAL, чекпоинты, бюджет.
 type fixture struct {
-	pool        *pgxpool.Pool
+	pool        *runtime.Pool
 	journal     *character.TurnJournal
 	wal         *runtime.TaskWAL
 	checkpoints *runtime.PgCheckpointStore
@@ -289,7 +288,7 @@ func (f *fixture) nextUpdateID() int64  { updateIDCounter++; return updateIDCoun
 func (f *fixture) nextMessageID() int64 { messageIDCounter++; return messageIDCounter }
 
 // newTestPool создаёт пул к свежей тестовой базе с полной схемой §18.
-func newTestPool(t *testing.T) *pgxpool.Pool {
+func newTestPool(t *testing.T) *runtime.Pool {
 	t.Helper()
 	ctx := context.Background()
 

@@ -13,8 +13,6 @@ import (
 	"io/fs"
 	"sort"
 	"strings"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Migration — одна применяемая единица схемы.
@@ -68,7 +66,7 @@ func PendingMigrations(all []Migration, applied map[string]bool) []Migration {
 
 // Migrate применяет миграции к базе. Идемпотентно: второй прогон на той же
 // базе применяет ноль миграций и не является ошибкой.
-func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) (MigrationResult, error) {
+func Migrate(ctx context.Context, pool *Pool, fsys fs.FS) (MigrationResult, error) {
 	all, err := ListMigrations(fsys)
 	if err != nil {
 		return MigrationResult{}, err
@@ -114,7 +112,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) (MigrationResu
 // applyMigration применяет одну миграцию атомарно: BEGIN; <sql>; отметка в
 // schema_migrations; COMMIT — одним запросом простого протокола (PgConn.Exec),
 // который умеет несколько операторов за раз, в отличие от расширенного.
-func applyMigration(ctx context.Context, pool *pgxpool.Pool, m Migration) error {
+func applyMigration(ctx context.Context, pool *Pool, m Migration) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("нет соединения: %w", err)

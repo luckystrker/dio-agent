@@ -22,11 +22,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/ago/events"
 
 	"github.com/luckystrker/dio-agent/internal/character"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 const exploreTurnJSON = `{"decision":"ignore",` +
@@ -784,7 +785,7 @@ func TestQueueStatsAndObservability(t *testing.T) {
 
 // --- хелперы ------------------------------------------------------------------
 
-func mustTx(t *testing.T, ctx context.Context, pool *pgxpool.Pool) pgx.Tx {
+func mustTx(t *testing.T, ctx context.Context, pool *runtime.Pool) pgx.Tx {
 	t.Helper()
 	tx, err := pool.Begin(ctx)
 	if err != nil {

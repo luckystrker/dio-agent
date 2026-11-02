@@ -159,14 +159,19 @@ func (j *TurnJournal) WriteApplyTx(ctx context.Context, tx pgx.Tx, turnID int64,
 
 // TurnState — восстановительное состояние хода по журналу (§12.2).
 type TurnState struct {
-	Started    bool
-	Output     *TurnResult // валидированный результат из model_output, если есть
-	Usage      map[string]any
-	Repairs    int
-	Applied    bool // deltas_applied записан — ход применён, повтор невозможен
-	Delivered  bool // delivery_queued записан
-	SkipReason string
-	Skipped    bool // turn_skipped — терминальный пропуск
+	Started bool
+	Output  *TurnResult // валидированный результат из model_output, если есть
+	// OutputInvalid — model_output есть, но не проходит текущую валидацию
+	// §11.2 (повреждён или записан по старым правилам): восстановление не
+	// применяет его и не падает — терминальный skip (18.3).
+	OutputInvalid       bool
+	OutputInvalidReason string
+	Usage               map[string]any
+	Repairs             int
+	Applied             bool // deltas_applied записан — ход применён, повтор невозможен
+	Delivered           bool // delivery_queued записан
+	SkipReason          string
+	Skipped             bool // turn_skipped — терминальный пропуск
 }
 
 // LoadTurnState читает состояние хода из журнала (§12.2: recovery есть
@@ -186,9 +191,20 @@ func stateOfEvents(evs []events.Event) TurnState {
 		case TurnStarted:
 			st.Started = true
 		case ModelOutput:
-			var r TurnResult
-			if err := json.Unmarshal(e.Result, &r); err == nil {
+			// Recovery ревалидирует сохранённый результат (18.3): полный
+			// ParseTurnResult — та же строгая схема, что и после генерации
+			// (включая чистку инертных полей 17.8). Запись по старым правилам
+			// или повреждённая не идёт в применение — состояние помечает её
+			// невалидной, ход получит терминальный skip.
+			r, perr := ParseTurnResult(e.Result)
+			if perr != nil {
+				st.Output = nil
+				st.OutputInvalid = true
+				st.OutputInvalidReason = perr.Error()
+			} else {
 				st.Output = &r
+				st.OutputInvalid = false
+				st.OutputInvalidReason = ""
 			}
 			st.Usage = e.Usage
 			st.Repairs = e.Repairs

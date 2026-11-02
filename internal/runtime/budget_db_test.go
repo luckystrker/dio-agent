@@ -16,12 +16,10 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // reservedCallsToday — счётчик пула на сегодня (прямой SQL, мимо Store).
-func reservedCallsToday(t *testing.T, pool *pgxpool.Pool, poolName string) int64 {
+func reservedCallsToday(t *testing.T, pool *Pool, poolName string) int64 {
 	t.Helper()
 	var n int64
 	if err := pool.QueryRow(context.Background(),

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/luckystrker/ago/events"
 	agotest "github.com/luckystrker/ago/testing"
 
@@ -28,7 +26,7 @@ const testScopeID = "chat:-100500"
 
 // fixture — готовый ход: схема, персона, контекст-сборщик, журнал, память.
 type fixture struct {
-	pool    *pgxpool.Pool
+	pool    *runtime.Pool
 	journal *TurnJournal
 	budget  *runtime.BudgetStore
 	runner  *Runner
@@ -465,6 +463,86 @@ func TestTurnRecoveryWithoutNewGeneration(t *testing.T) {
 	}
 	if modelOutputs != 1 {
 		t.Fatalf("model_output %d раз, хочу 1 (без новой генерации)", modelOutputs)
+	}
+}
+
+// TestTurnRecoveryInvalidModelOutputSkips — 18.3: восстановление ревалидирует
+// сохранённый model_output. Запись, повреждённая или написанная по старым
+// правилам (defer без defer_hours), не должна ронять процесс nil-deref на
+// применении: ход получает терминальный skip с ERROR-логом, процесс жив.
+func TestTurnRecoveryInvalidModelOutputSkips(t *testing.T) {
+	f, ctx := newFixture(t)
+	turnID := int64(120)
+	f.seedTurn(t, ctx, turnID, "ответь позже")
+
+	// «Упавший процесс» с битым journal: turn_started + model_output, чей JSON
+	// не проходит текущие правила (defer без defer_hours — до 17.8 писалось и
+	// применялось молча, теперь apply разыменовывает DeferHours).
+	if err := f.journal.WriteTurnStarted(ctx, &TurnStarted{
+		TurnID: turnID, ChatID: testChatID, Kind: "conversation", BatchCount: 1, Model: "test",
+	}); err != nil {
+		t.Fatalf("turn_started не записан: %v", err)
+	}
+	if err := f.journal.WriteModelOutput(ctx, turnID, TurnResult{Decision: DecisionDefer}, nil, 0); err != nil {
+		t.Fatalf("битой model_output не записан: %v", err)
+	}
+
+	// Скрипт пуст: recovery не должен доходить до модели.
+	f.withModel()
+
+	var out Outcome
+	var runErr error
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("recovery-путь паниковал на битом model_output (процесс бы умер): %v", p)
+			}
+		}()
+		out, runErr = f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+			Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "ответь позже"}}})
+	}()
+	if runErr != nil {
+		t.Fatalf("recovery с битым model_output должен завершаться пропуском, не ошибкой: %v", runErr)
+	}
+	if !out.Skipped {
+		t.Fatalf("ход не помечен пропуском: %+v", out)
+	}
+
+	// Терминальный пропуск зафиксирован в журнале (фаза recovery, причина валидации).
+	var skip *TurnSkipped
+	evs, err := f.journal.History(ctx, turnID)
+	if err != nil {
+		t.Fatalf("журнал не читается: %v", err)
+	}
+	for _, ev := range evs {
+		if s, ok := events.AsValue(ev).(TurnSkipped); ok {
+			skip = &s
+		}
+	}
+	if skip == nil {
+		t.Fatalf("turn_skipped не записан: события %v", f.eventTypes(t, ctx, turnID))
+	}
+	if skip.Phase != "recovery" {
+		t.Fatalf("фаза пропуска = %q, хочу recovery", skip.Phase)
+	}
+	if !strings.Contains(skip.Reason, "defer") && !strings.Contains(skip.Reason, "валид") {
+		t.Fatalf("причина пропуска не называет валидацию: %q", skip.Reason)
+	}
+
+	// Ничего не применилось: outbox пуст, ход не applied.
+	var outbox int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&outbox); err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	if outbox != 0 {
+		t.Fatalf("битый результат применился к доставке: %d строк", outbox)
+	}
+	var status string
+	if err := f.pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnID).Scan(&status); err != nil {
+		t.Fatalf("turn не читается: %v", err)
+	}
+	if status == "applied" {
+		t.Fatalf("битый результат применил turn")
 	}
 }
 

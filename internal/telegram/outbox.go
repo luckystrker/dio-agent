@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // OutboxStatus — статусы единицы доставки (§13.1).
@@ -69,11 +70,11 @@ func decodePayload(raw []byte) outboxPayload {
 
 // OutboxRepo — доступ к delivery_outbox (§13.1).
 type OutboxRepo struct {
-	Pool *pgxpool.Pool
+	Pool *runtime.Pool
 }
 
 // NewOutboxRepo строит репозиторий.
-func NewOutboxRepo(pool *pgxpool.Pool) *OutboxRepo { return &OutboxRepo{Pool: pool} }
+func NewOutboxRepo(pool *runtime.Pool) *OutboxRepo { return &OutboxRepo{Pool: pool} }
 
 // ClaimDue захватывает к отправке pending/retry_wait с наступившим not_before
 // — по порядку внутри чата (§13.1: chat_id, turn_id, position). Строка не

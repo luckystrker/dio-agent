@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -72,7 +70,7 @@ const consolidateCandidateFactor = 5
 
 // Deps — зависимости планировщика.
 type Deps struct {
-	Pool            *pgxpool.Pool
+	Pool            *runtime.Pool
 	Journal         *character.TurnJournal     // журнал ходов (§12.1), включая ходы инициатив
 	WAL             *runtime.TaskWAL           // WAL фоновых задач (event_streams, §12.2)
 	Checkpoints     *runtime.PgCheckpointStore // чекпоинты задач (task_checkpoints)
@@ -95,7 +93,7 @@ type Deps struct {
 // Модельные задачи исполняются последовательно в такте: один когнитивный
 // worker (§5.2) — планировщик не создаёт параллельной когниции.
 type Scheduler struct {
-	pool         *pgxpool.Pool
+	pool         *runtime.Pool
 	journal      *character.TurnJournal
 	wal          *runtime.TaskWAL
 	checkpoints  *runtime.PgCheckpointStore

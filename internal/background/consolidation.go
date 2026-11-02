@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	agotask "github.com/luckystrker/ago/task"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
@@ -471,7 +469,7 @@ func episodeTurnRefs(ctx context.Context, q queryer, ids []int64) []string {
 // через Items.Get с аудиторией: фильтр приватности §9.2 до выдачи модели,
 // тот же код, что и у retrieval-инструментов (невидимое неотличимо от
 // несуществующего).
-func episodeMemoryItems(ctx context.Context, q queryer, pool *pgxpool.Pool, scope string, turnRefs []string, limit int) ([]memory.Item, error) {
+func episodeMemoryItems(ctx context.Context, q queryer, pool *runtime.Pool, scope string, turnRefs []string, limit int) ([]memory.Item, error) {
 	if len(turnRefs) == 0 {
 		return nil, nil
 	}

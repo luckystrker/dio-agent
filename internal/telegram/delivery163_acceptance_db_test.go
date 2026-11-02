@@ -16,13 +16,15 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // singleConnRepo — репозиторий на пуле из одного соединения без фоновых
 // проверок здоровья: после pg_terminate_backend первый запрос падает на
 // мёртвом соединении, следующий получает свежее (тот же приём, что в
 // TestDeliveryLoopDBErrorBeforeSendRequeues).
-func singleConnRepo(t *testing.T, pool *pgxpool.Pool) *OutboxRepo {
+func singleConnRepo(t *testing.T, pool *runtime.Pool) *OutboxRepo {
 	t.Helper()
 	ctx := context.Background()
 	cfg, err := pgxpool.ParseConfig(pool.Config().ConnConfig.ConnString())
@@ -32,7 +34,7 @@ func singleConnRepo(t *testing.T, pool *pgxpool.Pool) *OutboxRepo {
 	cfg.MaxConns = 1
 	cfg.MinConns = 0
 	cfg.HealthCheckPeriod = time.Hour
-	single, err := pgxpool.NewWithConfig(ctx, cfg)
+	single, err := runtime.NewPoolFromConfig(ctx, cfg)
 	if err != nil {
 		t.Fatalf("пул доставки не создан: %v", err)
 	}
@@ -42,7 +44,7 @@ func singleConnRepo(t *testing.T, pool *pgxpool.Pool) *OutboxRepo {
 
 // killSingleConn обрывает единственное соединение пула доставки со стороны
 // СУБД (pg_terminate_backend).
-func killSingleConn(t *testing.T, pool *pgxpool.Pool, repo *OutboxRepo) {
+func killSingleConn(t *testing.T, pool *runtime.Pool, repo *OutboxRepo) {
 	t.Helper()
 	var backendPID int32
 	if err := repo.Pool.QueryRow(context.Background(), `SELECT pg_backend_pid()`).Scan(&backendPID); err != nil {

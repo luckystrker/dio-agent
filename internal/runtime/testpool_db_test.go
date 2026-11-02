@@ -18,13 +18,12 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/migrations"
 )
 
 // newTestPool создаёт пул к свежей тестовой базе с полной схемой §18.
-func newTestPool(t *testing.T) *pgxpool.Pool {
+func newTestPool(t *testing.T) *Pool {
 	t.Helper()
 	ctx := context.Background()
 

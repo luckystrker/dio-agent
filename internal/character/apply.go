@@ -15,9 +15,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // isNoRows отличает «строки нет» от прочих ошибок запроса.
@@ -72,7 +72,7 @@ type ApplyOptions struct {
 }
 
 // ApplyTurn применяет валидированный результат в одной транзакции.
-func ApplyTurn(ctx context.Context, pool *pgxpool.Pool, opts ApplyOptions) (ApplyResult, error) {
+func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (ApplyResult, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("применение: транзакция не открыта: %w", err)

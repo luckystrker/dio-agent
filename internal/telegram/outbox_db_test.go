@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // insertOutbox вставляет строку outbox напрямую (создание строк — зона 9.4;
 // здесь важна машина статусов).
-func insertOutbox(t *testing.T, pool *pgxpool.Pool, turnID, chatID int64, position int, payload string) int64 {
+func insertOutbox(t *testing.T, pool *runtime.Pool, turnID, chatID int64, position int, payload string) int64 {
 	t.Helper()
 	var id int64
 	if err := pool.QueryRow(context.Background(),
@@ -27,7 +27,7 @@ func insertOutbox(t *testing.T, pool *pgxpool.Pool, turnID, chatID int64, positi
 }
 
 // insertOutboxSent — уже доставленная строка (позиция 0 первого пузыря).
-func insertOutboxSent(t *testing.T, pool *pgxpool.Pool, turnID, chatID int64, position int, payload string) int64 {
+func insertOutboxSent(t *testing.T, pool *runtime.Pool, turnID, chatID int64, position int, payload string) int64 {
 	t.Helper()
 	var id int64
 	if err := pool.QueryRow(context.Background(),

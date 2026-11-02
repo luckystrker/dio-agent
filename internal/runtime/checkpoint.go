@@ -13,7 +13,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	agotask "github.com/luckystrker/ago/task"
 )
@@ -27,14 +26,14 @@ var ErrInvalidCheckpoint = errors.New("чекпоинт не является к
 // Контекст — как у PgStreamStorage: задаётся при создании.
 type PgCheckpointStore struct {
 	ctx  context.Context
-	pool *pgxpool.Pool
+	pool *Pool
 }
 
 // Интерфейс ago должен выполняться во время компиляции.
 var _ agotask.CheckpointStore = (*PgCheckpointStore)(nil)
 
 // NewPgCheckpointStore создаёт адаптер чекпоинтов поверх пула PostgreSQL.
-func NewPgCheckpointStore(ctx context.Context, pool *pgxpool.Pool) *PgCheckpointStore {
+func NewPgCheckpointStore(ctx context.Context, pool *Pool) *PgCheckpointStore {
 	return &PgCheckpointStore{ctx: ctx, pool: pool}
 }
 

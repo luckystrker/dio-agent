@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
 // PollOffsetKey — ключ poll offset в runtime_state (§18).
@@ -34,7 +36,7 @@ type IngestResult struct {
 // вставка события с UNIQUE(telegram_update_id) (конфликт = «уже сохранено»),
 // в той же транзакции — следующий poll offset. Ошибка БД откатывает всё:
 // offset не двигается, пачка перепрочитается при retry.
-func IngestUpdate(ctx context.Context, pool *pgxpool.Pool, raw json.RawMessage) (IngestResult, error) {
+func IngestUpdate(ctx context.Context, pool *runtime.Pool, raw json.RawMessage) (IngestResult, error) {
 	event, err := NormalizeUpdate(raw)
 	if err != nil {
 		return IngestResult{}, err
@@ -49,15 +51,23 @@ func IngestUpdate(ctx context.Context, pool *pgxpool.Pool, raw json.RawMessage) 
 
 	var eventID int64
 	inserted := true
+	// occurred_at = время сообщения (message.date), не приёма (18.1): после
+	// простоя накопленная пачка не должна выглядеть свежей для границ эпизодов
+	// и проверок «чат ушёл вперёд». Даты нет — NULL, колонка берёт now().
+	var occurredAt *time.Time
+	if event.Date > 0 {
+		at := time.Unix(event.Date, 0).UTC()
+		occurredAt = &at
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO social_events
-		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status, occurred_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10::timestamptz, now()))
 		ON CONFLICT (telegram_update_id) DO NOTHING
 		RETURNING id`,
 		event.TelegramUpdateID, event.ChatID, string(event.ChatType),
 		event.ActorID, event.ActorName, string(event.Kind), event.Text,
-		string(raw), string(status)).Scan(&eventID)
+		string(raw), string(status), occurredAt).Scan(&eventID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return IngestResult{}, fmt.Errorf("ingest: событие не записано: %w", err)
@@ -89,7 +99,7 @@ func IngestUpdate(ctx context.Context, pool *pgxpool.Pool, raw json.RawMessage) 
 
 // ReadOffset возвращает сохранённый poll offset (следующий ожидаемый
 // update_id) и признак, что он уже сохранялся.
-func ReadOffset(ctx context.Context, pool *pgxpool.Pool) (int64, bool, error) {
+func ReadOffset(ctx context.Context, pool *runtime.Pool) (int64, bool, error) {
 	var raw *string
 	if err := pool.QueryRow(ctx,
 		`SELECT value#>>'{}' FROM runtime_state WHERE key = $1`, PollOffsetKey).Scan(&raw); err != nil {

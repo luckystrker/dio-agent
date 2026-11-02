@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/luckystrker/dio-agent/internal/background"
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
@@ -95,7 +93,7 @@ type App struct {
 	opts   Options
 	logger *log.Logger
 
-	pool        *pgxpool.Pool
+	pool        *runtime.Pool
 	single      *runtime.Singleton
 	persona     character.Persona
 	journal     *character.TurnJournal
@@ -141,7 +139,7 @@ func (a *App) Start(ctx context.Context) error {
 	a.intakeCtx, a.cancelIntake = context.WithCancel(a.runCtx)
 
 	// --- БД и схема ---
-	pool, err := runtime.NewPool(ctx, a.opts.Config.DatabaseURL)
+	pool, err := runtime.NewPool(ctx, a.opts.Config.DatabaseURL, a.opts.Config.DBMaxConns)
 	if err != nil {
 		return a.stopFailed(fmt.Errorf("app: PostgreSQL не подключён: %w", err))
 	}
@@ -393,14 +391,13 @@ func (a *App) Stop(ctx context.Context) {
 	done := make(chan struct{})
 	go func() { a.wg.Wait(); close(done) }()
 
-	// 2. Сохранить доступные результаты: незакрытые буферы — в ходы (§6.2).
-	a.buffers.FlushAll(ctx)
-
-	// 3. Ограниченно дождаться текущего хода (§5.3): worker получает drain —
+	// 2. Ограниченно дождаться текущего хода (§5.3): worker получает drain —
 	// «новой работы не брать, текущий ход доработать», иначе Done недостижим
 	// и каждый Stop ждал бы весь лимит (в проде — 90 с с удержанием замка).
-	// Не дождались — жёсткая отмена. Worker может быть не собран (частичный
-	// Start) — ждать тогда нечего.
+	// Drain идёт ДО закрытия буферов (решение 18.4): FlushAll создаёт ходы и
+	// будит worker — при обратном порядке каждый stop при живом чате стартовал
+	// бы новый модельный ход и держал процесс до лимита. Не дождались — жёсткая
+	// отмена. Worker может быть не собран (частичный Start) — ждать тогда нечего.
 	if a.cognit != nil {
 		a.cognit.StopDrain()
 		drainTimer := time.NewTimer(a.opts.drainLimit())
@@ -413,7 +410,13 @@ func (a *App) Stop(ctx context.Context) {
 		}
 	}
 
-	// 4. Остальные циклы (scheduler, delivery) и сам worker.
+	// 3. Сохранить доступные результаты: незакрытые буферы — в ходы (§6.2).
+	// Worker уже остановлен: ходы остаются created и лежат в очереди — их
+	// подберёт следующий запуск (Wake после выхода worker безвреден, recovery
+	// видит created-ходы при старте).
+	a.buffers.FlushAll(ctx)
+
+	// 4. Остальные циклы (scheduler, delivery).
 	a.cancelRun()
 	select {
 	case <-done:

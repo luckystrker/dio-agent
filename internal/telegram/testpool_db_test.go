@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/migrations"
@@ -28,7 +27,7 @@ import (
 const defaultTestDSN = "postgres://dio:dio@localhost:5432/dio?sslmode=disable"
 
 // newTestPool создаёт пул к свежей тестовой базе с полной схемой §18.
-func newTestPool(t *testing.T) *pgxpool.Pool {
+func newTestPool(t *testing.T) *runtime.Pool {
 	t.Helper()
 	ctx := context.Background()
 
@@ -90,7 +89,7 @@ func rawMessageOf(updateID, chatID int64, text string) []byte {
 }
 
 // mustIngest сохраняет update, роняя тест при ошибке.
-func mustIngest(t *testing.T, pool *pgxpool.Pool, raw []byte) IngestResult {
+func mustIngest(t *testing.T, pool *runtime.Pool, raw []byte) IngestResult {
 	t.Helper()
 	res, err := IngestUpdate(context.Background(), pool, raw)
 	if err != nil {

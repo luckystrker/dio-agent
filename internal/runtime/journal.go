@@ -22,7 +22,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/ago/events"
 	agostream "github.com/luckystrker/ago/stream"
@@ -48,14 +47,14 @@ var (
 // (getHistory/setHistory/append) использует WAL фоновых задач (wal.go).
 type PgStreamStorage struct {
 	ctx  context.Context
-	pool *pgxpool.Pool
+	pool *Pool
 }
 
 // Интерфейс ago должен выполняться во время компиляции.
 var _ agostream.Storage = (*PgStreamStorage)(nil)
 
 // NewPgStreamStorage создаёт адаптер журнала поверх пула PostgreSQL.
-func NewPgStreamStorage(ctx context.Context, pool *pgxpool.Pool) *PgStreamStorage {
+func NewPgStreamStorage(ctx context.Context, pool *Pool) *PgStreamStorage {
 	return &PgStreamStorage{ctx: ctx, pool: pool}
 }
 

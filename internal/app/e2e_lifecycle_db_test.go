@@ -8,7 +8,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"testing"
@@ -109,6 +111,90 @@ func TestLifecycleGracefulShutdown(t *testing.T) {
 	b.Stop(context.Background())
 	if elapsed := time.Since(idleStopStart); elapsed >= DefaultDrainLimit {
 		t.Fatalf("холостой Stop ждал весь лимит %v (реально %v) — drain worker не подан (§5.3)", DefaultDrainLimit, elapsed)
+	}
+}
+
+// recordingWriter больше не нужен тесту 18.4 (см. TestShutdownDrainsWorkerBeforeFlush).
+
+// TestShutdownDrainsWorkerBeforeFlush — 18.4: при Stop сначала drain worker
+// (текущий ход дорабатывает, новой работы не берёт), затем незакрытые буферы
+// закрываются в ходы для СЛЕДУЮЩЕГО запуска. Новый модельный ход при
+// остановке не стартует: systemctl stop при живом чате не должен запускать
+// генерацию и держать процесс до лимита дренажа.
+//
+// Детерминированность даёт блокируемый текущий ход: пока он висит на внешнем
+// вызове, Stop в правильном порядке обязан стоять в «дождаться текущего» и
+// НЕ закрывать буферы; в дефектном порядке FlushAll закрывает их до drain.
+func TestShutdownDrainsWorkerBeforeFlush(t *testing.T) {
+	const groupChat = int64(-100999)
+	dsn := newTestDB(t)
+	block := &blockingEmbedder{release: make(chan struct{})}
+	h := newHarnessDSNTuned(t, dsn, func(o *Options) {
+		o.Embedder = block
+		// Личка закрывается быстро (ход-тормоз), группа — длинные окна:
+		// её порция живёт до FlushAll и не должна закрыться таймером.
+		o.Buffers = func(ct telegram.ChatType, _ telegram.EventKind) telegram.Windows {
+			if ct == telegram.ChatPrivate {
+				return telegram.Windows{Idle: 25 * time.Millisecond, Max: 60 * time.Millisecond}
+			}
+			return telegram.Windows{Idle: 10 * time.Second, Max: 15 * time.Second}
+		}
+	}, toolResp("c-fl", "memory_search", `{"query":"проверка"}`),
+		textResp(lcAnswer))
+
+	// Ход-тормоз: личное сообщение → ход → модель зовёт память → векторизатор
+	// висит до release. Stop стартует, когда ход точно в генерации.
+	h.api.push(1, lcChat, "private", "сообщение текущего хода")
+	brakeTurn := waitForTurn(t, h, lcChat)
+	waitJournalEvent(h, "ход-тормоз ушёл в генерацию", brakeTurn, "tool_call")
+
+	// Живой буфер другого чата: упоминание в группе → pending, порция не
+	// закрыта (окна 10 с). Добавляем напрямую в очередь заглушки Bot API —
+	// нужен entities-массив упоминания.
+	h.api.mu.Lock()
+	h.api.updates = append(h.api.updates, telegram.Update{UpdateID: 2, Raw: json.RawMessage(fmt.Sprintf(
+		`{"update_id":2,"message":{"message_id":2,"date":%d,"text":"@dio_bot глянь",`+
+			`"from":{"id":777,"first_name":"Коля"},"chat":{"id":%d,"type":"supergroup"},`+
+			`"entities":[{"type":"mention","offset":0,"length":8}]}}`, time.Now().Unix(), groupChat))})
+	h.api.mu.Unlock()
+	eventually(t, "событие группы сохранено (pending)", func() bool {
+		return queryInt(h, `SELECT count(*) FROM social_events WHERE chat_id = $1 AND status = 'pending'`, groupChat) > 0
+	})
+
+	stopDone := make(chan struct{})
+	go func() {
+		h.app.Stop(context.Background())
+		close(stopDone)
+	}()
+
+	// Текущий ход висит → Stop стоит в «дождаться текущего»: порция группы не
+	// должна закрыться в ход до его завершения. Даём Stop добраться до своей
+	// точки блокировки (в дефекте FlushAll успевает отработать за это время).
+	time.Sleep(500 * time.Millisecond)
+	if n := queryInt(h, `SELECT count(*) FROM turns WHERE chat_id = $1`, groupChat); n != 0 {
+		t.Fatalf("порция закрыта в ход до drain текущего хода: FlushAll выполняется до StopDrain — Stop при живом чате отдаёт работу останавливающемуся worker (%d хода)", n)
+	}
+
+	// Отпускаем текущий ход: он дорабатывает, Stop возвращается, порция
+	// группы закрывается в ход ДЛЯ СЛЕДУЮЩЕГО запуска.
+	close(block.release)
+	select {
+	case <-stopDone:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("Stop не вернулся после завершения текущего хода")
+	}
+
+	// Модельных вызовов ровно два — оба текущего хода (инструментный круг +
+	// финал): хода из буфера при остановке не случилось; событие не потеряно —
+	// ход created, событие привязано.
+	if calls := h.modelCalls(); calls != 2 {
+		t.Fatalf("модельных вызовов при остановке %d, хочу 2 (только текущий ход)", calls)
+	}
+	if status := queryString(h, `SELECT status FROM turns WHERE chat_id = $1`, groupChat); status != "created" {
+		t.Fatalf("ход группы при остановке должен остаться created для следующего запуска: %s", status)
+	}
+	if n := queryInt(h, `SELECT count(*) FROM social_events WHERE chat_id = $1 AND status = 'buffered' AND turn_id IS NOT NULL`, groupChat); n != 1 {
+		t.Fatalf("событие группы не закрыто в ход при остановке: %d", n)
 	}
 }
 

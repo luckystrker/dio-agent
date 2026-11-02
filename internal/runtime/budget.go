@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ErrBudgetExhausted — дневной лимит пула исчерпан: операция не выполняется.
@@ -33,11 +32,11 @@ const (
 
 // BudgetStore — резервирование бюджета в PostgreSQL.
 type BudgetStore struct {
-	pool *pgxpool.Pool
+	pool *Pool
 }
 
 // NewBudgetStore создаёт хранилище поверх пула.
-func NewBudgetStore(pool *pgxpool.Pool) *BudgetStore {
+func NewBudgetStore(pool *Pool) *BudgetStore {
 	return &BudgetStore{pool: pool}
 }
 

@@ -138,7 +138,7 @@ type QueuedDelivery struct {
 type TurnSkipped struct {
 	events.Base
 	TurnID int64  `json:"turn_id"`
-	Phase  string `json:"phase"` // generate | apply
+	Phase  string `json:"phase"` // generate | apply | worker | recovery
 	Reason string `json:"reason"`
 }
 

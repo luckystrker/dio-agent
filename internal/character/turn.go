@@ -25,8 +25,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/luckystrker/ago/agent"
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
@@ -62,7 +60,7 @@ var ErrModelNotConfigured = errors.New("модель не настроена (MO
 // Runner — исполнитель ходов. Один когнитивный worker (§5.2) вызывает Run
 // последовательно; методы безопасны и при параллельном использовании.
 type Runner struct {
-	Pool    *pgxpool.Pool
+	Pool    *runtime.Pool
 	Journal *TurnJournal
 	Budget  *runtime.BudgetStore
 
@@ -134,6 +132,19 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		out.Skipped = true
 		out.SkipReason = state.SkipReason
 		r.logf("ход %d терминально пропущен ранее (%s)", in.TurnID, state.SkipReason)
+		return out, nil
+	}
+	if state.OutputInvalid {
+		// Сохранённый model_output не проходит текущую валидацию (записан по
+		// старым правилам или повреждён, 18.3): не паника и не тишина —
+		// терминальный skip, система продолжает приём (инвариант 5).
+		reason := fmt.Sprintf("recovery: сохранённый model_output не проходит валидацию: %s", state.OutputInvalidReason)
+		r.logf("ERROR ход %d: %s", in.TurnID, reason)
+		if err := r.Journal.WriteTurnSkipped(ctx, in.TurnID, "recovery", reason); err != nil {
+			return out, fmt.Errorf("ход %d: turn_skipped не записан: %w", in.TurnID, err)
+		}
+		out.Skipped = true
+		out.SkipReason = reason
 		return out, nil
 	}
 	if state.Output != nil {

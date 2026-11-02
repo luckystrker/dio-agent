@@ -51,6 +51,9 @@ type NormalizedEvent struct {
 	ActorName *string
 	Kind      EventKind
 	Text      *string
+	// Date — время сообщения из update (секунды Unix, message.date); 0 — даты
+	// нет, occurred_at возьмёт now() приёма (18.1).
+	Date int64
 	// Supported=false — update не поддерживается: журнал без обработки.
 	Supported bool
 }
@@ -70,6 +73,7 @@ type telegramUser struct {
 
 type telegramMessage struct {
 	From           *telegramUser       `json:"from"`
+	Date           int64               `json:"date"` // секунды Unix (время сообщения, не приёма)
 	Text           *string             `json:"text"`
 	Caption        *string             `json:"caption"`
 	Photo          []telegramPhotoSize `json:"photo"`
@@ -143,6 +147,7 @@ func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 		ActorName:        actorNameOf(message.From),
 		Kind:             detectKind(message, edited),
 		Text:             eventText(message),
+		Date:             message.Date,
 		Supported:        true,
 	}, nil
 }
