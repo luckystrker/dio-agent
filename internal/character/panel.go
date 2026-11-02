@@ -1,0 +1,153 @@
+// Панель состояния хода (решение 2026-11-02): служебный блок, который
+// харнесс кладёт ПЕРВОЙ частью финального пользовательского сообщения хода —
+// перед текстом пачки. Здесь всё, что меняется между ходами: текущее время,
+// пауза с прошлого сообщения, собеседник, настроение, отношение и карточка
+// памяти. System-промпт остаётся статичным байт-в-байт, поэтому кэш префикса
+// провайдера не ломается при смене настроения.
+//
+// Панель не пишется в БД и в историю следующих ходов не попадает: история
+// строится из social_events/delivery_outbox, а панель живёт только в запросе
+// текущего хода.
+package character
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+// Маркеры панели: модель явно видит, что это данные харнесса, а не реплика.
+const (
+	statePanelOpen  = "[состояние хода — служебное, не от собеседника]"
+	statePanelClose = "[/состояние]"
+)
+
+// weekdayShort — русские сокращения дней недели в порядке time.Weekday.
+var weekdayShort = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
+
+// defaultLocation — пояс по умолчанию, если конфиг его не задал (тесты и
+// частичная сборка): Europe/Moscow, затем UTC как последний фолбэк (в бинарник
+// зоны встроены через time/tzdata).
+var defaultLocation = func() *time.Location {
+	if loc, err := time.LoadLocation("Europe/Moscow"); err == nil {
+		return loc
+	}
+	return time.UTC
+}()
+
+// locationOrDefault — пояс меток времени: nil — пояс по умолчанию.
+func locationOrDefault(loc *time.Location) *time.Location {
+	if loc == nil {
+		return defaultLocation
+	}
+	return loc
+}
+
+// formatHistoryTime — абсолютная метка реплики в часовом поясе персонажа:
+// «пн 02.11 17:02». Абсолютная (не «2 часа назад») — история обязана быть
+// байт-стабильной между ходами, иначе ломается кэш префикса.
+func formatHistoryTime(at time.Time, loc *time.Location) string {
+	t := at.In(locationOrDefault(loc))
+	return fmt.Sprintf("%s %s %s", weekdayShort[t.Weekday()], t.Format("02.01"), t.Format("15:04"))
+}
+
+// describePause — человеческая длительность паузы без относительных формул в
+// истории: «2 ч 14 мин», «14 мин», «3 дн 4 ч», «меньше минуты».
+func describePause(d time.Duration) string {
+	if d < time.Minute {
+		return "меньше минуты"
+	}
+	minutes := int(d / time.Minute)
+	hours := minutes / 60
+	days := hours / 24
+	switch {
+	case days > 0:
+		h := hours % 24
+		if h == 0 {
+			return fmt.Sprintf("%d дн", days)
+		}
+		return fmt.Sprintf("%d дн %d ч", days, h)
+	case hours > 0:
+		m := minutes % 60
+		if m == 0 {
+			return fmt.Sprintf("%d ч", hours)
+		}
+		return fmt.Sprintf("%d ч %d мин", hours, m)
+	default:
+		return fmt.Sprintf("%d мин", minutes)
+	}
+}
+
+// statePanelData — содержимое панели; пустые строки не выводятся.
+type statePanelData struct {
+	Now          time.Time
+	Location     *time.Location
+	LastAt       time.Time // время последней реплики истории; zero — истории нет
+	HasLast      bool
+	Actor        string
+	Mood         string
+	Relationship string
+	MemoryCard   string
+	MultiActor   bool
+}
+
+// sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
+// (имя собеседника приходит из Telegram-профиля): переводы строк схлопываются,
+// квадратные скобки заменяются скобками (нельзя подделать маркер панели),
+// хвост обрезается. Данные не должны уметь менять структуру служебного блока.
+func sanitizePanelValue(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	value = strings.NewReplacer("[", "(", "]", ")").Replace(value)
+	if limit > 0 {
+		if runes := []rune(value); len(runes) > limit {
+			value = string(runes[:limit-1]) + "…"
+		}
+	}
+	return strings.TrimSpace(value)
+}
+
+// buildStatePanel собирает служебный блок. Порядок строк фиксирован, панель
+// детерминирована при одинаковом состоянии.
+func buildStatePanel(d statePanelData) string {
+	lines := []string{statePanelOpen}
+	lines = append(lines, "сейчас: "+formatHistoryTime(d.Now, d.Location))
+	if d.HasLast {
+		pause := d.Now.Sub(d.LastAt)
+		if pause < 0 {
+			pause = 0
+		}
+		lines = append(lines, "с прошлого сообщения в чате: "+describePause(pause))
+	}
+	if actor := sanitizePanelValue(d.Actor, 200); actor != "" {
+		lines = append(lines, "ты говоришь с: "+actor)
+	}
+	if mood := sanitizePanelValue(d.Mood, 300); mood != "" {
+		lines = append(lines, "твоё состояние: "+mood)
+	}
+	if rel := sanitizePanelValue(d.Relationship, 300); rel != "" {
+		lines = append(lines, "отношение к собеседнику: "+rel)
+	}
+	if card := strings.TrimSpace(d.MemoryCard); card != "" {
+		lines = append(lines, card)
+	}
+	if d.MultiActor {
+		lines = append(lines, "в пачке несколько участников — отвечай на пачку целиком")
+	}
+	lines = append(lines, statePanelClose)
+	return strings.Join(lines, "\n")
+}
+
+// composeUserText — финальное пользовательское сообщение хода: сначала
+// служебная панель, затем текст пачки (фото уходят отдельными частями Ask).
+func composeUserText(panel, batch string) string {
+	panel = strings.TrimSpace(panel)
+	batch = strings.TrimSpace(batch)
+	switch {
+	case panel == "":
+		return batch
+	case batch == "":
+		return panel
+	default:
+		return panel + "\n\n" + batch
+	}
+}

@@ -329,3 +329,52 @@ func TestReleaseReturnsToReservationDayNotToday(t *testing.T) {
 		t.Fatalf("резерв не удалён: rows=%d err=%v", rows, err)
 	}
 }
+
+// TestRecordActualUsageCachedTokens — наблюдаемость кэша префикса (решение
+// 2026-11-02): ago отдаёт CacheReadInputTokens, middleware пишет его в actual
+// отдельным полем, не смешивая с суммой токенов.
+func TestRecordActualUsageCachedTokens(t *testing.T) {
+	pool := newTestPool(t)
+	store := NewBudgetStore(pool)
+	ctx := context.Background()
+	const op = "model:turn:2001:0:0"
+
+	if ok, err := store.Reserve(ctx, op, 0, BudgetPoolConversation, 1, 0); err != nil || !ok {
+		t.Fatalf("резерв не прошёл: ok=%v err=%v", ok, err)
+	}
+	cached := int64(64)
+	if err := store.RecordActualUsage(ctx, op, BudgetPoolConversation, ActualUsage{
+		Tokens: 120, Calls: 1, CachedTokens: &cached,
+	}); err != nil {
+		t.Fatalf("actual не записан: %v", err)
+	}
+	var tokens, cachedOut int64
+	var cachedPresent bool
+	if err := pool.QueryRow(ctx,
+		`SELECT (actual->>'tokens')::bigint, (actual->>'cached_tokens')::bigint,
+		        actual ? 'cached_tokens'
+		   FROM budget_reservations WHERE operation_id = $1`, op).
+		Scan(&tokens, &cachedOut, &cachedPresent); err != nil {
+		t.Fatalf("actual не читается: %v", err)
+	}
+	if tokens != 120 || !cachedPresent || cachedOut != 64 {
+		t.Fatalf("actual = tokens %d, cached %d (present %v), хочу 120/64", tokens, cachedOut, cachedPresent)
+	}
+
+	// Провайдер не сообщил кэш — поля нет (неизвестно ≠ полный промах).
+	const op2 = "model:turn:2001:0:1"
+	if ok, err := store.Reserve(ctx, op2, 0, BudgetPoolConversation, 1, 0); err != nil || !ok {
+		t.Fatalf("резерв 2 не прошёл: ok=%v err=%v", ok, err)
+	}
+	if err := store.RecordActual(ctx, op2, BudgetPoolConversation, 50, 1, false); err != nil {
+		t.Fatalf("actual 2 не записан: %v", err)
+	}
+	var present bool
+	if err := pool.QueryRow(ctx,
+		`SELECT actual ? 'cached_tokens' FROM budget_reservations WHERE operation_id = $1`, op2).Scan(&present); err != nil {
+		t.Fatalf("actual 2 не читается: %v", err)
+	}
+	if present {
+		t.Fatalf("фантомное cached_tokens без данных провайдера")
+	}
+}

@@ -4,10 +4,11 @@
 //  0. чтение журнала хода: model_output есть — применение сохранённого
 //     результата без новой генерации; deltas_applied есть — ход уже применён;
 //  1. turn_started (однократно);
-//  2. бюджет (§16) → контекст из БД (§11.1) → запуск агента ago: инструменты
-//     памяти (§10.4), forced первый вызов на прямом обращении, лимит обращений
-//     конфигурацией; строгая валидация TurnResult (§11.2), один repair-retry
-//     (§11.3), невалидный результат не применяется — терминальный пропуск;
+//  2. бюджет (§16) → контекст из БД (§11.1) → запуск агента ago: панель
+//     состояния первой частью пачки, карточка памяти вместо принудительного
+//     поиска (решение 2026-11-02), строгая валидация TurnResult (§11.2), один
+//     repair-retry (§11.3), невалидный результат не применяется — терминальный
+//     пропуск;
 //  3. model_output записывается ДО применения (§12.1);
 //  4. применение «всё или ничего» одной транзакцией (apply.go).
 //
@@ -24,6 +25,7 @@ import (
 	"hash/fnv"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/luckystrker/ago/agent"
 	agocontext "github.com/luckystrker/ago/context"
@@ -48,9 +50,57 @@ func sessionForChat(chatID int64) string {
 // wantForcedTool — принуждение первого вызова памяти: только прямой ход и
 // только первая попытка. Повторы идут без forced tool_choice: thinking-режимы
 // части провайдеров с ним несовместимы, а повторная генерация уже аварийная
-// (портировано из TS-линии c0a986d, 2026-10-31).
+// (портировано из TS-линии c0a986d, 2026-10-31). С 2026-11-02 применяется
+// только при MODEL_MEMORY_PREFETCH=false (откат): в обычном режиме память
+// предзагружается карточкой, и forced-вызова нет (решение 2026-11-02).
 func wantForcedTool(in Input, hasMemory bool) bool {
 	return in.Direct && hasMemory && in.Attempt <= 1
+}
+
+// memoryToolsLimit — эффективный потолок обращений к памяти на разговорном
+// ходе с предзагрузкой (решение 2026-11-02): карточка уже покрывает обычный
+// случай, инструменты — страховка, а не основной путь. min(ToolCallsLimit, 3).
+const memoryToolsLimit = 3
+
+// memoryToolPlan — режим инструментов памяти на разговорном ходе. Enabled —
+// выдавать инструменты; ForcedTool — принудительный первый вызов (только
+// откат без предзагрузки); Limit — эффективный лимит обращений (0 — без
+// ограничения).
+type memoryToolPlan struct {
+	Enabled    bool
+	ForcedTool string
+	Limit      int
+}
+
+// planMemoryTools решает, нужны ли инструменты памяти на этом ходе.
+//
+// Обычный режим (решение 2026-11-02): история цела и карточка собеседника
+// влезла в потолок — модель уже видит весь разговор и ключевые заметки, значит
+// ход идёт одним вызовом БЕЗ инструментов памяти. История урезана или карточка
+// не влезла — инструменты включаются, но без forced-вызова и с лимитом
+// min(ToolCallsLimit, 3): добрать недостающее, а не исследовать память заново.
+//
+// Откат (prefetch=false): прежнее поведение — инструменты всегда, forced на
+// прямом обращении, лимит из конфигурации.
+func planMemoryTools(in Input, bctx BaseContext, hasMemory, prefetch bool, configuredLimit int) memoryToolPlan {
+	if !hasMemory {
+		return memoryToolPlan{}
+	}
+	if !prefetch {
+		plan := memoryToolPlan{Enabled: true, Limit: configuredLimit}
+		if wantForcedTool(in, hasMemory) {
+			plan.ForcedTool = memory.ToolSearch
+		}
+		return plan
+	}
+	if !bctx.HistoryTrimmed && bctx.MemoryCardFitted {
+		return memoryToolPlan{}
+	}
+	limit := memoryToolsLimit
+	if configuredLimit > 0 && configuredLimit < limit {
+		limit = configuredLimit
+	}
+	return memoryToolPlan{Enabled: true, Limit: limit}
 }
 
 // ErrModelNotConfigured — модель не настроена: ход не выполняется и не
@@ -78,6 +128,12 @@ type Runner struct {
 
 	// Memory — инструментарий памяти (9.3); nil — ход без инструментов памяти.
 	Memory *memory.Toolset
+	// MemoryPrefetch — память предзагружается карточкой в панель состояния
+	// (решение 2026-11-02). false — откат к forced tool-calling.
+	MemoryPrefetch bool
+	// Timezone — пояс абсолютных меток истории (AGENT_TIMEZONE); nil — пояс
+	// по умолчанию Europe/Moscow.
+	Timezone *time.Location
 	// Photos — скачивание фото Telegram (vision §6.1); nil — модель видит текст.
 	Photos PhotoFetcher
 	// Typing — «печатает…» (§13.3); nil — не показывать.
@@ -92,8 +148,9 @@ type Input struct {
 	ChatID  int64
 	ScopeID string
 	Batch   []BatchEvent
-	// Direct — прямое обращение (приоритет 1 §5.2): первый вызов инструмента
-	// памяти принудительный (§10.4).
+	// Direct — прямое обращение (приоритет 1 §5.2). При откате
+	// MODEL_MEMORY_PREFETCH=false первый вызов памяти принудительный (§10.4);
+	// в обычном режиме память предзагружена карточкой (решение 2026-11-02).
 	Direct bool
 	// Attempt — номер попытки обработки (для детерминированного operation_id §16).
 	Attempt int
@@ -184,6 +241,9 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if strings.TrimSpace(userText) == "" {
 		userText = "[сообщение без текста]"
 	}
+	// Панель состояния — первая часть финального пользовательского сообщения,
+	// перед пачкой (решение 2026-11-02): динамика не в system.
+	userText = composeUserText(bctx.StatePanel, userText)
 
 	// Фото пачки (vision §6.1): скачивание до вызова, ошибки — ход по тексту.
 	photos := CollectPhotos(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn, func(format string, args ...any) {
@@ -236,11 +296,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
 	// получает обычный вызов и может ответить финальным TurnResult.
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
-	if wantForcedTool(in, r.Memory != nil) {
-		// Forced tool-calling на прямом обращении (§10.4): первый вызов модели
-		// обязан обратиться к forced-инструменту памяти — гарантия «прямой
-		// вопрос всегда получает нужную память» держится механикой провайдера.
-		cfg.ForcedTool = memory.ToolSearch
+	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
+	if plan.ForcedTool != "" {
+		// Forced tool-calling на прямом обращении (§10.4): только в режиме
+		// отката (MODEL_MEMORY_PREFETCH=false). В обычном режиме память уже
+		// в карточке панели (решение 2026-11-02).
+		cfg.ForcedTool = plan.ForcedTool
 	}
 
 	opts := []agent.Option{
@@ -252,14 +313,14 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			response.WithRawName("TurnResult"),
 			response.WithRawDescription("Цельный результат хода: решение, сообщения, кандидаты памяти, дельты состояния."))),
 	}
-	if r.Memory != nil {
+	if plan.Enabled {
 		opts = append(opts, agent.WithTools(r.Memory.Tools()...))
 	}
 	// История чата (§11.1 п.5): реплики прошлых ходов — настоящими user/
 	// assistant сообщениями до пачки, append-only (кэш префикса провайдера
-	// не страдает). Пустая история — поток по умолчанию.
+	// не страдает). Метки времени абсолютные, автор — из БД.
 	if len(bctx.History) > 0 {
-		seeded, err := historyStream(bctx.History)
+		seeded, err := historyStream(bctx.History, r.Timezone)
 		if err != nil {
 			return TurnResult{}, 0, 0, fmt.Errorf("ход %d: история чата не посеяна: %w", in.TurnID, err)
 		}
@@ -270,14 +331,14 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// журналирование tool_call/tool_result — наружу лимита, чтобы отклонённые
 	// лимитом вызовы тоже были зафиксированы; typing §13.3 — на весь ход.
 	budgetMW := NewBudgetMiddleware(r.Budget, operation, r.DailyCallsLimit, r.Logger)
-	toolMW := NewToolLimitMiddleware(r.ToolCallsLimit, r.Logger)
+	toolMW := NewToolLimitMiddleware(plan.Limit, r.Logger)
 	// Исчерпание лимита отключает инструменты на конфиге хода: следующий
 	// модельный вызов идёт без tools и без forced tool_choice (bug 2026-11-02).
 	toolMW.SetOnExhausted(cfg.DisableTools)
 	// Прямой ход на стоп-кране отвечает видимой реакцией, а не молчанием.
 	toolMW.SetDirect(in.Direct)
 	mws := []agomiddleware.Factory{func() agomiddleware.Middleware { return budgetMW }}
-	if r.Memory != nil {
+	if plan.Enabled {
 		mws = append(mws,
 			func() agomiddleware.Middleware { return &toolJournalMW{runner: r, turnID: in.TurnID} },
 			func() agomiddleware.Middleware { return toolMW },
@@ -305,7 +366,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 
 	// --- строгая валидация ответа (§11.2); один repair-retry (§11.3) ---
 	repairs := 0
-	result, perr := parseReply(reply)
+	result, perr := parseReply(reply, bctx.History)
 	if perr != nil {
 		repairs = 1
 		fixed, ferr := reply.Ask(ctx,
@@ -313,7 +374,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		if ferr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), ferr
 		}
-		result, perr = parseReply(fixed)
+		result, perr = parseReply(fixed, bctx.History)
 		if perr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), &invalidResultError{err: perr}
 		}
@@ -321,13 +382,14 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	return result, repairs, budgetMW.callCount(), nil
 }
 
-// parseReply разбирает тело ответа как строгий TurnResult (§11.2).
-func parseReply(reply *agent.AgentReply) (TurnResult, error) {
+// parseReply разбирает тело ответа как строгий TurnResult (§11.2); история
+// нужна, чтобы срезать скопированного автора реплики до валидации.
+func parseReply(reply *agent.AgentReply, history []HistoryMessage) (TurnResult, error) {
 	body, err := reply.Content()
 	if err != nil {
 		return TurnResult{}, err
 	}
-	return ParseTurnResult(body)
+	return ParseTurnResultWithHistory(body, history)
 }
 
 // toolJournalMW — middleware журналирования инструментного цикла (§12.1:

@@ -360,3 +360,76 @@ func TestLoadConfigDBMaxConns(t *testing.T) {
 		}
 	}
 }
+
+// TestLoadConfigTimezone — часовой пояс меток истории/панели (AGENT_TIMEZONE):
+// по умолчанию Europe/Moscow, явная IANA-зона применяется, неизвестная —
+// ошибка запуска (молчаливая подмена исказила бы метки истории).
+func TestLoadConfigTimezone(t *testing.T) {
+	cfg, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x"}))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if cfg.Timezone == nil || cfg.Timezone.String() != DefaultTimezone {
+		t.Fatalf("таймзона по умолчанию = %v, хочу %s", cfg.Timezone, DefaultTimezone)
+	}
+
+	cfg, err = LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "AGENT_TIMEZONE": "Asia/Vladivostok"}))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if cfg.Timezone.String() != "Asia/Vladivostok" {
+		t.Fatalf("AGENT_TIMEZONE не применилась: %v", cfg.Timezone)
+	}
+
+	if _, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "AGENT_TIMEZONE": "Mars/Olympus"})); err == nil ||
+		!strings.Contains(err.Error(), "AGENT_TIMEZONE") {
+		t.Fatalf("неизвестная зона должна валить запуск с именем переменной, получено: %v", err)
+	}
+}
+
+// TestLoadConfigMemoryPrefetch — флаг отката среза 2: по умолчанию true
+// (карточка памяти вместо инструментов), явный false — старое поведение,
+// мусор — ошибка запуска.
+func TestLoadConfigMemoryPrefetch(t *testing.T) {
+	full := map[string]string{
+		"DATABASE_URL":   "x",
+		"MODEL_ENDPOINT": "https://api.example.com/v1",
+		"MODEL_API_KEY":  "key",
+		"MODEL_MODEL":    "gpt-x",
+	}
+	cfg, err := LoadConfig(envOf(full))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if !cfg.Model.MemoryPrefetch {
+		t.Fatalf("MODEL_MEMORY_PREFETCH по умолчанию должна быть true")
+	}
+
+	env := map[string]string{"MODEL_MEMORY_PREFETCH": "false"}
+	for k, v := range full {
+		env[k] = v
+	}
+	cfg, err = LoadConfig(envOf(env))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if cfg.Model.MemoryPrefetch {
+		t.Fatalf("MODEL_MEMORY_PREFETCH=false не применился")
+	}
+
+	env["MODEL_MEMORY_PREFETCH"] = "maybe"
+	if _, err := LoadConfig(envOf(env)); err == nil || !strings.Contains(err.Error(), "MODEL_MEMORY_PREFETCH") {
+		t.Fatalf("мусорная булева переменная должна валить запуск, получено: %v", err)
+	}
+
+	// Пустое значение = умолчание (как у числовых переменных): .env.example
+	// обещает «Пусто — true».
+	env["MODEL_MEMORY_PREFETCH"] = "   "
+	cfg, err = LoadConfig(envOf(env))
+	if err != nil {
+		t.Fatalf("пустое значение не должно валить запуск: %v", err)
+	}
+	if !cfg.Model.MemoryPrefetch {
+		t.Fatalf("пустое MODEL_MEMORY_PREFETCH должно давать true")
+	}
+}

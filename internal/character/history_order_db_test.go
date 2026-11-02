@@ -42,7 +42,8 @@ func TestRecentHistoryDeterministicOrderOnEqualTs(t *testing.T) {
 	}
 
 	// id по последовательностям: user 1..3, assistant 1..2; при равном ts
-	// свежее — больший id, при равном id сначала user (роль по убыванию).
+	// свежее — больший id, при равном id в хронологии сначала user, потом ответ
+	// (role ASC в DESC-выборке).
 	seedUser(101, "u1")
 	seedUser(102, "u2")
 	seedUser(103, "u3")
@@ -58,7 +59,7 @@ func TestRecentHistoryDeterministicOrderOnEqualTs(t *testing.T) {
 	}
 
 	// Полное окно: порядок одинаков от запроса к запросу.
-	wantAll := []string{"a1", "u1", "a2", "u2", "u3"}
+	wantAll := []string{"u1", "a1", "u2", "a2", "u3"}
 	for round := 0; round < 5; round++ {
 		history, err := RecentHistory(ctx, pool, chat, 10, 0)
 		if err != nil {
@@ -75,7 +76,7 @@ func TestRecentHistoryDeterministicOrderOnEqualTs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("история не читается: %v", err)
 	}
-	if got := texts(history); !equalStrings(got, []string{"a2", "u2", "u3"}) {
+	if got := texts(history); !equalStrings(got, []string{"u2", "a2", "u3"}) {
 		t.Fatalf("окно LIMIT 3 нестабильно: %v", got)
 	}
 }

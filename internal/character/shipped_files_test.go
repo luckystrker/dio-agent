@@ -36,40 +36,45 @@ func TestShippedSystemPromptRenders(t *testing.T) {
 		SpeechStyle: "Кратко.",
 		Values:      []string{"честность"},
 	}
-	// Живое состояние: mood и отношение есть.
-	out, err := BuildSystemPrompt(persona, PromptExtras{
+	// Живое состояние передаётся рендеру, но shipped-шаблон обязан его
+	// игнорировать: system статичен байт-в-байт (решение 2026-11-02).
+	live := PromptExtras{
 		MoodLine:         "в ровном настроении",
 		RelationshipLine: "почти незнаком",
-	}, template)
+		ActorLine:        "Данил",
+		MemoryBlock:      "любит пластинки",
+	}
+	out, err := BuildSystemPrompt(persona, live, template)
 	if err != nil {
 		t.Fatalf("config/system-prompt.md не рендерится: %v", err)
 	}
-	for _, want := range []string{"Ты — Dio", "в ровном настроении", "почти незнаком", "Правила поведения"} {
+	for _, want := range []string{"Ты — Dio", "Правила поведения", "Метки времени в истории"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("в промпте из shipped-шаблона нет %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "{{") || strings.Contains(out, "<!--") {
-		t.Fatalf("в промпте остались метки или комментарии:\n%s", out)
+	for _, dynamic := range []string{"в ровном настроении", "почти незнаком", "Данил", "пластинки", "{{", "<!--"} {
+		if strings.Contains(out, dynamic) {
+			t.Fatalf("динамика/метка %q попала в system:\n%s", dynamic, out)
+		}
+	}
+	if strings.HasSuffix(strings.TrimSpace(out), "Отношение к собеседнику") {
+		t.Fatalf("system заканчивается динамическим блоком:\n%s", out)
 	}
 	// Обязательные установки §7.1 входят через шаблон (решение этапа 7).
 	if !strings.Contains(out, "не проговаривай механически") {
 		t.Fatalf("обязательные установки §7.1 не в шаблоне:\n%s", out)
 	}
-	// Живое состояние — в самом конце каркаса (решение 2026-10-31, кэш
-	// префикса провайдера): {{mood}} и {{relationship}} после всей статики,
-	// включая «примеры» и заметку о пачке.
-	moodAt := strings.LastIndex(out, "Твоё состояние сейчас")
-	relAt := strings.LastIndex(out, "Отношение к собеседнику")
-	for _, anchor := range []string{"дио:", "отвечай на пачку целиком"} {
-		if strings.LastIndex(out, anchor) > moodAt {
-			t.Fatalf("статика %q после {{mood}} — динамика должна заканчивать промпт:\n%s", anchor, out)
-		}
+	// Same template, другое состояние — тот же байт-в-байт system.
+	other, err := BuildSystemPrompt(persona, PromptExtras{
+		MoodLine:         "зол и устал",
+		RelationshipLine: "враг",
+		ActorLine:        "Аня",
+	}, template)
+	if err != nil {
+		t.Fatalf("config/system-prompt.md не рендерится: %v", err)
 	}
-	if relAt < moodAt {
-		t.Fatalf("{{relationship}} раньше {{mood}}:\n%s", out)
-	}
-	if !strings.HasSuffix(strings.TrimSpace(out), "Отношение к собеседнику: почти незнаком.") {
-		t.Fatalf("промпт не заканчивается отношением к собеседнику:\n%s", out)
+	if out != other {
+		t.Fatalf("shipped system меняется вместе с состоянием хода")
 	}
 }

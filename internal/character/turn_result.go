@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -107,8 +108,21 @@ type TurnResult struct {
 
 // ParseTurnResult разбирает и валидирует ответ модели: строгий JSON (неизвестные
 // поля запрещены — additionalProperties: false схемы), без «мусора» после
-// объекта + правила §11.2.
+// объекта + правила §11.2. Истории нет (фоновые ходы): срезается только
+// служебная метка времени, без авторов.
 func ParseTurnResult(raw []byte) (TurnResult, error) {
+	return parseTurnResult(raw, nil)
+}
+
+// ParseTurnResultWithHistory — то же для разговорного хода: кроме метки времени
+// срезается скопированный автор из истории чата (только известный — «Важно: …»
+// остаётся). Санитайз выполняется ДО Validate: ответ, ставший пустым после
+// срезки, уходит в repair, а не в чат.
+func ParseTurnResultWithHistory(raw []byte, history []HistoryMessage) (TurnResult, error) {
+	return parseTurnResult(raw, history)
+}
+
+func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var r TurnResult
@@ -133,10 +147,77 @@ func ParseTurnResult(raw []byte) (TurnResult, error) {
 	// эффекта при выбранном decision не должен ронять проверку диапазона —
 	// ответ, валидный по смыслу, уходил в repair и терминальный пропуск хода.
 	r = stripInertContradictions(r)
+	// Модель иногда копирует служебную метку времени (а с ней и автора) из
+	// истории в ответ (решение 2026-11-02): срезаем до валидации, чтобы
+	// опустевшее сообщение ушло в repair, а не в чат.
+	r.Messages = stripLeadingHistoryStamps(r.Messages)
+	r.Messages = stripCopiedAuthors(r.Messages, history)
 	if err := r.Validate(); err != nil {
 		return TurnResult{}, err
 	}
 	return r, nil
+}
+
+// historyStampRe — ведущая служебная метка истории: день недели, дата и время
+// в формате панели. Срезается только такой точный вид (не любой «[...]»):
+// сообщение «[фото] смотри» или «[интересно]» остаётся как есть.
+var historyStampRe = regexp.MustCompile(`^\s*\[\s*(?:пн|вт|ср|чт|пт|сб|вс)\s+\d{2}\.\d{2}\s+\d{2}:\d{2}\s*\]\s*`)
+
+// stripLeadingHistoryStamps убирает ведущую метку времени из сообщений модели.
+// Если после срезки ничего не осталось, сообщение становится пустым: Validate
+// вернёт ошибку, и ход уйдёт в repair — служебная метка не станет ответом.
+func stripLeadingHistoryStamps(messages []string) []string {
+	for i, m := range messages {
+		loc := historyStampRe.FindStringIndex(m)
+		if loc == nil {
+			continue
+		}
+		messages[i] = m[loc[1]:]
+	}
+	return messages
+}
+
+// stripCopiedAuthors убирает скопированный из истории префикс автора, но только
+// если он действительно принадлежит известному автору этого чата: «Коля: …»
+// срезается, «Важно: …» остаётся. Авторы санитизируются так же, как при
+// рендере провода (иначе имя с переводом строки никогда не совпадёт), длинные
+// префиксы проверяются первыми — детерминированно, без обхода map.
+func stripCopiedAuthors(messages []string, history []HistoryMessage) []string {
+	seen := make(map[string]struct{}, len(history))
+	var authors []string
+	for _, m := range history {
+		if m.Role != "user" {
+			continue
+		}
+		author := sanitizePanelValue(m.Author, 80)
+		if author == "" {
+			continue
+		}
+		if _, ok := seen[author]; ok {
+			continue
+		}
+		seen[author] = struct{}{}
+		authors = append(authors, author)
+	}
+	if len(authors) == 0 {
+		return messages
+	}
+	sort.Slice(authors, func(i, j int) bool {
+		if len(authors[i]) != len(authors[j]) {
+			return len(authors[i]) > len(authors[j])
+		}
+		return authors[i] < authors[j]
+	})
+	for i, m := range messages {
+		for _, author := range authors {
+			prefix := author + ": "
+			if strings.HasPrefix(m, prefix) {
+				messages[i] = strings.TrimSpace(m[len(prefix):])
+				break
+			}
+		}
+	}
+	return messages
 }
 
 func rangeErr(what string, v, min, max float64) error {

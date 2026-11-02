@@ -149,14 +149,35 @@ func (s *BudgetStore) Release(ctx context.Context, operationID, pool string, cou
 	return tx.Commit(ctx)
 }
 
+// ActualUsage — фактическая стоимость операции. CachedTokens — токены
+// префикса, прочитанные из кэша провайдера (nil — провайдер их не сообщил):
+// наблюдаемость попадания в префикс (решение 2026-11-02).
+type ActualUsage struct {
+	Tokens       int64
+	Calls        int64
+	CachedTokens *int64
+	Unknown      bool
+}
+
 // RecordActual фиксирует фактический usage операции (§16: отчётность различает
 // reserved и spent). unknownUsage=true — стоимость неизвестна (timeout): actual
 // не пишется нулевым, только счётчики вызовов.
 func (s *BudgetStore) RecordActual(ctx context.Context, operationID, pool string, tokens, calls int64, unknownUsage bool) error {
-	actual := map[string]any{"tokens": tokens, "calls": calls}
-	if unknownUsage {
+	return s.RecordActualUsage(ctx, operationID, pool, ActualUsage{Tokens: tokens, Calls: calls, Unknown: unknownUsage})
+}
+
+// RecordActualUsage — RecordActual с отдельным полем кэшированных токенов.
+// Кэш-попадание не меняет сумму tokens (провайдер уже учёл его в prompt_tokens),
+// но видно в actual как cached_tokens: по нему проверяется, что префикс не
+// пересобирается между ходами.
+func (s *BudgetStore) RecordActualUsage(ctx context.Context, operationID, pool string, usage ActualUsage) error {
+	actual := map[string]any{"tokens": usage.Tokens, "calls": usage.Calls}
+	if usage.CachedTokens != nil {
+		actual["cached_tokens"] = *usage.CachedTokens
+	}
+	if usage.Unknown {
 		// Неизвестная стоимость ≠ нулевая: actual не заполняется токенами.
-		actual = map[string]any{"calls": calls, "unknown": true}
+		actual = map[string]any{"calls": usage.Calls, "unknown": true}
 	}
 	raw, err := json.Marshal(actual)
 	if err != nil {
@@ -173,7 +194,7 @@ func (s *BudgetStore) RecordActual(ctx context.Context, operationID, pool string
 		ON CONFLICT (pool, period) DO UPDATE
 		  SET actual_tokens = budget_counters.actual_tokens + $2,
 		      actual_calls  = budget_counters.actual_calls + $3,
-		      updated_at = now()`, pool, tokens, calls)
+		      updated_at = now()`, pool, usage.Tokens, usage.Calls)
 	if err != nil {
 		return fmt.Errorf("бюджет: фактический счётчик не увеличен: %w", err)
 	}

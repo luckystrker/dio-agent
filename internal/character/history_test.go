@@ -6,6 +6,7 @@ package character
 import (
 	"reflect"
 	"testing"
+	"time"
 )
 
 // TestFitHistoryNoPerMessageAllocations — линейный проход не выделяет память
@@ -94,4 +95,27 @@ func sameSuffix(src, want []HistoryMessage) bool {
 		return false
 	}
 	return reflect.DeepEqual(src[len(src)-len(want):], want)
+}
+
+// TestFitHistoryBudgetsRenderedLine — с 2026-11-02 бюджет считает метку
+// времени и автора: иначе фактический провод превышал MODEL_HISTORY_MAX_CHARS.
+func TestFitHistoryBudgetsRenderedLine(t *testing.T) {
+	at := time.Date(2026, 11, 2, 17, 2, 0, 0, time.UTC)
+	messages := []HistoryMessage{
+		{Role: "user", Content: "12345", At: at, Author: "Коля"},
+		{Role: "user", Content: "12345", At: at, Author: "Коля"},
+	}
+	// Одна реплика на проводе: 5 текста + 17 метки + 6 автора = 28; бюджет 30
+	// вмещает только самую свежую.
+	if got := FitHistory(messages, 30); len(got) != 1 || got[0] != messages[1] {
+		t.Fatalf("бюджет не учёл метку/автора: %+v", got)
+	}
+	// Без времени/автора — прежнее поведение (только текст).
+	plain := []HistoryMessage{
+		{Role: "user", Content: "12345"},
+		{Role: "user", Content: "12345"},
+	}
+	if got := FitHistory(plain, 9); len(got) != 1 {
+		t.Fatalf("старое поведение бюджета сломано: %+v", got)
+	}
 }

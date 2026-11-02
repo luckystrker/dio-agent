@@ -264,6 +264,11 @@ func newHarnessDSNTuned(t *testing.T, dsn string, tune func(*Options), resp ...*
 			DatabaseURL: dsn,
 			LogLevel:    runtime.LogLevelError,
 			NodeEnv:     runtime.NodeEnvTest,
+			// Старые E2E-сценарии проверяют инструментный путь памяти: явно
+			// оставляем прежнее поведение (карточки нет, инструменты всегда).
+			// Прод-путь с MODEL_MEMORY_PREFETCH=true проверяется БД-тестами
+			// character.Spec20 / unit-тестом memoryPrefetch.
+			Model: &runtime.ModelSettings{MemoryPrefetch: false},
 		},
 		// §7.1-файлы из корня репозитория: дефолтные пути относительны рабочей
 		// директории процесса, тесты работают из internal/app.

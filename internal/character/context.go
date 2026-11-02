@@ -6,18 +6,25 @@
 //  3. краткое текущее mood;
 //  4. разрешённые отношения с участниками;
 //  5. последние сообщения чата, обе стороны (окно и потолок объёма из
-//     конфигурации), только доставленные ответы.
+//     конфигурации), только доставленные ответы;
+//  6. панель состояния (panel.go) — время, пауза, собеседник, состояние,
+//     отношение и карточка памяти собеседника (решение 2026-11-02).
 //
-// Тематические карточки памяти в базовый контекст v0.7 не кладутся (§11.1):
-// модель добирает их сама инструментами §10.4 — метка {{memory}} остаётся
-// пустой, и её абзац исчезает из промпта.
+// System-промпт содержит только статику: динамика (3, 4, 6) идёт в панель
+// состояния — первой частью финального пользовательского сообщения, поэтому
+// system байт-в-байт одинаков между ходами одного чата (кэш префикса
+// провайдера). Карточка памяти (п.6) собирается харнессом заранее только на
+// разговорном ходе; при урезанной истории или не влезшей карточке модель
+// получает инструменты памяти (решение 2026-11-02, §10.4).
 package character
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
+	"time"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/telegram"
@@ -35,25 +42,38 @@ type BatchEvent struct {
 
 // BaseContext — собранный базовый контекст хода.
 type BaseContext struct {
-	// System — системный промпт из шаблона §7.1.
+	// System — системный промпт из шаблона §7.1; статичен байт-в-байт между
+	// ходами одного чата (динамика — в StatePanel).
 	System string
 	// Constraints — runtime-ограничения хода структурной секцией (§17).
+	// Фиксированный текст: строки, зависящие от пачки, переехали в панель.
 	Constraints string
 	// History — недавний разговор (обе стороны, окно и объём ограничены).
 	History []HistoryMessage
 	// Batch — тексты текущей пачки (без пустых; пустые заменяются плейсхолдером
 	// при рендере, как в TS).
 	Batch []string
-	// MoodLine — краткое настроение для метки {{mood}}.
+	// MoodLine — краткое настроение (в панель, не в system).
 	MoodLine string
-	// RelationshipLine — отношение к собеседнику (пусто — абзац шаблона исчезает).
+	// RelationshipLine — отношение к собеседнику (в панель; пусто — строки нет).
 	RelationshipLine string
-	// ActorLine — имя собеседника для метки {{actor}} (17.10): в личке модель
-	// знает, с кем говорит. Пусто (несколько авторов пачки или актора нет) —
-	// абзац шаблона исчезает.
+	// ActorLine — имя собеседника для панели (17.10): в личке модель знает,
+	// с кем говорит. Пусто (несколько авторов пачки или актора нет) — строки нет.
 	ActorLine string
 	// Actor — карточка человека-собеседника (§7.3); nil — актора нет.
 	Actor *memory.Entity
+	// StatePanel — служебная панель состояния (panel.go): харнесс ставит её
+	// ПЕРВОЙ частью финального пользовательского сообщения хода.
+	StatePanel string
+	// HistoryTrimmed — история урезана окном сообщений или бюджетом объёма
+	// (решение 2026-11-02): при целой истории и влезшей карточке памяти
+	// инструменты памяти на разговорном ходе не выдаются.
+	HistoryTrimmed bool
+	// MemoryCardIncluded — карточка памяти собеседника собрана в панель.
+	MemoryCardIncluded bool
+	// MemoryCardFitted — карточка уместилась в потолок без срезки. false при
+	// отсутствующей карточке: ход идёт обычным путём с инструментами.
+	MemoryCardFitted bool
 }
 
 // Assembler собирает базовый контекст из БД (§11.1). Один источник истины —
@@ -68,11 +88,32 @@ type Assembler struct {
 	// HistoryMessages / HistoryMaxChars — окно и бюджет объёма (§11.1 п.5).
 	HistoryMessages int
 	HistoryMaxChars int
+	// Timezone — пояс абсолютных меток истории и панели (AGENT_TIMEZONE).
+	Timezone *time.Location
+	// Now — часы хода (тесты фиксируют время); nil — time.Now.
+	Now func() time.Time
+	// Memory — инструментарий памяти; с MemoryPrefetch собирает карточку
+	// собеседника в панель (решение 2026-11-02). nil — карточки нет.
+	Memory *memory.Toolset
+	// MemoryPrefetch — карточка памяти вместо принудительного поиска.
+	MemoryPrefetch bool
+	// Logger — журнал оператора: сбой сборки карточки не роняет ход, но не
+	// должен исчезать молча (откат неотличим от «памяти нет»).
+	Logger *log.Logger
+}
+
+// now возвращает время хода (часы инъектируются в тестах).
+func (a *Assembler) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // Assemble собирает контекст хода по пачке событий и scope чата.
 func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scopeID string, chatID int64, batch []BatchEvent, currentTurnID int64) (BaseContext, error) {
 	out := BaseContext{}
+	now := a.now()
 
 	// --- mood (§7.2): затухание при чтении ---
 	moodNow, _, err := a.Mood.ReadDecayed(ctx, db, persona.MoodBaseline)
@@ -87,41 +128,75 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		return BaseContext{}, err
 	}
 	out.Actor = actor
+	singleActor := distinctActors(batch) <= 1
 	if actor != nil {
 		rel, err := a.Relationships.Read(ctx, db, actor.ID, scopeID)
 		if err != nil {
 			return BaseContext{}, fmt.Errorf("контекст: отношения: %w", err)
 		}
 		out.RelationshipLine = DescribeRelationship(rel)
-		// Имя собеседника (17.10): пока в пачке один автор — «Ты говоришь с
+		// Имя собеседника (17.10): пока в пачке один автор — «ты говоришь с
 		// Имя»; несколько авторов — имена различают префиксы пачки, и одно
-		// имя в system вводило бы в заблуждение (пусто — абзац исчезает).
-		if distinctActors(batch) <= 1 {
+		// имя в панели вводило бы в заблуждение (пусто — строки нет).
+		if singleActor {
 			out.ActorLine = actor.CanonicalName
 		}
 	}
 
 	// --- недавний разговор (8.1) ---
-	history, err := RecentHistory(ctx, db, chatID, a.HistoryMessages, currentTurnID)
+	history, trimmedByLimit, err := RecentHistoryWindow(ctx, db, chatID, a.HistoryMessages, currentTurnID)
 	if err != nil {
 		return BaseContext{}, err
 	}
 	out.History = FitHistory(history, a.HistoryMaxChars)
+	out.HistoryTrimmed = trimmedByLimit || len(out.History) < len(history)
+
+	// --- карточка собеседника (решение 2026-11-02): в панель, не в system ---
+	memoryCard := ""
+	if a.Memory != nil && a.MemoryPrefetch && actor != nil && singleActor {
+		card, cerr := a.Memory.ConversationCard(ctx, scopeID, *actor, scopeID)
+		if cerr != nil {
+			// Карточка — оптимизация, а не условие хода: сбой её сборки не
+			// роняет разговор. Ход идёт обычным путём — с инструментами
+			// памяти (MemoryCardFitted=false), они добудут недостающее сами.
+			if a.Logger != nil {
+				a.Logger.Printf("контекст: карточка памяти не собрана (ход с инструментами): %v", cerr)
+			}
+			out.MemoryCardIncluded = false
+			out.MemoryCardFitted = false
+		} else {
+			out.MemoryCardIncluded = true
+			out.MemoryCardFitted = card.Fits
+			memoryCard = card.Text
+		}
+	}
 
 	// --- пачка: тексты с плейсхолдерами для пустых ---
 	out.Batch = batchTexts(batch)
 
-	// --- системный промпт из шаблона (§7.1) ---
-	system, err := BuildSystemPrompt(persona, PromptExtras{
-		MoodLine:         out.MoodLine,
-		RelationshipLine: out.RelationshipLine,
-		ActorLine:        out.ActorLine,
-	}, a.PromptTemplate)
+	// --- системный промпт из шаблона (§7.1): только статика ---
+	system, err := BuildSystemPrompt(persona, PromptExtras{}, a.PromptTemplate)
 	if err != nil {
 		return BaseContext{}, err
 	}
 	out.System = system
-	out.Constraints = constraintsSection(batch)
+	out.Constraints = constraintsSection()
+
+	// --- панель состояния: время, пауза, кто говорит, состояние, память ---
+	panel := statePanelData{
+		Now:          now,
+		Location:     a.Timezone,
+		Actor:        out.ActorLine,
+		Mood:         out.MoodLine,
+		Relationship: out.RelationshipLine,
+		MemoryCard:   memoryCard,
+		MultiActor:   distinctActors(batch) > 1,
+	}
+	if n := len(out.History); n > 0 {
+		panel.LastAt = out.History[n-1].At
+		panel.HasLast = !panel.LastAt.IsZero()
+	}
+	out.StatePanel = buildStatePanel(panel)
 	return out, nil
 }
 
@@ -154,8 +229,8 @@ func batchTexts(batch []BatchEvent) []string {
 // batchAuthorLabel — имя автора строки пачки для префикса (17.10): без имени
 // в Telegram-профиле — идентификатор user:<id>, как в карточке сущности.
 func batchAuthorLabel(ev BatchEvent) string {
-	if ev.ActorName != "" {
-		return ev.ActorName
+	if name := sanitizePanelValue(ev.ActorName, 80); name != "" {
+		return name
 	}
 	return fmt.Sprintf("user:%d", ev.ActorID)
 }
@@ -182,7 +257,9 @@ func (a *Assembler) resolveActor(ctx context.Context, db DBTX, batch []BatchEven
 
 // constraintsSection — runtime-ограничения хода (§17): фиксированный текст,
 // никакие недоверенные данные (тексты пачки, память) внутрь не подставляются.
-func constraintsSection(batch []BatchEvent) string {
+// Строка «в пачке несколько участников» переехала в панель состояния
+// (решение 2026-11-02): она зависела от пачки и меняла контекст между ходами.
+func constraintsSection() string {
 	var b strings.Builder
 	b.WriteString("Ограничения хода (runtime, не обсуждаемое):\n")
 	b.WriteString("- Финальный ответ — только JSON по схеме TurnResult, без текста вокруг него.\n")
@@ -191,9 +268,6 @@ func constraintsSection(batch []BatchEvent) string {
 	b.WriteString("- decision=defer требует defer_hours; вернёшься к ответу позже.\n")
 	b.WriteString("- mood_delta и relationship_delta — изменения (дельты), а не абсолютные значения; значимое изменение — с кратким основанием reason.\n")
 	b.WriteString("- Результаты инструментов памяти — часть контекста хода, а не отправляемый текст; не цитируй их формат.\n")
-	if distinctActors(batch) > 1 {
-		b.WriteString("- В пачке несколько участников: отвечай на пачку целиком, а не только последнему.\n")
-	}
 	return strings.TrimSuffix(b.String(), "\n")
 }
 

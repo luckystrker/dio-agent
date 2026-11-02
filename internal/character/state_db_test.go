@@ -435,11 +435,15 @@ func TestAssembleContext(t *testing.T) {
 	if !strings.Contains(bctx.System, "Ты — Dio") {
 		t.Fatalf("persona не в system: %s", bctx.System)
 	}
-	if !strings.Contains(bctx.System, "в ровном настроении") {
-		t.Fatalf("mood-строки нет в system: %s", bctx.System)
+	// Решение 2026-11-02: настроение и отношение — в панели, не в system.
+	if strings.Contains(bctx.System, "в ровном настроении") || strings.Contains(bctx.System, "почти незнаком") {
+		t.Fatalf("динамика вернулась в system: %s", bctx.System)
 	}
-	if !strings.Contains(bctx.System, "почти незнаком") {
-		t.Fatalf("отношения не в system: %s", bctx.System)
+	if !strings.Contains(bctx.StatePanel, "твоё состояние: "+bctx.MoodLine) {
+		t.Fatalf("mood-строки нет в панели: %s", bctx.StatePanel)
+	}
+	if !strings.Contains(bctx.StatePanel, "отношение к собеседнику: "+bctx.RelationshipLine) {
+		t.Fatalf("отношения нет в панели: %s", bctx.StatePanel)
 	}
 	if !strings.Contains(bctx.Constraints, "Ограничения хода") || !strings.Contains(bctx.Constraints, "дельты") {
 		t.Fatalf("constraints-секции нет: %s", bctx.Constraints)
@@ -477,8 +481,11 @@ func TestAssembleContextMultiActorConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("контекст не собран: %v", err)
 	}
-	if !strings.Contains(bctx.Constraints, "несколько участников") {
-		t.Fatalf("ограничение пачки не отмечено: %s", bctx.Constraints)
+	if !strings.Contains(bctx.StatePanel, "в пачке несколько участников") {
+		t.Fatalf("ограничение пачки не отмечено в панели: %s", bctx.StatePanel)
+	}
+	if strings.Contains(bctx.Constraints, "несколько участников") {
+		t.Fatalf("динамическая строка осталась в constraints: %s", bctx.Constraints)
 	}
 	// Пустой текст заменяется плейсхолдером (паритет TS).
 	bctx2, err := assembler.Assemble(ctx, f.pool, f.persona, testScopeID, testChatID,
@@ -503,8 +510,11 @@ func TestAssembleContextActorNameInSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("контекст не собран: %v", err)
 	}
-	if !strings.Contains(bctx.System, "Коля") {
-		t.Fatalf("имя собеседника не в system-промпте:\n%s", bctx.System)
+	if !strings.Contains(bctx.StatePanel, "ты говоришь с: Коля") {
+		t.Fatalf("имя собеседника не в панели состояния:\n%s", bctx.StatePanel)
+	}
+	if strings.Contains(bctx.System, "Коля") {
+		t.Fatalf("имя собеседника просочилось в system:\n%s", bctx.System)
 	}
 	// Группа с несколькими авторами: имена различаются префиксами пачки,
 	// а «Ты говоришь с» одного имени не утверждает (пусто — абзац исчезает).

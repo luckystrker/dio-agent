@@ -120,12 +120,10 @@ func TestBuildSystemPromptFileTemplate(t *testing.T) {
 	}
 }
 
-// TestRenderSystemPromptActorLabel — приёмка 17.10: метка {{actor}} рендерится
-// именем собеседника, а пустая ActorLine убирает абзац целиком (несколько
-// авторов пачки — имена различают префиксы, одиночное имя вводило бы в
-// заблуждение). Дефолтный каркас содержит метку — без правки шаблона в конфиге
-// имя бы не доехало.
-func TestRenderSystemPromptActorLabel(t *testing.T) {
+// TestRenderSystemPromptActorLabelSupported — метка {{actor}} поддерживается
+// рендером для старых пользовательских шаблонов, но в дефолтном каркасе её
+// больше нет (решение 2026-11-02: собеседник — в панели состояния).
+func TestRenderSystemPromptActorLabelSupported(t *testing.T) {
 	out, err := RenderSystemPrompt(DefaultSystemPromptTemplate, testPersona(), PromptExtras{
 		MoodLine:  "в ровном настроении",
 		ActorLine: "Коля",
@@ -133,25 +131,47 @@ func TestRenderSystemPromptActorLabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("рендер упал: %v", err)
 	}
-	if !strings.Contains(out, "Ты говоришь с: Коля.") {
-		t.Fatalf("имя собеседника не в дефолтном каркасе:\n%s", out)
-	}
-	// Пустая ActorLine — абзац исчезает целиком, сироты-строк нет.
-	out, err = RenderSystemPrompt(DefaultSystemPromptTemplate, testPersona(), PromptExtras{
-		MoodLine: "в ровном настроении",
-	})
-	if err != nil {
-		t.Fatalf("рендер упал: %v", err)
-	}
 	if strings.Contains(out, "Ты говоришь с") || strings.Contains(out, "{{actor}}") {
-		t.Fatalf("абзац с пустой меткой {{actor}} не исчез:\n%s", out)
+		t.Fatalf("дефолтный каркас не должен содержать собеседника: %s", out)
 	}
-	// Свой шаблон с меткой — тоже рендерится (метка известна рендеру).
 	out, err = RenderSystemPrompt("Собеседник: {{actor}}.", testPersona(), PromptExtras{ActorLine: "Аня"})
 	if err != nil {
 		t.Fatalf("метка {{actor}} не распознана в своём шаблоне: %v", err)
 	}
 	if !strings.Contains(out, "Собеседник: Аня.") {
 		t.Fatalf("{{actor}} не заменён: %s", out)
+	}
+}
+
+// TestDefaultSystemPromptStatic — решение 2026-11-02: живое состояние
+// (настроение, отношение, собеседник, память) больше не входит в system.
+// Рендер с разными extras даёт байт-в-байт одинаковый текст: кэш префикса
+// провайдера не ломается при смене настроения.
+func TestDefaultSystemPromptStatic(t *testing.T) {
+	first, err := RenderSystemPrompt(DefaultSystemPromptTemplate, testPersona(), PromptExtras{
+		MoodLine:         "взволнован",
+		RelationshipLine: "близкий друг",
+		ActorLine:        "Коля",
+		MemoryBlock:      "любит пластинки",
+	})
+	if err != nil {
+		t.Fatalf("рендер упал: %v", err)
+	}
+	second, err := RenderSystemPrompt(DefaultSystemPromptTemplate, testPersona(), PromptExtras{
+		MoodLine:         "спокоен и ленив",
+		RelationshipLine: "едва знаком",
+		ActorLine:        "Аня",
+		MemoryBlock:      "другое",
+	})
+	if err != nil {
+		t.Fatalf("рендер упал: %v", err)
+	}
+	if first != second {
+		t.Fatalf("system меняется вместе с состоянием:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	for _, dynamic := range []string{"взволнован", "спокоен", "Коля", "Аня", "близкий друг", "пластинки"} {
+		if strings.Contains(first, dynamic) {
+			t.Fatalf("динамическое %q попало в system:\n%s", dynamic, first)
+		}
 	}
 }

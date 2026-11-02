@@ -865,14 +865,14 @@ func TestTurnHistoryReachesModel(t *testing.T) {
 	if len(evs) < 3 {
 		t.Fatalf("на проводе %d событий, want >= 3 (реплика + ответ + пачка)", len(evs))
 	}
-	if got := reqText(0); got != "я короче решил всё переписать" {
-		t.Fatalf("первая реплика истории = %q", got)
+	if got := reqText(0); !strings.HasSuffix(got, "] Коля: я короче решил всё переписать") {
+		t.Fatalf("первая реплика истории без метки/автора: %q", got)
 	}
 	resp, ok := events.AsValue(evs[1]).(events.ModelResponse)
-	if !ok || resp.Content() != "а что переписываешь?" {
-		t.Fatalf("второе событие не ответ ассистента: %T", events.AsValue(evs[1]))
+	if !ok || !strings.HasSuffix(resp.Content(), "] а что переписываешь?") {
+		t.Fatalf("второе событие не ответ ассистента с меткой: %T %q", events.AsValue(evs[1]), resp.Content())
 	}
-	if got := reqText(2); got != "ну там пару сервисов" {
-		t.Fatalf("пачка не после истории: %q", got)
+	if got := reqText(2); !strings.HasPrefix(got, statePanelOpen) || !strings.HasSuffix(got, "ну там пару сервисов") {
+		t.Fatalf("пачка не после истории/панели: %q", got)
 	}
 }

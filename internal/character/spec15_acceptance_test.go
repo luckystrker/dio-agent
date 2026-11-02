@@ -24,7 +24,7 @@ import (
 
 func sp15SeedAndBuild(t *testing.T, hist []HistoryMessage, batch string) []map[string]any {
 	t.Helper()
-	s, err := historyStream(hist)
+	s, err := historyStream(hist, nil)
 	if err != nil {
 		t.Fatalf("история не посеяна: %v", err)
 	}
@@ -219,73 +219,71 @@ func sp15LCP(a, b string) int {
 	return n
 }
 
-// Смена живого состояния меняет только ХВОСТ промпта: общий префикс двух
-// рендеров содержит всю статику (персона, правила, примеры, заметка о пачке),
-// а динамика — в самом конце (кэш префикса провайдера, решение 2026-11-01).
+// Решение 2026-11-02: живое состояние больше не в system. Два рендера
+// shipped-шаблона с разным настроением/отношением/собеседником/памятью дают
+// БАЙТ-В-БАЙТ одинаковый промпт — кэш префикса держится на всей истории.
 func TestSpec15ShippedPromptStaticPrefixStable(t *testing.T) {
 	tpl := readRepoFile(t, "../../config/system-prompt.md")
 	persona := sp15Persona()
-	a, err := BuildSystemPrompt(persona, PromptExtras{MoodLine: "в отличном настроении", RelationshipLine: "старый друг"}, tpl)
+	a, err := BuildSystemPrompt(persona, PromptExtras{
+		MoodLine: "в отличном настроении", RelationshipLine: "старый друг",
+		ActorLine: "Данил", MemoryBlock: "Помнишь: пластинки.",
+	}, tpl)
 	if err != nil {
 		t.Fatalf("shipped-шаблон не рендерится: %v", err)
 	}
-	b, err := BuildSystemPrompt(persona, PromptExtras{MoodLine: "раздражён", RelationshipLine: "насторожен"}, tpl)
+	b, err := BuildSystemPrompt(persona, PromptExtras{
+		MoodLine: "раздражён", RelationshipLine: "насторожен",
+		ActorLine: "Аня", MemoryBlock: "другое",
+	}, tpl)
 	if err != nil {
 		t.Fatalf("shipped-шаблон не рендерится: %v", err)
 	}
-	p := sp15LCP(a, b)
-	if p == len(a) || p == len(b) {
-		t.Fatalf("разное живое состояние дало одинаковый промпт")
+	if a != b {
+		t.Fatalf("shipped system меняется вместе с состоянием хода")
 	}
-	// Вся статика — внутри неизменного префикса.
+	for _, dyn := range []string{"в отличном настроении", "раздражён", "старый друг", "Данил", "Помнишь"} {
+		if strings.Contains(a, dyn) {
+			t.Fatalf("динамика %q попала в system:\n%s", dyn, a)
+		}
+	}
 	for _, anchor := range []string{"Ты — Dio", "Правила поведения", "дио:", "отвечай на пачку целиком"} {
-		if strings.LastIndex(a, anchor) >= p {
-			t.Fatalf("статика %q попала в изменяющийся хвост — {{mood}}/{{relationship}} не в конце каркаса", anchor)
+		if !strings.Contains(a, anchor) {
+			t.Fatalf("статика %q потерялась из shipped-шаблона:\n%s", anchor, a)
 		}
-	}
-	// Динамика — целиком в хвосте.
-	for _, dyn := range []string{"в отличном настроении", "старый друг"} {
-		if !strings.Contains(a[p:], dyn) {
-			t.Fatalf("динамика %q не в хвосте промпта", dyn)
-		}
-	}
-	for _, dyn := range []string{"раздражён", "насторожен"} {
-		if !strings.Contains(b[p:], dyn) {
-			t.Fatalf("динамика %q не в хвосте промпта", dyn)
-		}
-	}
-	if !strings.HasSuffix(a, "Отношение к собеседнику: старый друг.") {
-		t.Fatalf("промпт не заканчивается отношением к собеседнику:\n%s", a)
 	}
 }
 
-// Встроенный каркас: динамика завершает промпт, {{memory}} всегда пуст —
-// абзац памяти исчезает (§11.1: карточки модель добирает инструментами).
-func TestSpec15DefaultTemplateDynamicsAtEnd(t *testing.T) {
+// Встроенный каркас тоже статичен: динамические метки не рендерятся, память
+// предзагружается в панель, а не в system.
+func TestSpec15DefaultTemplateStatic(t *testing.T) {
 	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{
 		MoodLine:         "спокойное",
 		RelationshipLine: "тёплое",
+		ActorLine:        "Данил",
+		MemoryBlock:      "Помнишь: пластинки.",
 	}, "")
 	if err != nil {
 		t.Fatalf("встроенный шаблон не рендерится: %v", err)
 	}
-	if !strings.HasSuffix(out, "Отношение к собеседнику: тёплое.") {
-		t.Fatalf("встроенный промпт не заканчивается отношением:\n%s", out)
+	for _, dyn := range []string{"спокойное", "тёплое", "Данил", "Помнишь"} {
+		if strings.Contains(out, dyn) {
+			t.Fatalf("динамика %q попала во встроенный system:\n%s", dyn, out)
+		}
 	}
-	moodAt := strings.Index(out, "Твоё состояние сейчас: спокойное")
-	relAt := strings.LastIndex(out, "Отношение к собеседнику")
-	if moodAt < 0 || relAt < moodAt {
-		t.Fatalf("mood не перед relationship: mood=%d rel=%d\n%s", moodAt, relAt, out)
+	if strings.Contains(out, "долговременная память") || strings.Contains(out, "{{") {
+		t.Fatalf("метка памяти/метки остались во встроенном каркасе:\n%s", out)
 	}
-	if strings.Contains(out, "долговременная память") {
-		t.Fatalf("пустая {{memory}} оставила абзац памяти:\n%s", out)
+	if !strings.Contains(out, "Сообщения пользователя идут пачкой") {
+		t.Fatalf("статическая заметка о пачке потерялась:\n%s", out)
 	}
 }
 
-// Пустая метка убирает абзац ЦЕЛИКОМ — сироты-инструкции недопустимы (§7.1);
-// «динамика в конце» при этом не ломается.
+// Пустая метка убирает абзац ЦЕЛИКОМ — сироты-инструкции недопустимы (§7.1).
+// Проверяется на пользовательском шаблоне: рендер поддерживает прежние метки.
 func TestSpec15EmptyRelationshipDropsParagraph(t *testing.T) {
-	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{MoodLine: "спокойное"}, "")
+	tpl := "{{persona}}\n\nТвоё состояние сейчас: {{mood}}.\n\nОтношение к собеседнику: {{relationship}}."
+	out, err := RenderSystemPrompt(tpl, sp15Persona(), PromptExtras{MoodLine: "спокойное"})
 	if err != nil {
 		t.Fatalf("рендер упал: %v", err)
 	}
@@ -298,7 +296,8 @@ func TestSpec15EmptyRelationshipDropsParagraph(t *testing.T) {
 }
 
 func TestSpec15EmptyMoodDropsParagraph(t *testing.T) {
-	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{RelationshipLine: "тёплое"}, "")
+	tpl := "{{persona}}\n\nТвоё состояние сейчас: {{mood}}.\n\nОтношение к собеседнику: {{relationship}}."
+	out, err := RenderSystemPrompt(tpl, sp15Persona(), PromptExtras{RelationshipLine: "тёплое"})
 	if err != nil {
 		t.Fatalf("рендер упал: %v", err)
 	}
@@ -334,45 +333,46 @@ func TestSpec15UnknownLabelIsStartupError(t *testing.T) {
 	}
 }
 
-// Shipped-файл знает все четыре метки: при непустой памяти абзац памяти
-// возвращается (метка не удалена из каркаса, а именно пустует).
-func TestSpec15ShippedTemplateAllLabelsKnown(t *testing.T) {
+// Shipped-шаблон не содержит динамических меток: они уехали в панель
+// состояния (решение 2026-11-02). Рендер при этом продолжает их поддерживать
+// для старых пользовательских шаблонов (проверяется отдельным шаблоном).
+func TestSpec15ShippedTemplateHasNoDynamicLabels(t *testing.T) {
 	tpl := readRepoFile(t, "../../config/system-prompt.md")
+	for _, label := range []string{"{{memory}}", "{{mood}}", "{{relationship}}", "{{actor}}"} {
+		if strings.Contains(tpl, label) {
+			t.Fatalf("динамическая метка %s осталась в shipped-шаблоне", label)
+		}
+	}
 	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{
-		MoodLine:         "ровное",
-		RelationshipLine: "знакомый",
-		MemoryBlock:      "Помнишь: пластинки.",
-	}, tpl)
-	if err != nil {
-		t.Fatalf("shipped-шаблон не рендерится с полной памятью: %v", err)
-	}
-	if !strings.Contains(out, "Помнишь: пластинки.") {
-		t.Fatalf("{{memory}} из shipped-шаблона исчезла (метка удалена, а не пуста):\n%s", out)
-	}
-	if strings.Contains(out, "{{") {
-		t.Fatalf("в промпте остались незамещённые метки:\n%s", out)
-	}
-}
-
-// Порядок секций каркаса (решение 2026-11-01): {{memory}} — РАНЬШЕ живого
-// состояния. Без непустой памяти порядок не проверяем: абзац с пустой меткой
-// выпадает, и рендер переставленного шаблона совпадает байт-в-байт (находка
-// критика: точечная перестановка абзацев памяти/настроения пережила все
-// тесты, рендерившие шаблон с пустой {{memory}}).
-func TestSpec15ShippedTemplateMemoryBeforeDynamics(t *testing.T) {
-	tpl := readRepoFile(t, "../../config/system-prompt.md")
-	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{
-		MoodLine:         "ровное",
-		RelationshipLine: "знакомый",
-		MemoryBlock:      "Помнишь: пластинки.",
+		MemoryBlock: "Помнишь: пластинки.",
 	}, tpl)
 	if err != nil {
 		t.Fatalf("shipped-шаблон не рендерится: %v", err)
 	}
-	memAt := strings.Index(out, "Помнишь: пластинки.")
-	moodAt := strings.Index(out, "Твоё состояние сейчас")
-	relAt := strings.LastIndex(out, "Отношение к собеседнику")
-	if memAt < 0 || moodAt < 0 || !(memAt < moodAt && moodAt < relAt) {
-		t.Fatalf("порядок каркаса нарушен (память=%d, настроение=%d, отношение=%d):\n%s", memAt, moodAt, relAt, out)
+	if strings.Contains(out, "Помнишь: пластинки.") {
+		t.Fatalf("память просочилась в system:\n%s", out)
+	}
+	// Старый пользовательский шаблон: метка памяти всё ещё работает.
+	custom, err := RenderSystemPrompt("Память: {{memory}}", sp15Persona(), PromptExtras{MemoryBlock: "Помнишь: пластинки."})
+	if err != nil {
+		t.Fatalf("метка {{memory}} больше не поддерживается: %v", err)
+	}
+	if custom != "Память: Помнишь: пластинки." {
+		t.Fatalf("{{memory}} в своём шаблоне отрендерена неверно: %q", custom)
+	}
+}
+
+// Порядок статики shipped-шаблона: примеры и заметка о пачке — в статике,
+// метка времени — служебная и запрещена в ответах модели.
+func TestSpec15ShippedTemplateStaticRules(t *testing.T) {
+	tpl := readRepoFile(t, "../../config/system-prompt.md")
+	out, err := BuildSystemPrompt(sp15Persona(), PromptExtras{}, tpl)
+	if err != nil {
+		t.Fatalf("shipped-шаблон не рендерится: %v", err)
+	}
+	for _, anchor := range []string{"дио:", "отвечай на пачку целиком", "Метки времени в истории — служебные"} {
+		if !strings.Contains(out, anchor) {
+			t.Fatalf("статическое правило %q потерялось из shipped-шаблона:\n%s", anchor, out)
+		}
 	}
 }

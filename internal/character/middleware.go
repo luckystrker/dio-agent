@@ -104,19 +104,29 @@ func (m *BudgetMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.E
 		_ = m.store.RecordActual(context.Background(), operationID, m.pool, 0, 1, true)
 		return nil, err
 	}
-	tokens := int64(0)
-	if resp != nil {
-		if resp.Usage.PromptTokens != nil {
-			tokens += *resp.Usage.PromptTokens
-		}
-		if resp.Usage.CompletionTokens != nil {
-			tokens += *resp.Usage.CompletionTokens
-		}
-	}
-	if err := m.store.RecordActual(context.Background(), operationID, m.pool, tokens, 1, false); err != nil {
+	tokens, cached := usageTokens(resp)
+	if err := m.store.RecordActualUsage(context.Background(), operationID, m.pool,
+		runtime.ActualUsage{Tokens: tokens, Calls: 1, CachedTokens: cached}); err != nil {
 		m.logger.Printf("бюджет: фактический usage не записан: %v", err)
 	}
 	return resp, nil
+}
+
+// usageTokens — токены ответа и кэшированное попадание префикса (решение
+// 2026-11-02): ago отдаёт CacheReadInputTokens (prompt_tokens_details.cached_tokens
+// у OpenAI-совместимых провайдеров). Провайдер не сообщил — nil, а не 0:
+// «неизвестно» не должно выглядеть как полный промах кэша.
+func usageTokens(resp *events.ModelResponse) (tokens int64, cached *int64) {
+	if resp == nil {
+		return 0, nil
+	}
+	if resp.Usage.PromptTokens != nil {
+		tokens += *resp.Usage.PromptTokens
+	}
+	if resp.Usage.CompletionTokens != nil {
+		tokens += *resp.Usage.CompletionTokens
+	}
+	return tokens, resp.Usage.CacheReadInputTokens
 }
 
 // callCount — сколько модельных вызовов сделано в рамках хода (§20).

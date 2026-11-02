@@ -440,11 +440,43 @@ func (Items) ItemsForEntities(ctx context.Context, db DBTX, audience string, ent
 		 WHERE m.status = 'active'
 		   AND `+visCond("m", 1)+`
 		   AND l.entity_id = ANY($2)
-		 ORDER BY m.salience DESC, m.recorded_at DESC
+		 ORDER BY m.salience DESC, m.recorded_at DESC, m.id DESC
 		 LIMIT $3`,
 		audience, entityIDs, limit)
 	if err != nil {
 		return nil, fmt.Errorf("memory_items: записи по сущностям: %w", err)
+	}
+	defer rows.Close()
+	return collectItems(rows)
+}
+
+// LatestForScope — последние активные записи назначенного скоупа (карточка
+// собеседника, решение 2026-11-02): «что персонаж уже знает об этом чате».
+// Фильтр приватности тот же, что у инструментов: видимость проверяется в SQL
+// до выдачи текста (§9.2), поэтому запись чужого чата не попадает в карточку
+// даже при совпадении имени сущности. Порядок детерминирован (время, вес, id).
+func (Items) LatestForScope(ctx context.Context, db DBTX, audience, scopeID string, limit int) ([]Item, error) {
+	if !IsValidScope(audience) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidScope, audience)
+	}
+	if !IsValidScope(scopeID) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidScope, scopeID)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	rows, err := db.Query(ctx,
+		`SELECT `+prefixedItemCols("m")+` FROM memory_items m
+		 LEFT JOIN provenance p ON p.id = m.provenance_id
+		 WHERE m.status = 'active'
+		   AND m.scope_id = $2
+		   AND `+visCond("m", 1)+`
+		 ORDER BY m.recorded_at DESC, m.salience DESC, m.id DESC
+		 LIMIT $3`,
+		audience, scopeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("memory_items: последние записи скоупа: %w", err)
 	}
 	defer rows.Close()
 	return collectItems(rows)

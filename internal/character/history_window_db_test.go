@@ -49,10 +49,11 @@ func TestRecentHistoryEveryWindowIsSuffix(t *testing.T) {
 	}
 
 	// Полный хронологический порядок: при равном ts больший id свежее, при
-	// равном id свежее user (роль DESC) — пары идут (a_i, u_i) по росту id.
+	// равном id в хронологии сначала user, потом ответ (role ASC в DESC-выборке) —
+	// пары идут (u_i, a_i) по росту id.
 	wantFull := make([]string, 0, 20)
 	for i := 1; i <= 10; i++ {
-		wantFull = append(wantFull, fmt.Sprintf("a%d", i), fmt.Sprintf("u%d", i))
+		wantFull = append(wantFull, fmt.Sprintf("u%d", i), fmt.Sprintf("a%d", i))
 	}
 
 	for k := 1; k <= len(wantFull); k++ {

@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"time"
+	_ "time/tzdata" // IANA-зоны встроены в бинарник: AGENT_TIMEZONE не зависит от зон хоста
 
 	"fmt"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -61,6 +62,11 @@ type ModelSettings struct {
 	HistoryMessages      int // недавний разговор в контексте хода (§11.1 п.5)
 	HistoryMaxChars      int // потолок суммарного объёма истории
 	ToolCallsLimit       int // лимит обращений к инструментам за ход (§11.2, §17)
+	// MemoryPrefetch — карточка памяти собирается харнессом в панель состояния,
+	// и на разговорном ходе с целой историей инструменты памяти не выдаются
+	// (§11.1, решение 2026-11-02). false — откат к прежнему поведению: карточки
+	// нет, инструменты всегда, forced-вызов на прямом ходе.
+	MemoryPrefetch bool
 }
 
 // EmbeddingSettings — векторизатор для семантического поиска памяти
@@ -92,10 +98,14 @@ type Config struct {
 	// DBMaxConns — потолок соединений пула PostgreSQL (DB_MAX_CONNS, 18.5);
 	// LoadConfig всегда заполняет поле (дефолт 8), 0 — незаполненная группа.
 	DBMaxConns int
-	Model      *ModelSettings
-	Telegram   *TelegramSettings
-	Embedding  *EmbeddingSettings
-	Web        *WebSettings
+	// Timezone — часовой пояс меток времени истории и панели состояния
+	// (AGENT_TIMEZONE, IANA, по умолчанию Europe/Moscow). LoadConfig всегда
+	// заполняет поле; nil — конфиг собран не через LoadConfig.
+	Timezone  *time.Location
+	Model     *ModelSettings
+	Telegram  *TelegramSettings
+	Embedding *EmbeddingSettings
+	Web       *WebSettings
 }
 
 // WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
@@ -167,16 +177,40 @@ func LoadConfig(env Getenv) (Config, error) {
 		return Config{}, err
 	}
 
+	timezone, err := parseTimezone(env)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		DatabaseURL: databaseURL,
 		LogLevel:    logLevel,
 		NodeEnv:     nodeEnv,
 		DBMaxConns:  dbMaxConns,
+		Timezone:    timezone,
 		Model:       model,
 		Telegram:    telegram,
 		Embedding:   embedding,
 		Web:         web,
 	}, nil
+}
+
+// DefaultTimezone — часовой пояс персонажа по умолчанию (AGENT_TIMEZONE).
+const DefaultTimezone = "Europe/Moscow"
+
+// parseTimezone читает IANA-зону меток времени (AGENT_TIMEZONE): не задана —
+// Europe/Moscow; неизвестная зона останавливает запуск, а не подменяется
+// молча (метки истории должны быть однозначны).
+func parseTimezone(env Getenv) (*time.Location, error) {
+	name := strings.TrimSpace(lookupWithDefault(env, "AGENT_TIMEZONE", DefaultTimezone))
+	if name == "" {
+		name = DefaultTimezone
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("AGENT_TIMEZONE=%q: неизвестная IANA-зона (%v)", name, err)
+	}
+	return loc, nil
 }
 
 // parseWebSettings читает группу WEB_*: по умолчанию веб выключен (§15/§16 —
@@ -345,6 +379,10 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	if err != nil {
 		return nil, err
 	}
+	memoryPrefetch, err := boolEnv(env, "MODEL_MEMORY_PREFETCH", true)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ModelSettings{
 		Endpoint:             endpoint,
@@ -358,7 +396,29 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 		HistoryMessages:      historyMessages,
 		HistoryMaxChars:      historyMaxChars,
 		ToolCallsLimit:       toolCallsLimit,
+		MemoryPrefetch:       memoryPrefetch,
 	}, nil
+}
+
+// boolEnv читает булеву переменную: не задана или пустая — значение по
+// умолчанию (паритет с числовыми: «пусто» не ошибка); иное, кроме true/false
+// (регистр и края не важны), — явная ошибка запуска.
+func boolEnv(env Getenv, name string, def bool) (bool, error) {
+	raw, ok := env(name)
+	if !ok {
+		return def, nil
+	}
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return def, nil
+	}
+	switch strings.ToLower(value) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf(`%s должен быть "true" или "false", получено "%s"`, name, raw)
 }
 
 // parseEnum читает перечислимую переменную: не задана — значение по умолчанию;

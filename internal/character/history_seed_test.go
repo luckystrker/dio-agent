@@ -14,7 +14,7 @@ import (
 
 func seedAndBuild(t *testing.T, hist []HistoryMessage, batch string) []map[string]any {
 	t.Helper()
-	s, err := historyStream(hist)
+	s, err := historyStream(hist, nil)
 	if err != nil {
 		t.Fatalf("история не посеяна: %v", err)
 	}

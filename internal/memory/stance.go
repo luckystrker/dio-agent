@@ -128,7 +128,7 @@ func (Stances) ForEntities(ctx context.Context, db DBTX, audience string, entity
 	rows, err := db.Query(ctx,
 		`SELECT `+stanceCols+` FROM stances
 		 WHERE ($1 = 'internal' OR scope_id IN ($1, 'public')) AND entity_id = ANY($2)
-		 ORDER BY updated_at DESC`,
+		 ORDER BY updated_at DESC, id DESC`,
 		audience, entityIDs)
 	if err != nil {
 		return nil, fmt.Errorf("stances: выборка по сущностям: %w", err)
@@ -161,7 +161,7 @@ func (Stances) Basis(ctx context.Context, db DBTX, items Items, audience string,
 		 JOIN stance_basis b ON b.memory_id = m.id
 		 LEFT JOIN provenance p ON p.id = m.provenance_id
 		 WHERE b.stance_id = $1 AND `+visCond("m", 2)+`
-		 ORDER BY m.salience DESC, m.recorded_at DESC`,
+		 ORDER BY m.salience DESC, m.recorded_at DESC, m.id DESC`,
 		stanceID, audience)
 	if err != nil {
 		return nil, 0, fmt.Errorf("stance_basis: выборка оснований: %w", err)

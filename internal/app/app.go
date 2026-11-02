@@ -201,6 +201,11 @@ func (a *App) Start(ctx context.Context) error {
 		PromptTemplate:  template,
 		HistoryMessages: historyMessages(a.opts.Config),
 		HistoryMaxChars: historyMaxChars(a.opts.Config),
+		Timezone:        a.opts.Config.Timezone,
+		Now:             a.opts.Now,
+		Memory:          toolset,
+		MemoryPrefetch:  memoryPrefetch(a.opts.Config),
+		Logger:          a.logger,
 	}
 	runner := &character.Runner{
 		Pool:            pool,
@@ -212,6 +217,8 @@ func (a *App) Start(ctx context.Context) error {
 		Assembler:       assembler,
 		Persona:         persona,
 		Memory:          toolset,
+		MemoryPrefetch:  memoryPrefetch(a.opts.Config),
+		Timezone:        a.opts.Config.Timezone,
 		Logger:          a.logger,
 	}
 	a.runner = runner
@@ -578,6 +585,16 @@ func toolCallsLimit(cfg runtime.Config) int {
 		return 0
 	}
 	return cfg.Model.ToolCallsLimit
+}
+
+// memoryPrefetch — срез 2 (решение 2026-11-02): карточка памяти в панели
+// вместо принудительного поиска. Модель не настроена — значение из конфига
+// (по умолчанию true) не важно: инструментов памяти всё равно нет.
+func memoryPrefetch(cfg runtime.Config) bool {
+	if cfg.Model == nil {
+		return true
+	}
+	return cfg.Model.MemoryPrefetch
 }
 
 func historyMessages(cfg runtime.Config) int {

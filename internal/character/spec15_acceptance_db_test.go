@@ -95,11 +95,11 @@ func TestSpec15PendingAnswerNotInConversation(t *testing.T) {
 	if len(wire) != 2 {
 		t.Fatalf("на проводе %d сообщений (%+v), хочу 2: реплика ходa 1 и пачка — pending-ответ просочился в разговор?", len(wire), wire)
 	}
-	if wire[0].role != "user" || wire[0].text != "я решил всё переписать" {
-		t.Fatalf("реплика ходa 1 потеряна: %+v", wire[0])
+	if wire[0].role != "user" || !strings.HasSuffix(wire[0].text, "] Коля: я решил всё переписать") {
+		t.Fatalf("реплика ходa 1 потеряна (метка/автор): %+v", wire[0])
 	}
-	if wire[1].role != "user" || wire[1].text != "ну там пару сервисов" {
-		t.Fatalf("пачка не последняя на проводе: %+v", wire[1])
+	if wire[1].role != "user" || !strings.HasPrefix(wire[1].text, statePanelOpen) || !strings.HasSuffix(wire[1].text, "ну там пару сервисов") {
+		t.Fatalf("пачка не последняя на проводе — перед ней панель: %+v", wire[1])
 	}
 	for _, m := range wire {
 		if strings.Contains(m.text, "а что переписываешь") {
@@ -161,8 +161,8 @@ func TestSpec15HistoryWindowThroughRunner(t *testing.T) {
 		t.Fatalf("на проводе %d сообщений (%+v), хочу %d (окно 4 + пачка)", len(wire), wire, len(want))
 	}
 	for i, w := range want {
-		if wire[i] != w {
-			t.Fatalf("провод[%d] = %+v, хочу %+v", i, wire[i], w)
+		if wire[i].role != w.role || !strings.HasSuffix(wire[i].text, w.text) {
+			t.Fatalf("провод[%d] = %+v, хочу %s с суффиксом %q", i, wire[i], w.role, w.text)
 		}
 	}
 }
