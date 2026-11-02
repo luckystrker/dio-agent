@@ -26,10 +26,24 @@ var ErrSingletonTaken = errors.New("singleton: замок занят — дру�
 // DefaultWatchInterval — период проверки живости singleton-соединения.
 const DefaultWatchInterval = 5 * time.Second
 
+// pingFailuresBeforeLoss — сколько подряд неудач Ping считаются потерей:
+// одна неудача (GC-пауза, микросброс сети) — не потеря, ложный рестарт
+// посреди хода роняет ответ и платит дважды.
+const pingFailuresBeforeLoss = 3
+
 // Singleton — удерживаемый замок одного живого процесса.
 type Singleton struct {
 	conn *pgx.Conn
-	pid  int64 // pg_backend_pid: диагностика и тесты (pg_terminate_backend)
+	dsn  string // DSN соединения-замка: проверка «БД жива?» новым соединением (18.11)
+	pid  int64  // pg_backend_pid: диагностика и тесты (pg_terminate_backend)
+
+	// Швы наблюдения для тестов (18.11): переопределяются до StartWatch.
+	// ping — живость соединения-замка (по умолчанию conn.Ping): тесту нужен
+	// паттерн «неудача-успех-неудача», который на живом соединении не
+	// воспроизвести. verify — «БД отвечает новому соединению?» (по умолчанию
+	// dbReachable из того же DSN).
+	ping   func(ctx context.Context) error
+	verify func() bool
 
 	mu        sync.Mutex
 	lost      func(reason string)
@@ -64,6 +78,7 @@ func AcquireSingleton(ctx context.Context, dsn string) (*Singleton, error) {
 
 	return &Singleton{
 		conn:      conn,
+		dsn:       dsn,
 		pid:       pid,
 		watchStop: make(chan struct{}),
 		watchDone: make(chan struct{}),
@@ -84,35 +99,79 @@ func (s *Singleton) OnLost(lost func(reason string)) {
 
 // StartWatch запускает фоновую проверку живости соединения (pgx не отдаёт
 // событий разрыва — периодический ping). interval <= 0 — DefaultWatchInterval.
+// Один неудачный Ping — не потеря: доклад о потере требует 3 подряд неудачи
+// (успех сбрасывает счётчик) и проверку на НОВОМ соединении из того же DSN:
+// БД отвечает, а замок-соединение молчит — замок потерян по-настоящему
+// (соединение оборвано, сервер снял session lock); БД тоже не отвечает —
+// сеть, ждём восстановления и не валимся.
 func (s *Singleton) StartWatch(interval time.Duration) {
 	if interval <= 0 {
 		interval = DefaultWatchInterval
+	}
+	// Швы тестов: без переопределения — настоящие Ping и dbReachable.
+	ping := s.ping
+	if ping == nil {
+		ping = s.conn.Ping
+	}
+	verify := s.verify
+	if verify == nil {
+		verify = func() bool { return dbReachable(s.dsn, interval) }
 	}
 	go func() {
 		defer close(s.watchDone)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		failures := 0
 		for {
 			select {
 			case <-s.watchStop:
 				return
 			case <-ticker.C:
 				ctx, cancel := context.WithTimeout(context.Background(), interval)
-				err := s.conn.Ping(ctx)
+				err := ping(ctx)
 				cancel()
 				if err == nil {
+					failures = 0
 					continue
 				}
-				s.reportLost(fmt.Sprintf("singleton-соединение потеряно: %v", err))
+				failures++
+				if failures < pingFailuresBeforeLoss {
+					continue
+				}
+				if !verify() {
+					// БД недоступна и новому соединению — сеть: замок, если
+					// жив, никуда не делся, ждём дальше (не валимся).
+					continue
+				}
+				s.reportLost(fmt.Sprintf("singleton-соединение потеряно: %v (БД отвечает новому соединению — замок снят сервером)", err))
 				return
 			}
 		}
 	}()
 }
 
+// dbReachable отвечает, отвечает ли БД НОВОМУ соединению из dsn (таймаут —
+// как интервал наблюдения): отличает «замок потерян» от «сеть пропала».
+func dbReachable(dsn string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return false
+	}
+	defer conn.Close(context.Background())
+	return conn.Ping(ctx) == nil
+}
+
 // reportLost единожды сообщает о потере и закрывает соединение.
 func (s *Singleton) reportLost(reason string) {
 	s.mu.Lock()
+	if s.released {
+		// Release уже прошёл, пока наблюдение сидело в verify: докладывать
+		// потерю после штатного shutdown нельзя.
+		s.mu.Unlock()
+		return
+	}
 	cb := s.lost
 	s.released = true
 	s.mu.Unlock()

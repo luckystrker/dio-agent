@@ -24,25 +24,29 @@ type HistoryMessage struct {
 
 // RecentHistory — последние limit сообщений чата (обе стороны) в хронологическом
 // порядке. excludeTurnID — события текущего хода: они уже переданы пачкой,
-// дублировать их нельзя.
+// дублировать их нельзя. Порядок при равном ts задаётся полностью: больший id
+// считается свежее, роль — финальный тай-брейк (id двух таблиц — независимые
+// последовательности и могут совпасть); без тай-брейка соседние реплики
+// равного времени перетасовывались между ходами и ломали кэш префикса
+// провайдера.
 func RecentHistory(ctx context.Context, db DBTX, chatID int64, limit int, excludeTurnID int64) ([]HistoryMessage, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	rows, err := db.Query(ctx, `
 		SELECT role, content FROM (
-		  SELECT 'user' AS role, text AS content, occurred_at AS ts
+		  SELECT 'user' AS role, text AS content, occurred_at AS ts, id
 		  FROM social_events
 		  WHERE chat_id = $1 AND text IS NOT NULL AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo')
 		    AND status <> 'pending'
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL
-		  SELECT 'assistant' AS role, payload->>'text' AS content, created_at AS ts
+		  SELECT 'assistant' AS role, payload->>'text' AS content, created_at AS ts, id
 		  FROM delivery_outbox
 		  WHERE chat_id = $1 AND status = 'sent' AND payload->>'text' IS NOT NULL
 		    AND ($3::bigint = 0 OR turn_id <> $3::bigint)
 		) timeline
-		ORDER BY ts DESC
+		ORDER BY ts DESC, id DESC, role DESC
 		LIMIT $2`, chatID, limit, excludeTurnID)
 	if err != nil {
 		return nil, fmt.Errorf("history: недавний разговор не читается: %w", err)
@@ -70,19 +74,21 @@ func RecentHistory(ctx context.Context, db DBTX, chatID int64, limit int, exclud
 // FitHistory подгоняет историю под бюджет объёма: первыми теряются самые
 // старые сообщения; самое свежее сохраняется всегда (паритет fitHistory TS).
 // Объём считается в символах (рунах), как .length в TS, — не в байтах.
+// Результат — суффикс входа, поэтому окно считается одним проходом с конца
+// и без копирования (вставка в начало среза копировала буфер на каждую
+// реплику, O(n²)).
 func FitHistory(messages []HistoryMessage, maxChars int) []HistoryMessage {
-	var out []HistoryMessage
+	last := len(messages) - 1
 	total := 0
-	for i := len(messages) - 1; i >= 0; i-- {
-		message := messages[i]
-		size := utf8.RuneCountInString(message.Content)
-		if len(out) > 0 && total+size > maxChars {
-			break
+	for i := last; i >= 0; i-- {
+		size := utf8.RuneCountInString(messages[i].Content)
+		// Самое свежее (первая итерация) живёт всегда — бюджет не спрашивают.
+		if i < last && total+size > maxChars {
+			return messages[i+1:]
 		}
 		total += size
-		out = append([]HistoryMessage{message}, out...)
 	}
-	return out
+	return messages
 }
 
 // historyStream — поток запуска агента с засеянной историей чата: реплики

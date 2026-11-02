@@ -76,7 +76,10 @@ func TestSingletonLostConnectionReported(t *testing.T) {
 	}
 	lost := make(chan string, 1)
 	single.OnLost(func(reason string) { lost <- reason })
-	single.StartWatch(20 * time.Millisecond)
+	// Интервал — заодно бюджет проверки «БД жива?» новым соединением
+	// (connect+ping ≈ 30–50 мс на локальной машине): 20 мс не укладывался
+	// никогда, проверка всегда выглядела сетевым сбоем и доклад не выходил.
+	single.StartWatch(200 * time.Millisecond)
 	t.Cleanup(func() { _ = single.Release(ctx) })
 
 	// Разрыв со стороны СУБД (админ-соединение Terminates backend).
