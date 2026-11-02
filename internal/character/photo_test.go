@@ -36,17 +36,17 @@ func TestCollectPhotosCapsAndTolerates(t *testing.T) {
 	}
 
 	fetcher := &fakePhotoFetcher{media: &telegram.PhotoMedia{Mime: "image/jpeg", Base64: "eHk="}}
-	photos := CollectPhotos(context.Background(), batch, fetcher, 3)
+	photos := CollectPhotos(context.Background(), batch, fetcher, 3, nil)
 	if len(photos) != 3 || fetcher.calls != 3 {
 		t.Fatalf("фото %d (вызовов %d), хочу 3/3", len(photos), fetcher.calls)
 	}
 
 	// Ошибка фетчера: фото пропускается, ход не роняется.
 	failing := &fakePhotoFetcher{err: context.DeadlineExceeded}
-	if got := CollectPhotos(context.Background(), batch[:1], failing, 3); len(got) != 0 {
+	if got := CollectPhotos(context.Background(), batch[:1], failing, 3, nil); len(got) != 0 {
 		t.Fatalf("при ошибке фетчера фото быть не должно: %v", got)
 	}
-	if CollectPhotos(context.Background(), batch, nil, 3) != nil {
+	if CollectPhotos(context.Background(), batch, nil, 3, nil) != nil {
 		t.Fatal("nil-фетчер — фото нет")
 	}
 }
@@ -66,7 +66,7 @@ func TestCollectPhotosFromReply(t *testing.T) {
 	}}
 	var gotID string
 	fetcher := &recordingPhotoFetcher{record: func(id string) { gotID = id }}
-	photos := CollectPhotos(context.Background(), batch, fetcher, 3)
+	photos := CollectPhotos(context.Background(), batch, fetcher, 3, nil)
 	if len(photos) != 1 || gotID != "b" {
 		t.Fatalf("фото из reply: собрано %d, file_id %q; хочу 1/b", len(photos), gotID)
 	}

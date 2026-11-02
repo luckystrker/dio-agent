@@ -34,8 +34,10 @@ func photoFileIDFromBatchEvent(ev BatchEvent) string {
 }
 
 // CollectPhotos собирает до max фото пачки (TS: MAX_IMAGES_PER_TURN).
-// Ошибки скачивания не роняют ход: фото пропускается, текст остаётся.
-func CollectPhotos(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher, max int) []Photo {
+// Ошибки скачивания не роняют ход: фото пропускается, текст остаётся, но
+// причина пишется в logf (nil — не писать): молчаливый пропуск месяц прятал
+// 404 на каждом скачивании (bug 2026-11-02).
+func CollectPhotos(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher, max int, logf func(format string, args ...any)) []Photo {
 	if fetcher == nil || len(batch) == 0 {
 		return nil
 	}
@@ -53,6 +55,9 @@ func CollectPhotos(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher
 		}
 		pm, err := fetcher.FetchPhotoByFileID(ctx, fileID)
 		if err != nil || pm == nil {
+			if logf != nil {
+				logf("фото не скачано — ход по тексту (event %d): err=%v пусто=%v", ev.EventID, err, pm == nil)
+			}
 			continue
 		}
 		photos = append(photos, Photo{FileID: fileID, Data: pm.Data(), Mime: pm.Mime})

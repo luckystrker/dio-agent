@@ -43,6 +43,9 @@ func (e *APIError) Error() string {
 // совпадает по сигнатуре с character.ChatActionSender (typing-пульс §13.3).
 type Client struct {
 	base string
+	// fileBase — файловый хост Bot API: <apiBase>/file/bot<token> (формат
+	// скачивания по file_path из getFile отличается от методов).
+	fileBase string
 	// token — только для затирания в текстах ошибок (журнал не должен
 	// получать токен открытым текстом, см. redact).
 	token string
@@ -65,6 +68,7 @@ func NewClient(botToken, apiBase string, httpClient *http.Client) *Client {
 	}
 	return &Client{
 		base:          strings.TrimRight(apiBase, "/") + "/bot" + botToken,
+		fileBase:      strings.TrimRight(apiBase, "/") + "/file/bot" + botToken,
 		token:         botToken,
 		http:          httpClient,
 		sendTimeout:   10 * time.Second,

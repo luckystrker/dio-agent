@@ -92,6 +92,14 @@ func TestFetchPhotoByFileID(t *testing.T) {
 				"result": map[string]any{"file_id": "fid-1", "file_path": "photos/file_1.jpg"},
 			})
 		case strings.Contains(r.URL.Path, "/file/"):
+			// Формат Bot API: <base>/file/bot<token>/<file_path>, слэши
+			// file_path не экранируются (bug 2026-11-02: был
+			// <base>/bot<token>/file/photos%2Ffile_1.jpg → 404 в проде).
+			if r.URL.EscapedPath() != "/file/botTESTTOKEN/photos/file_1.jpg" {
+				t.Errorf("путь скачивания %q, нужен /file/botTESTTOKEN/photos/file_1.jpg", r.URL.EscapedPath())
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if _, err := w.Write([]byte(jpeg)); err != nil {
 				t.Errorf("write: %v", err)
 			}

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -132,7 +133,7 @@ func (c *Client) FetchPhotoByFileID(ctx context.Context, fileID string) (*PhotoM
 
 // downloadFile качает файл по пути из getFile (файловый хост Bot API).
 func (c *Client) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/file/"+url.PathEscape(filePath), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileBase+"/"+escapeFilePath(filePath), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -145,6 +146,16 @@ func (c *Client) downloadFile(ctx context.Context, filePath string) ([]byte, err
 		return nil, fmt.Errorf("media: статус %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, MaxPhotoBytes+1))
+}
+
+// escapeFilePath экранирует сегменты file_path, сохраняя слэши: Telegram
+// отдаёт путь вида photos/file_8.jpg, и %2F вместо / даёт 404.
+func escapeFilePath(filePath string) string {
+	segs := strings.Split(filePath, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
 }
 
 // MediaFetcher — character.PhotoFetcher поверх Bot API (свой http-клиент).

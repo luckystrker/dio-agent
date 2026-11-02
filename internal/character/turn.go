@@ -186,7 +186,12 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	}
 
 	// Фото пачки (vision §6.1): скачивание до вызова, ошибки — ход по тексту.
-	photos := CollectPhotos(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn)
+	photos := CollectPhotos(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn, func(format string, args ...any) {
+		r.logf("ход %d: "+format, append([]any{in.TurnID}, args...)...)
+	})
+	if len(photos) > 0 {
+		r.logf("ход %d: фото в запросе модели: %d", in.TurnID, len(photos))
+	}
 	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation, photos)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
