@@ -381,6 +381,37 @@ func TestSchemaMatchesValidatorLimits(t *testing.T) {
 	}
 }
 
+// TestSanitizeInitiativeResult — M4: инициативный ход не создаёт новых
+// намерений, defer превращается в ignore (иначе бесконечная цепочка фона).
+func TestSanitizeInitiativeResult(t *testing.T) {
+	deferHours := 2.0
+	defered := TurnResult{
+		Decision:   DecisionDefer,
+		DeferHours: &deferHours,
+		Intentions: []IntentionProposal{{Kind: "explore", Topic: "ещё", Reason: "цепочка", DelayHours: 1}},
+	}
+	got := SanitizeInitiativeResult(defered)
+	if got.Decision != DecisionIgnore || got.DeferHours != nil {
+		t.Fatalf("defer не превращён в ignore: %+v", got)
+	}
+	if len(got.Intentions) != 0 {
+		t.Fatalf("намерения инициативы не вычищены: %+v", got.Intentions)
+	}
+
+	answer := TurnResult{
+		Decision:   DecisionAnswer,
+		Messages:   []string{"привет"},
+		Intentions: []IntentionProposal{{Kind: "check_in", Topic: "позже", Reason: "x", DelayHours: 1}},
+	}
+	got = SanitizeInitiativeResult(answer)
+	if got.Decision != DecisionAnswer || len(got.Messages) != 1 {
+		t.Fatalf("ответ инициативы изменён: %+v", got)
+	}
+	if len(got.Intentions) != 0 {
+		t.Fatalf("намерения answer-инициативы не вычищены: %+v", got.Intentions)
+	}
+}
+
 // TestParseTurnResultInertOutOfRangeStrippedBeforeValidate — приёмка 17.8:
 // инертные поля с ЗНАЧЕНИЯМИ ВНЕ ДИАПАЗОНА вычищаются до валидации — раньше
 // именно диапазонная проверка роняла смысл-валидный ответ в repair. Диапазон

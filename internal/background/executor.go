@@ -659,6 +659,9 @@ var errInitiativeStale = errors.New("инициатива устарела: ча
 // статуса хода, outbox, память, дельты — и CAS намерения тем же «всё или
 // ничего» (§14.3: победитель исполнения один, двойная отправка невозможна).
 func (s *Scheduler) applyInitiative(ctx context.Context, it Intention, turnID int64, result character.TurnResult) (bool, string, error) {
+	// Фоновая инициатива не порождает новых намерений и не откладывает ответ
+	// (M4): цепочка deferred-инициатив жгла бюджет без доставок.
+	result = character.SanitizeInitiativeResult(result)
 	scope := memory.ChatScope(fmt.Sprintf("%d", it.TargetChatID))
 	res, err := character.ApplyTurn(ctx, s.pool, character.ApplyOptions{
 		TurnID:          turnID,

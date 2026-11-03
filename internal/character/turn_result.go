@@ -246,6 +246,21 @@ func validReason(reason, what string) error {
 	return nil
 }
 
+// SanitizeInitiativeResult — результат инициативного/фонового хода не создаёт
+// новых намерений и не откладывает ответ: запрет живёт не только в тексте
+// промпта, но и в применении (M4). Иначе defer порождал reply_later с темой
+// «отложенный ответ», CAS уже закрыл текущее намерение, и цепочка
+// инициатив ограничивалась только дневным бюджетом фона.
+func SanitizeInitiativeResult(r TurnResult) TurnResult {
+	r.Intentions = nil
+	if r.Decision == DecisionDefer {
+		r.Decision = DecisionIgnore
+		r.DeferHours = nil
+		r.Messages = nil
+	}
+	return r
+}
+
 // Validate проверяет структуру и правила результата (§11.2).
 func (r TurnResult) Validate() error {
 	switch r.Decision {
