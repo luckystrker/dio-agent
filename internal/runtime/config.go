@@ -98,6 +98,9 @@ type Config struct {
 	// DBMaxConns — потолок соединений пула PostgreSQL (DB_MAX_CONNS, 18.5);
 	// LoadConfig всегда заполняет поле (дефолт 8), 0 — незаполненная группа.
 	DBMaxConns int
+	// MetricsPort — порт HTTP-метрик на 127.0.0.1 (METRICS_PORT, этап 31);
+	// 0 — сервер выключен (переменная не задана или пуста).
+	MetricsPort int
 	// Timezone — часовой пояс меток времени истории и панели состояния
 	// (AGENT_TIMEZONE, IANA, по умолчанию Europe/Moscow). LoadConfig всегда
 	// заполняет поле; nil — конфиг собран не через LoadConfig.
@@ -177,6 +180,11 @@ func LoadConfig(env Getenv) (Config, error) {
 		return Config{}, err
 	}
 
+	metricsPort, err := parseMetricsPort(env)
+	if err != nil {
+		return Config{}, err
+	}
+
 	timezone, err := parseTimezone(env)
 	if err != nil {
 		return Config{}, err
@@ -187,6 +195,7 @@ func LoadConfig(env Getenv) (Config, error) {
 		LogLevel:    logLevel,
 		NodeEnv:     nodeEnv,
 		DBMaxConns:  dbMaxConns,
+		MetricsPort: metricsPort,
 		Timezone:    timezone,
 		Model:       model,
 		Telegram:    telegram,
@@ -197,6 +206,22 @@ func LoadConfig(env Getenv) (Config, error) {
 
 // DefaultTimezone — часовой пояс персонажа по умолчанию (AGENT_TIMEZONE).
 const DefaultTimezone = "Europe/Moscow"
+
+// parseMetricsPort читает порт HTTP-метрик (METRICS_PORT, этап 31): не задан
+// или пуст — сервер выключен (0, не ошибка); иное — целое 1..65535, любые
+// отклонения останавливают запуск (оператор не должен гадать, на каком порту
+// слушает процесс).
+func parseMetricsPort(env Getenv) (int, error) {
+	raw := strings.TrimSpace(lookupOrEmpty(env, "METRICS_PORT"))
+	if raw == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 || parsed > 65535 {
+		return 0, fmt.Errorf("METRICS_PORT=%q должно быть целым числом 1..65535 (пусто — сервер метрик выключен)", raw)
+	}
+	return parsed, nil
+}
 
 // parseTimezone читает IANA-зону меток времени (AGENT_TIMEZONE): не задана —
 // Europe/Moscow; неизвестная зона останавливает запуск, а не подменяется

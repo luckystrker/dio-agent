@@ -25,6 +25,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luckystrker/ago/events"
+
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/migrations"
@@ -132,8 +134,8 @@ func newWorkerPool(t *testing.T) *runtime.Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 17 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 17/0", result.Applied, result.Skipped)
+	if result.Applied != 20 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 20/0", result.Applied, result.Skipped)
 	}
 	return pool
 }
@@ -275,9 +277,11 @@ func TestWorkerShutdownReturnsAttempt(t *testing.T) {
 	}
 }
 
-// TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;
-// исчерпание попыток — терминальный пропуск (turn_skipped, инвариант 5).
-func TestWorkerRetriesThenSkips(t *testing.T) {
+// TestWorkerRetriesThenFails — §12.1/§12.2: транзитный сбой — повтор с паузой;
+// исчерпание попыток — терминальный провал: статус failed с причиной
+// (failure_reason) и событием turn_failed в журнале (29.1). Воркер такие ходы
+// больше не берёт (очередь — только created), recovery их не воскрешает.
+func TestWorkerRetriesThenFails(t *testing.T) {
 	pool := newWorkerPool(t)
 	ctx := context.Background()
 
@@ -306,7 +310,7 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 		t.Fatalf("неожиданная последовательность попыток: %v", runner.called())
 	}
 
-	// Сценарий исчерпания: ход, падающий всегда, — терминальный пропуск.
+	// Сценарий исчерпания: ход, падающий всегда, — терминальный провал.
 	turnFail := seedTurn(t, pool, 3003, "private", "ход с постоянным сбоем")
 	runner2 := &fakeRunner{pool: pool, fails: map[int64]int{turnFail: 1 << 30}}
 	w2 := New(Deps{Pool: pool, Runner: runner2, Journal: journal,
@@ -314,30 +318,49 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 		Options{PollInterval: 10 * time.Millisecond, RetryBase: 10 * time.Millisecond, RetryMax: 20 * time.Millisecond, MaxAttempts: 2})
 	go func() { _ = w2.Run(runCtx) }()
 
-	eventually(t, "исчерпание попыток зафиксировано пропуском", func() bool {
+	eventually(t, "исчерпание попыток зафиксировано провалом", func() bool {
 		var status string
 		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnFail).Scan(&status); err != nil {
 			return false
 		}
-		return status == "skipped"
+		return status == "failed"
 	})
 	w2.StopDrain()
 	<-w2.Done()
 
-	// turn_skipped в журнале (инвариант 5: пропуск фиксируется явно).
+	// Причина провала видна в строке хода (§11.3: терминальный статус с причиной).
+	var reason *string
+	if err := pool.QueryRow(ctx,
+		`SELECT failure_reason FROM turns WHERE id = $1`, turnFail).Scan(&reason); err != nil {
+		t.Fatalf("причина провала не читается: %v", err)
+	}
+	if reason == nil || !strings.Contains(*reason, "лимит попыток") {
+		t.Fatalf("failure_reason = %v, хочу причину с лимитом попыток", reason)
+	}
+
+	// turn_failed в журнале (инвариант 5: терминальный провал фиксируется явно).
 	evs, err := journal.History(ctx, turnFail)
 	if err != nil {
 		t.Fatalf("журнал не читается: %v", err)
 	}
-	skipped := false
+	failed := false
 	for _, ev := range evs {
-		if ev.EventType() == "turn_skipped" {
-			skipped = true
+		if ev.EventType() == "turn_failed" {
+			failed = true
 		}
 	}
-	if !skipped {
-		t.Fatalf("turn_skipped нет в журнале хода %d", turnFail)
+	if !failed {
+		t.Fatalf("turn_failed нет в журнале хода %d (события: %v)", turnFail, evTypes(evs))
 	}
+}
+
+// evTypes — типы событий потока в порядке записи (для диагностики теста).
+func evTypes(evs []events.Event) []string {
+	out := make([]string, 0, len(evs))
+	for _, ev := range evs {
+		out = append(out, ev.EventType())
+	}
+	return out
 }
 
 // budgetRunner — двойной исполнитель, отвечающий исчерпанием дневного бюджета
@@ -376,20 +399,18 @@ func (r *budgetRunner) allow() {
 	r.mu.Unlock()
 }
 
-// deferUntil — локальная пауза повтора хода (ok=false — паузы нет).
-func deferUntil(w *Worker, turnID int64) (time.Time, bool) {
-	w.notBeforeMu.Lock()
-	defer w.notBeforeMu.Unlock()
-	nb, ok := w.notBefore[turnID]
-	return nb, ok
-}
-
-// clearDefer снимает локальную паузу — как рестарт процесса (notBefore живёт
-// в памяти) или наступление срока после границы суток.
-func clearDefer(w *Worker, turnID int64) {
-	w.notBeforeMu.Lock()
-	delete(w.notBefore, turnID)
-	w.notBeforeMu.Unlock()
+// dbDeferUntil — срок отложенного хода в БД (not_before, 29.2);
+// ok=false — срок не назначен.
+func dbDeferUntil(t *testing.T, pool *runtime.Pool, ctx context.Context, turnID int64) (time.Time, bool) {
+	t.Helper()
+	var nb *time.Time
+	if err := pool.QueryRow(ctx, `SELECT not_before FROM turns WHERE id = $1`, turnID).Scan(&nb); err != nil {
+		return time.Time{}, false
+	}
+	if nb == nil {
+		return time.Time{}, false
+	}
+	return *nb, true
 }
 
 func assertTurnState(t *testing.T, pool *runtime.Pool, ctx context.Context, turnID int64, wantStatus string, wantAttempts int) {
@@ -418,10 +439,11 @@ func assertNoTurnSkipped(t *testing.T, journal *character.TurnJournal, ctx conte
 	}
 }
 
-// TestWorkerBudgetExhaustedDefersToNextDay — 16.7: исчерпание дневного бюджета
-// на прямом ходе — не сбой и не терминальный пропуск: попытка не сжигается, ход
-// стоит в очереди до следующего дня 00:05 UTC (паритет с фоном); после границы
-// суток ход доезжает.
+// TestWorkerBudgetExhaustedDefersToNextDay — 16.7/29.2: исчерпание дневного
+// бюджета на прямом ходе — не сбой и не терминальный пропуск: ход ждёт до
+// следующего дня 00:05 UTC, и срок лежит в БД (not_before), а не только в
+// памяти процесса: рестарт не делает ход доступным раньше сброса счётчика.
+// После границы суток ход доезжает.
 func TestWorkerBudgetExhaustedDefersToNextDay(t *testing.T) {
 	pool := newWorkerPool(t)
 	ctx := context.Background()
@@ -440,35 +462,41 @@ func TestWorkerBudgetExhaustedDefersToNextDay(t *testing.T) {
 	started := time.Now()
 	go func() { _ = w.Run(runCtx) }()
 
-	// Первая встреча с бюджетом: откладывание до завтра 00:05 UTC, попытка возвращена.
+	// Первая встреча с бюджетом: откладывание до завтра 00:05 UTC, попытка
+	// возвращена, срок записан в строку хода (29.2).
 	eventually(t, "ход отложен по бюджету", func() bool {
-		_, ok := deferUntil(w, turnID)
+		_, ok := dbDeferUntil(t, pool, ctx, turnID)
 		return ok
 	})
-	nb, _ := deferUntil(w, turnID)
+	nb, _ := dbDeferUntil(t, pool, ctx, turnID)
 	if nb.UTC().Hour() != 0 || nb.UTC().Minute() != 5 || !nb.After(started) {
 		t.Fatalf("ход должен ждать следующего дня 00:05 UTC, ждёт до %v", nb.UTC())
 	}
 	assertTurnState(t, pool, ctx, turnID, "created", 0)
 	assertNoTurnSkipped(t, journal, ctx, turnID)
+	w.StopDrain()
+	<-w.Done()
 
-	// «Рестарт» теряет notBefore — вторая встреча с бюджетом: попытки всё ещё
-	// не сжигаются, бесконечного терминального пропуска нет.
-	clearDefer(w, turnID)
-	eventually(t, "вторая встреча с бюджетом", func() bool {
-		return runner.callCount() >= 2
-	})
-	eventually(t, "ход снова отложен", func() bool {
-		_, ok := deferUntil(w, turnID)
-		return ok
-	})
+	// «Рестарт»: новый воркер на той же БД не берёт ход раньше срока —
+	// not_before пережил потерю памяти процесса.
+	before := runner.callCount()
+	w2 := New(Deps{Pool: pool, Runner: runner, Journal: journal,
+		Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond})
+	go func() { _ = w2.Run(runCtx) }()
+	time.Sleep(120 * time.Millisecond)
+	if got := runner.callCount(); got != before {
+		t.Fatalf("после рестарта ход взят раньше срока бюджета: вызовов %d, было %d", got, before)
+	}
 	assertTurnState(t, pool, ctx, turnID, "created", 0)
-	assertNoTurnSkipped(t, journal, ctx, turnID)
 
-	// Граница суток прошла (пауза снята, как сделал бы рестарт после 00:05) и
-	// бюджет нового дня доступен: ход доезжает, попытка ровно одна — успешная.
+	// Граница суток прошла: срок в БД наступил, бюджет нового дня доступен —
+	// ход доезжает, попытка ровно одна (успешная).
+	if _, err := pool.Exec(ctx, `UPDATE turns SET not_before = now() WHERE id = $1`, turnID); err != nil {
+		t.Fatalf("срок хода не сдвинут: %v", err)
+	}
 	runner.allow()
-	clearDefer(w, turnID)
+	w2.Wake()
 	eventually(t, "ход выполнен на новом дне", func() bool {
 		var status string
 		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnID).Scan(&status); err != nil {
@@ -476,13 +504,65 @@ func TestWorkerBudgetExhaustedDefersToNextDay(t *testing.T) {
 		}
 		return status == "applied"
 	})
-	w.StopDrain()
-	<-w.Done()
+	w2.StopDrain()
+	<-w2.Done()
 
 	assertTurnState(t, pool, ctx, turnID, "applied", 1)
 	assertNoTurnSkipped(t, journal, ctx, turnID)
-	if got := runner.callCount(); got != 3 {
-		t.Fatalf("исполнитель вызван %d раз, хочу 3 (две бюджетные встречи + успех)", got)
+	if got := runner.callCount(); got != before+1 {
+		t.Fatalf("исполнитель вызван %d раз, хочу %d (одна бюджетная встреча + успех)", got, before+1)
+	}
+}
+
+// TestWorkerBudgetExpiredDirectTurnSkippedDB — 29.2: прямой ход, провисевший
+// дольше разумного предела (12 ч) в ожидании бюджета, честно пропускается с
+// причиной и логом, а не откладывается снова навсегда.
+func TestWorkerBudgetExpiredDirectTurnSkippedDB(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+
+	storage := runtime.NewPgStreamStorage(ctx, pool)
+	journal := character.NewTurnJournal(storage, nil)
+
+	turnID := seedTurn(t, pool, 3005, "private", "очень старый вопрос")
+	if _, err := pool.Exec(ctx,
+		`UPDATE turns SET created_at = now() - interval '13 hours' WHERE id = $1`, turnID); err != nil {
+		t.Fatalf("возраст хода не задан: %v", err)
+	}
+
+	runner := &budgetRunner{pool: pool, exhausted: true}
+	logs := &syncLogBuffer{}
+	w := New(Deps{Pool: pool, Runner: runner, Journal: journal, Logger: log.New(logs, "", 0)},
+		Options{PollInterval: 10 * time.Millisecond})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(runCtx) }()
+
+	eventually(t, "старый ход пропущен терминально", func() bool {
+		var status string
+		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnID).Scan(&status); err != nil {
+			return false
+		}
+		return status == "skipped"
+	})
+	w.StopDrain()
+	<-w.Done()
+
+	// Причина в журнале хода: предел ожидания назван явно.
+	var reason string
+	if err := pool.QueryRow(ctx,
+		`SELECT payload->>'reason' FROM event_streams WHERE stream_id = $1 AND type = 'turn_skipped'`,
+		character.TurnStreamID(turnID)).Scan(&reason); err != nil {
+		t.Fatalf("turn_skipped не записан: %v", err)
+	}
+	if !strings.Contains(reason, "12 ч") {
+		t.Fatalf("причина пропуска не называет предел: %q", reason)
+	}
+	if !strings.Contains(logs.String(), "пропущен") {
+		t.Fatalf("пропуск старого хода не виден в логе:\n%s", logs.String())
+	}
+	if got := runner.callCount(); got != 1 {
+		t.Fatalf("исполнитель вызван %d раз, хочу 1 (бюджетная встреча)", got)
 	}
 }
 

@@ -197,6 +197,10 @@ type Outcome struct {
 	// Skipped — терминальный пропуск (turn_skipped, инвариант 5).
 	Skipped    bool
 	SkipReason string
+	// Failed — терминальный провал (turn_failed, 29.1): попытки исчерпаны,
+	// ход завершён ошибкой с причиной; повторно не генерируется.
+	Failed     bool
+	FailReason string
 	// AlreadyApplied — ход уже применён ранее; повторный прогон ничего не менял.
 	AlreadyApplied bool
 	// Apply — итог транзакции применения.
@@ -217,6 +221,15 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if state.Applied {
 		out.AlreadyApplied = true
 		r.logf("ход %d уже применён (deltas_applied в журнале) — повтор невозможен", in.TurnID)
+		return out, nil
+	}
+	if state.Failed {
+		// Терминальный провал (29.1): попытки исчерпаны, результат «отравлен»
+		// или применение не проходит. Новая генерация не запускается, даже
+		// если в потоке остался model_output.
+		out.Failed = true
+		out.FailReason = state.FailReason
+		r.logf("ход %d терминально провален ранее (%s)", in.TurnID, state.FailReason)
 		return out, nil
 	}
 	if state.Skipped {
@@ -390,6 +403,18 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
 	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
 	r.logMemoryTurn(in, bctx, plan)
+	// План инструментов памяти — durable событие журнала (этап 31.2):
+	// метрики §20 читают причины из базы, а не парсят логи. Сбой записи не
+	// роняет ход — журнал наблюдаемости, как у tool_call/tool_result.
+	if err := r.Journal.WriteTurnPlan(ctx, in.TurnID, &TurnPlan{
+		TurnID:      in.TurnID,
+		Enabled:     plan.Enabled,
+		Reason:      memoryToolsReason(r.MemoryPrefetch, bctx),
+		CardEntries: bctx.MemoryCardEntries,
+		CardFitted:  bctx.MemoryCardFitted,
+	}); err != nil {
+		r.logf("ход %d: turn_plan не записан: %v", in.TurnID, err)
+	}
 	if plan.ForcedTool != "" {
 		// Forced tool-calling на прямом обращении (§10.4): только в режиме
 		// отката (MODEL_MEMORY_PREFETCH=false). В обычном режиме память уже

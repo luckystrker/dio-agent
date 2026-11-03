@@ -402,6 +402,42 @@ func TestLoadConfigTimezone(t *testing.T) {
 	}
 }
 
+// TestLoadConfigMetricsPort — эндпоинт метрик (этап 31): не задан или пуст —
+// HTTP выключен (0); явный порт применяется; мусор и диапазон вне 1..65535 —
+// явная ошибка запуска, а не тихий дефолт.
+func TestLoadConfigMetricsPort(t *testing.T) {
+	cfg, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x"}))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if cfg.MetricsPort != 0 {
+		t.Errorf("MetricsPort по умолчанию = %d, хочу 0 (выключен)", cfg.MetricsPort)
+	}
+
+	cfg, err = LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "METRICS_PORT": "9090"}))
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if cfg.MetricsPort != 9090 {
+		t.Errorf("MetricsPort = %d, хочу 9090", cfg.MetricsPort)
+	}
+
+	cfg, err = LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "METRICS_PORT": "   "}))
+	if err != nil {
+		t.Fatalf("пустая строка — выключенный сервер, не ошибка: %v", err)
+	}
+	if cfg.MetricsPort != 0 {
+		t.Errorf("пустой METRICS_PORT = %d, хочу 0", cfg.MetricsPort)
+	}
+
+	for _, raw := range []string{"abc", "0", "-1", "1.5", "65536"} {
+		_, err := LoadConfig(envOf(map[string]string{"DATABASE_URL": "x", "METRICS_PORT": raw}))
+		if err == nil || !strings.Contains(err.Error(), "METRICS_PORT") {
+			t.Errorf("METRICS_PORT=%q: ожидаю ошибку с именем переменной, получено: %v", raw, err)
+		}
+	}
+}
+
 // TestLoadConfigMemoryPrefetch — флаг отката среза 2: по умолчанию true
 // (карточка памяти вместо инструментов), явный false — старое поведение,
 // мусор — ошибка запуска.

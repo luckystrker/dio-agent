@@ -54,6 +54,18 @@ const (
 	MaxBatchTextChars = 8000
 )
 
+// DefaultCloseRetryDelays — паузы между повторами закрытия порции (29.3):
+// экспонента 0.5 → 4 с (всего ~7.5 с). Транзиентный сбой createTurn (рестарт
+// PostgreSQL, таймаут acquire) повторяется в живом процессе, а не ждёт
+// рестарта бота; после исчерпания повторов события остаются pending под
+// периодический recovery (§12.2) — это последний пояс, а не первый.
+var DefaultCloseRetryDelays = []time.Duration{
+	500 * time.Millisecond,
+	time.Second,
+	2 * time.Second,
+	4 * time.Second,
+}
+
 // PendingEvent — новое pending-событие для буфера (от poller после ingest).
 type PendingEvent struct {
 	EventID  int64
@@ -94,6 +106,9 @@ type ChatBufferManager struct {
 	// MaxEvents/MaxTextChars — лимиты закрытия; тесты уменьшают.
 	MaxEvents    int
 	MaxTextChars int
+	// RetryDelays — паузы между повторами закрытия порции при транзиентном
+	// сбое createTurn (29.3); пусто — DefaultCloseRetryDelays. Тесты сжимают.
+	RetryDelays []time.Duration
 
 	// startTurn — реализация закрытия (по умолчанию dbStartTurn).
 	startTurn StartTurnFunc
@@ -216,28 +231,50 @@ func (m *ChatBufferManager) closeChat(chatID int64) {
 	m.closeAsync(context.Background(), chatID, ids)
 }
 
-// closeAsync выполняет закрытие порции вне ingest-пути: сбой БД оставляет
-// события pending — их подберёт RecoverStalePending (§12.2; in-process retry —
-// бэклог чек-листа).
+// closeAsync выполняет закрытие порции вне ingest-пути. Транзиентный сбой
+// createTurn (таймаут acquire, рестарт PG) повторяется здесь с backoff (29.3):
+// периодический recovery — последний пояс, а не первый; без повтора события
+// ждали бы его и могли обогнать более новый ход. Если повторы исчерпаны,
+// события честно остаются pending — их подберёт RecoverStalePending (§12.2).
 func (m *ChatBufferManager) closeAsync(ctx context.Context, chatID int64, ids []int64) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		// Транзиентный сбой закрытия (таймаут acquire, рестарт PG) повторяем
-		// здесь же: периодический recovery — последний пояс, а не первый;
-		// без повтора события ждали его и могли обогнать более новый ход.
+		delays := m.RetryDelays
+		if len(delays) == 0 {
+			delays = DefaultCloseRetryDelays
+		}
 		var err error
-		for attempt := 1; attempt <= 3; attempt++ {
+		attempts := 0
+		for {
+			attempts++
 			if _, err = m.processBatch(ctx, chatID, ids); err == nil {
 				return
 			}
-			if attempt < 3 {
-				time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			if attempts > len(delays) {
+				break
+			}
+			// Пауза перед следующим повтором; отмена контекста (shutdown)
+			// честно прекращает попытки — события подберёт recovery.
+			if !sleepOrDone(ctx, delays[attempts-1]) {
+				break
 			}
 		}
-		m.logger.Printf("буфер: порция чата %d не закрыта после повторов (%d событий остаются pending до recovery): %v",
-			chatID, len(ids), err)
+		m.logger.Printf("буфер: порция чата %d не закрыта после повторов (%d попыток, %d событий остаются pending до recovery): %v",
+			chatID, attempts, len(ids), err)
 	}()
+}
+
+// sleepOrDone ждёт паузу; false — контекст отменён.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // FlushAll немедленно закрывает все буферы (graceful shutdown) и ждёт

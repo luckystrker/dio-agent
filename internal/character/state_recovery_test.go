@@ -89,3 +89,26 @@ func TestStateOfEventsLastOutputWins(t *testing.T) {
 		t.Fatalf("Output = %+v, хочу последний (ignore)", st.Output)
 	}
 }
+
+// 29.1: turn_failed — терминальное состояние журнала. Recovery читает его
+// как провал (не как «модель ещё не отвечала») и не запускает новую генерацию
+// даже при наличии валидного model_output в потоке.
+func TestStateOfEventsFailedIsTerminal(t *testing.T) {
+	const reason = "превышен лимит попыток (3): сбой применения"
+	st := stateOfEvents([]events.Event{
+		modelOutputEvent(t, `{"decision":"ignore","reason":"т"}`),
+		TurnFailed{TurnID: 7, Phase: "worker", Reason: reason},
+	})
+	if !st.Failed {
+		t.Fatal("turn_failed не помечен терминальным провалом")
+	}
+	if st.FailReason != reason {
+		t.Fatalf("причина провала %q, хочу %q", st.FailReason, reason)
+	}
+	if st.Skipped {
+		t.Fatal("провал смешан с обычным пропуском: это разные терминальные статусы")
+	}
+	if (TurnFailed{}).EventType() != EventTypeTurnFailed {
+		t.Fatalf("тип события провала %q, хочу %q", (TurnFailed{}).EventType(), EventTypeTurnFailed)
+	}
+}

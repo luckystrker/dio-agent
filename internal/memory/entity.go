@@ -31,12 +31,14 @@ var entityKinds = map[string]bool{
 // IsValidEntityKind проверяет вид сущности.
 func IsValidEntityKind(kind string) bool { return entityKinds[kind] }
 
-// Entity — строка таблицы entities.
+// Entity — строка таблицы entities. MergedInto — id выжившей сущности после
+// объединения (§8.5): поглощённая строка не удаляется, поиск/Get ведут к keep.
 type Entity struct {
 	ID            int64
 	Kind          string
 	CanonicalName string
 	ScopeID       string
+	MergedInto    *int64
 }
 
 // EntityRepo — entities и entity_aliases.
@@ -84,7 +86,8 @@ func (EntityRepo) adoptLegacyPerson(ctx context.Context, db DBTX, actorID int64,
 	var e Entity
 	err := db.QueryRow(ctx,
 		`SELECT id, kind, canonical_name, scope_id FROM entities e
-		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.name_key = `+entityKeySQL("$3")+`
+		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.merged_into IS NULL
+		   AND e.name_key = `+entityKeySQL("$3")+`
 		 LIMIT 1`,
 		EntityPerson, scopeID, norm.NFC.String(strings.TrimSpace(displayName))).
 		Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
@@ -168,7 +171,7 @@ func (EntityRepo) findPersonByKey(ctx context.Context, db DBTX, key, scopeID str
 	var e Entity
 	err := db.QueryRow(ctx,
 		`SELECT id, kind, canonical_name, scope_id FROM entities e
-		 WHERE e.kind = $1 AND e.scope_id = $2
+		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.merged_into IS NULL
 		   AND (e.name_key = `+entityKeySQL("$3")+`
 		    OR e.id IN (
 		      SELECT a.entity_id FROM entity_aliases a
@@ -209,7 +212,7 @@ func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID
 	var e Entity
 	err := db.QueryRow(ctx,
 		`SELECT `+cols+` FROM entities e
-		 WHERE e.kind = $3
+		 WHERE e.kind = $3 AND e.merged_into IS NULL
 		   AND (e.scope_id = $1 AND e.name_key = `+entityKeySQL("$2")+`
 		    OR e.id IN (
 		      SELECT a.entity_id FROM entity_aliases a
@@ -257,6 +260,7 @@ func (EntityRepo) ResolveByName(ctx context.Context, db DBTX, name, audience str
 		 FROM entities e
 		 LEFT JOIN entity_aliases a ON a.entity_id = e.id
 		 WHERE ($1 = 'internal' OR e.scope_id IN ($1, 'public'))
+		   AND e.merged_into IS NULL
 		   AND (e.name_key = `+entityKeySQL("$2")+`
 		        OR (`+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+` AND (a.scope_id = $1 OR a.scope_id = 'public')))
 		 LIMIT 10`,
@@ -278,15 +282,27 @@ func (EntityRepo) ResolveByName(ctx context.Context, db DBTX, name, audience str
 }
 
 // Get возвращает сущность по id, если она видна аудитории; иначе ErrNotFound
-// (существование невидимой сущности не раскрывается — §9.2).
+// (существование невидимой сущности не раскрывается — §9.2). Поглощённая при
+// объединении сущность (§8.5) ведёт к выжившей: карточка и поиск работают по
+// прежнему id, но данные живут на keep.
 func (EntityRepo) Get(ctx context.Context, db DBTX, id int64, audience string) (Entity, error) {
 	if !IsValidScope(audience) {
 		return Entity{}, fmt.Errorf("%w: %q", ErrInvalidScope, audience)
 	}
 	var e Entity
-	err := db.QueryRow(ctx,
-		`SELECT id, kind, canonical_name, scope_id FROM entities
-		 WHERE id = $1 AND ($2 = 'internal' OR scope_id IN ($2, 'public'))`,
+	err := db.QueryRow(ctx, `
+		WITH RECURSIVE root AS (
+		  SELECT id, kind, canonical_name, scope_id, merged_into
+		  FROM entities
+		  WHERE id = $1 AND ($2 = 'internal' OR scope_id IN ($2, 'public'))
+		  UNION
+		  SELECT e.id, e.kind, e.canonical_name, e.scope_id, e.merged_into
+		  FROM entities e
+		  JOIN root r ON e.id = r.merged_into
+		  WHERE ($2 = 'internal' OR e.scope_id IN ($2, 'public'))
+		)
+		SELECT id, kind, canonical_name, scope_id
+		FROM root WHERE merged_into IS NULL LIMIT 1`,
 		id, audience).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
 	if isNoRows(err) {
 		return Entity{}, ErrNotFound
@@ -307,7 +323,8 @@ func (EntityRepo) AddAlias(ctx context.Context, db DBTX, entityID int64, alias s
 	}
 	tag, err := db.Exec(ctx,
 		`INSERT INTO entity_aliases (entity_id, alias, scope_id)
-		 SELECT $1, $2, e.scope_id FROM entities e WHERE e.id = $1
+		 SELECT $1, $2, e.scope_id FROM entities e
+		 WHERE e.id = $1 AND e.merged_into IS NULL
 		 AND NOT EXISTS (
 		   SELECT 1 FROM entity_aliases a
 		   WHERE a.entity_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`

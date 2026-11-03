@@ -5,6 +5,10 @@ package telegram
 
 import (
 	"context"
+	"errors"
+	"log"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -180,4 +184,98 @@ func TestBufferNewBatchAfterClose(t *testing.T) {
 		t.Fatalf("порции перемешались: %+v / %+v", first, second)
 	}
 	m.Wait()
+}
+
+// TestBufferCloseRetriesTransientFailure — 29.3: транзиентный сбой createTurn
+// (таймаут acquire, рестарт PG) повторяется в живом процессе с backoff, а не
+// оставляет события pending до рестарта/recoverStalePending. Подмена сбоя —
+// через startTurn: первые две попытки падают, третья создаёт ход.
+func TestBufferCloseRetriesTransientFailure(t *testing.T) {
+	m, closed := newUnitTestManager(t, 20*time.Millisecond, time.Hour)
+	m.RetryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond}
+
+	var mu sync.Mutex
+	attempts := 0
+	m.startTurn = func(ctx context.Context, chatID int64, ids []int64) (int64, string, error) {
+		mu.Lock()
+		attempts++
+		n := attempts
+		mu.Unlock()
+		if n <= 2 {
+			return 0, "", errors.New("сбой БД: connection reset")
+		}
+		closed <- turnRecord{chatID: chatID, ids: ids}
+		return 7, "direct", nil
+	}
+
+	m.Add(PendingEvent{EventID: 21, ChatID: 7, ChatType: ChatPrivate, Kind: KindMessage})
+	rec := waitForRecord(t, closed)
+	if rec.chatID != 7 || len(rec.ids) != 1 || rec.ids[0] != 21 {
+		t.Fatalf("закрытие после повторов: %+v", rec)
+	}
+	m.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 3 {
+		t.Fatalf("createTurn вызван %d раз, хочу 3 (два сбоя + успех)", attempts)
+	}
+}
+
+// TestBufferCloseGivesUpAfterRetries — если сбой не транзиентный и повторы
+// исчерпаны, события честно остаются pending под периодический recovery:
+// закрытие не крутится вечно и пишет причину в лог.
+func TestBufferCloseGivesUpAfterRetries(t *testing.T) {
+	var logs retryLogBuffer
+	m := NewChatBufferManager(BufferDeps{Pool: nil, Logger: log.New(&logs, "", 0)})
+	m.Windows = func(ChatType, EventKind) Windows { return Windows{Idle: 10 * time.Millisecond, Max: time.Hour} }
+	m.RetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	var mu sync.Mutex
+	attempts := 0
+	m.startTurn = func(context.Context, int64, []int64) (int64, string, error) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		return 0, "", errors.New("постоянный сбой")
+	}
+
+	m.Add(PendingEvent{EventID: 31, ChatID: 8, ChatType: ChatPrivate, Kind: KindMessage})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got >= 3 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.Wait()
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("попыток %d, хочу 3 (первая + две паузы)", got)
+	}
+	if !strings.Contains(logs.String(), "не закрыта после повторов") {
+		t.Fatalf("исчерпание повторов не видно в логе:\n%s", logs.String())
+	}
+}
+
+// retryLogBuffer — потокобезопасный приёмник лога для горутины закрытия.
+type retryLogBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *retryLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *retryLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
