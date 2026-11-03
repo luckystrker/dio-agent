@@ -19,9 +19,8 @@ func TestRecentHistoryShowsEditedVersion(t *testing.T) {
 	ctx := context.Background()
 	const chatID = 777
 
-	original, err := telegram.IngestUpdate(ctx, pool,
-		[]byte(fmt.Sprintf(`{"update_id":9200,"message":{"message_id":44,"from":{"id":5,"first_name":"Яна"},"chat":{"id":%d,"type":"private"},"text":"привет"}}`, chatID)))
-	if err != nil {
+	if _, err := telegram.IngestUpdate(ctx, pool,
+		[]byte(fmt.Sprintf(`{"update_id":9200,"message":{"message_id":44,"from":{"id":5,"first_name":"Яна"},"chat":{"id":%d,"type":"private"},"text":"привет"}}`, chatID))); err != nil {
 		t.Fatalf("исходное: %v", err)
 	}
 	if _, err := telegram.IngestUpdate(ctx, pool,
@@ -47,5 +46,4 @@ func TestRecentHistoryShowsEditedVersion(t *testing.T) {
 	if strings.Contains(history[0].Content, "поправил") {
 		t.Fatalf("событие правки попало в историю как реплика: %q", history[0].Content)
 	}
-	_ = original
 }

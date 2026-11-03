@@ -304,10 +304,11 @@ func (a *App) Start(ctx context.Context) error {
 
 	// Групповой гейт (этап 30.1): дешёвый фильтр закрытой пачки — имя/алиасы,
 	// вопрос ко всем, эмбеддинг пачки к интересам персоны. Кэш тем — при старте.
+	groupTopics := append(append([]string{}, persona.Interests...), persona.Curiosity...)
 	groupGate := telegram.NewGroupGate(pool, telegram.GroupGateConfig{
 		Name:     persona.Name,
 		Aliases:  persona.Aliases,
-		Topics:   append(append([]string{}, persona.Interests...), persona.Curiosity...),
+		Topics:   groupTopics,
 		Embedder: toolset.Embedder(),
 		Logger:   a.logger,
 		Now:      a.opts.Now,
@@ -315,10 +316,13 @@ func (a *App) Start(ctx context.Context) error {
 	// Кэш тем готовится в фоне: сетевой вызов векторизатора не должен
 	// задерживать старт (и тестовый блокирующий embedder не вешает службу).
 	go groupGate.Prepare(a.runCtx)
-	if toolset.Embedder() != nil {
-		a.logger.Printf("группы: повод по теме включён (тем %d)", len(persona.Interests)+len(persona.Curiosity))
-	} else {
+	switch {
+	case toolset.Embedder() == nil:
 		a.logger.Printf("группы: повод по теме выключен (EMBEDDING_* не заданы) — имя и шаблоны вопросов")
+	case len(groupTopics) == 0:
+		a.logger.Printf("группы: повод по теме выключен (нет интересов/тем персоны) — имя и шаблоны вопросов")
+	default:
+		a.logger.Printf("группы: повод по теме включён (тем %d)", len(groupTopics))
 	}
 
 	bufferDeps := telegram.BufferDeps{
