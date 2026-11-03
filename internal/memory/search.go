@@ -15,6 +15,12 @@ import (
 type ScoredItem struct {
 	Item
 	Distance float64
+	// Rank — покрытие полнотекстового запроса 0..1 (28.3): ts_rank записи
+	// относительно лучшего достижимого ранга для этого запроса. 0 у
+	// семантических попаданий. Порядок выдачи уже отражает ранг; Rank нужен
+	// карточке, чтобы отличить совпадение случайного слова от действительно
+	// релевантной записи.
+	Rank float64
 }
 
 // Searcher — объединённый поиск. Embedder == nil — семантическая ветка
@@ -49,7 +55,7 @@ func (s *Searcher) Search(ctx context.Context, db DBTX, audience, query string, 
 	// выдачу, а переставлять уже нечего.
 	channelPool := 3 * limit
 
-	fts, err := s.Items.SearchFTS(ctx, db, audience, q, channelPool)
+	fts, err := s.Items.SearchFTSRanked(ctx, db, audience, q, channelPool)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +79,7 @@ func (s *Searcher) Search(ctx context.Context, db DBTX, audience, query string, 
 			continue
 		}
 		seen[it.ID] = true
-		out = append(out, ScoredItem{Item: it, Distance: -1})
+		out = append(out, it)
 	}
 	for _, sc := range semantic {
 		if seen[sc.ID] {

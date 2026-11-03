@@ -347,32 +347,11 @@ func (Items) Get(ctx context.Context, db DBTX, id int64, audience string) (Item,
 // Ранжирование: покрытие запроса (ts_rank), затем salience, recorded_at.
 // Фильтр видимости в WHERE — до ранжирования.
 func (Items) SearchFTS(ctx context.Context, db DBTX, audience, query string, limit int) ([]Item, error) {
-	if !IsValidScope(audience) {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidScope, audience)
-	}
-	q := orTsQuery(query)
-	if q == "" {
-		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 10
-	}
-
-	rows, err := db.Query(ctx,
-		`SELECT `+prefixedItemCols("m")+` FROM memory_items m
-		 LEFT JOIN provenance p ON p.id = m.provenance_id
-		 WHERE m.status = 'active'
-		   AND `+visCond("m", 1)+`
-		   AND to_tsvector('russian', m.text) @@ to_tsquery('russian', $2)
-		 ORDER BY ts_rank(to_tsvector('russian', m.text), to_tsquery('russian', $2)) DESC,
-		          m.salience DESC, m.recorded_at DESC
-		 LIMIT $3`,
-		audience, q, limit)
+	scored, err := (Items{}).SearchFTSRanked(ctx, db, audience, query, limit)
 	if err != nil {
-		return nil, fmt.Errorf("memory_items: полнотекстовый поиск: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	return collectItems(rows)
+	return scoredAsItems(scored), nil
 }
 
 // SearchSemantic — семантический pgvector-поиск (§10.4 п.4): ближайшие по
