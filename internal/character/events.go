@@ -74,11 +74,15 @@ func (ToolResultRecorded) Conversational() bool { return false }
 // ModelOutput — валидированный TurnResult (§11.2). Пишется ДО применения дельт:
 // сбой между событиями восстанавливает ход применением сохранённого результата
 // без новой генерации (§12.1, §12.2). Usage — фактические токены вызова (§20).
+// Reasoning — рассуждение модели, если провайдер его отдал (26.3): только
+// журнал, в контекст/историю не возвращается; пусто — поля в JSON нет.
 type ModelOutput struct {
 	events.Base
-	Result  json.RawMessage `json:"result"`
-	Usage   map[string]any  `json:"usage,omitempty"`
-	Repairs int             `json:"repairs,omitempty"` // сколько repair-попыток потребовалось
+	Result          json.RawMessage `json:"result"`
+	Usage           map[string]any  `json:"usage,omitempty"`
+	Repairs         int             `json:"repairs,omitempty"` // сколько repair-попыток потребовалось
+	Reasoning       string          `json:"reasoning,omitempty"`
+	ReasoningRepair string          `json:"reasoning_repair,omitempty"`
 }
 
 func (ModelOutput) EventType() string    { return EventTypeModelOutput }

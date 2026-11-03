@@ -282,7 +282,7 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if len(images) > 0 {
 		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки)", in.TurnID, len(images))
 	}
-	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation, images)
+	result, repairs, llmCalls, reasoning, err := r.generate(ctx, in, bctx, userText, operation, images)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
 	if errors.As(err, &invalidErr) {
@@ -305,7 +305,8 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	}
 
 	// --- Фаза 3: model_output ДО применения (§12.1) ---
-	if err := r.Journal.WriteModelOutput(ctx, in.TurnID, result, nil, repairs); err != nil {
+	if err := r.Journal.WriteModelOutput(ctx, in.TurnID, result, nil, repairs,
+		reasoning.First, reasoning.Repair); err != nil {
 		return out, fmt.Errorf("ход %d: model_output не записан: %w", in.TurnID, err)
 	}
 
@@ -320,6 +321,10 @@ type invalidResultError struct {
 	err    error
 	first  string
 	repair string
+	// reasoning модели обеих попыток (26.3) — рядом с сырыми ответами:
+	// пропуск без него не разобрать, когда ответ «почти правильный».
+	firstReasoning  string
+	repairReasoning string
 }
 
 func (e *invalidResultError) Error() string { return e.err.Error() }
@@ -329,10 +334,17 @@ func (e *invalidResultError) Error() string { return e.err.Error() }
 const invalidOutputRunes = 2000
 
 // skipReason — текст причины пропуска для журнала и лога: ошибка валидации +
-// сырые ответы первой и repair-попыток.
+// сырые ответы и reasoning первой и repair-попыток.
 func (e *invalidResultError) skipReason() string {
-	return fmt.Sprintf("валидация TurnResult не пройдена после repair: %v\nответ модели (попытка 1): %s\nответ на repair: %s",
+	reason := fmt.Sprintf("валидация TurnResult не пройдена после repair: %v\nответ модели (попытка 1): %s\nответ на repair: %s",
 		e.err, truncateRawOutput(e.first), truncateRawOutput(e.repair))
+	if r := truncateReasoning(e.firstReasoning); r != "" {
+		reason += "\nreasoning (попытка 1): " + r
+	}
+	if r := truncateReasoning(e.repairReasoning); r != "" {
+		reason += "\nreasoning (repair): " + r
+	}
+	return reason
 }
 
 // truncateRawOutput режет сырой ответ модели по рунам (не байтам).
@@ -355,10 +367,17 @@ func repairHint(perr error) string {
 	return hint
 }
 
+// turnReasoning — reasoning модели хода: первой попытки и repair (26.3).
+// Пустые строки — провайдер reasoning не отдавал (поля в журнале нет).
+type turnReasoning struct {
+	First  string
+	Repair string
+}
+
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
-// repair-попыток и число модельных вызовов.
-func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, images []Photo) (TurnResult, int, int, error) {
+// repair-попыток, число модельных вызовов и reasoning попыток.
+func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, images []Photo) (TurnResult, int, int, turnReasoning, error) {
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
@@ -384,6 +403,10 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// Прямой ход на стоп-кране отвечает видимой реакцией, а не молчанием.
 	toolMW.SetDirect(in.Direct)
 	mws := []agomiddleware.Factory{func() agomiddleware.Middleware { return budgetMW }}
+	// Reasoning (26.3) — на все модельные вызовы хода (включая tool-цикл и
+	// repair): складывается отдельно от истории, только для журнала.
+	reasoning := NewReasoningCapture()
+	mws = append(mws, func() agomiddleware.Middleware { return reasoning })
 	if plan.Enabled {
 		mws = append(mws,
 			func() agomiddleware.Middleware { return &toolJournalMW{runner: r, turnID: in.TurnID} },
@@ -433,7 +456,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 
 	a, err := newAgent()
 	if err != nil {
-		return TurnResult{}, 0, 0, err
+		return TurnResult{}, 0, 0, turnReasoning{}, err
 	}
 	// Части Ask: текст пачки + картинки BinaryInput (находка приёмки Р: фото
 	// скачивалось, но в вызов модели уходил только текст; этап 25 добавил
@@ -445,13 +468,15 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// Молча терять ответ нельзя, поэтому причина — в лог.
 		r.logf("ход %d: провайдер не принял картинку (%v) — повтор без картинок, стикеры/гифки остаются текстом", in.TurnID, err)
 		if a, err = newAgent(); err != nil {
-			return TurnResult{}, 0, budgetMW.callCount(), err
+			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
 		}
 		reply, err = a.Ask(ctx, userText)
 	}
 	if err != nil {
-		return TurnResult{}, 0, budgetMW.callCount(), err
+		return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
 	}
+	// Reasoning первой попытки (весь tool-цикл Ask) — до repair.
+	reasoningOut := turnReasoning{First: reasoning.Take()}
 
 	// --- строгая валидация ответа (§11.2); один repair-retry (§11.3) ---
 	repairs := 0
@@ -460,17 +485,19 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		repairs = 1
 		fixed, ferr := reply.Ask(ctx, repairHint(perr))
 		if ferr != nil {
-			return TurnResult{}, repairs, budgetMW.callCount(), ferr
+			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr
 		}
+		reasoningOut.Repair = reasoning.Take()
 		var repairBody string
 		result, repairBody, perr = parseReply(fixed, bctx.History)
 		if perr != nil {
-			return TurnResult{}, repairs, budgetMW.callCount(), &invalidResultError{
+			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, &invalidResultError{
 				err: perr, first: body, repair: repairBody,
+				firstReasoning: reasoningOut.First, repairReasoning: reasoningOut.Repair,
 			}
 		}
 	}
-	return result, repairs, budgetMW.callCount(), nil
+	return result, repairs, budgetMW.callCount(), reasoningOut, nil
 }
 
 // parseReply разбирает тело ответа как строгий TurnResult (§11.2); история
@@ -577,6 +604,17 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 	for _, dup := range out.Apply.DuplicateIntentions {
 		r.logf("ход %d: намерение %s %q не создано — живое намерение с тем же dedupe-ключом уже есть (статус %s, §14.1)",
 			in.TurnID, dup.Kind, dup.Topic, dup.LiveStatus)
+	}
+	// Страховки намерений (26.2): поднятая задержка и отсеянная мусорная тема
+	// тоже видны оператору — иначе «модель попросила через 5 минут, а пришло
+	// через 2 часа» не отличить от молчаливой правки.
+	for _, raised := range out.Apply.RaisedIntentions {
+		r.logf("ход %d: намерение %s %q: delay_hours %.3f поднята до %.3f ч (runtime-пол вида, 26.2)",
+			in.TurnID, raised.Kind, raised.Topic, raised.From, raised.To)
+	}
+	for _, rejected := range out.Apply.RejectedIntentions {
+		r.logf("ход %d: намерение %s %q отклонено — тема-мусор (%s, §14.1)",
+			in.TurnID, rejected.Kind, rejected.Topic, rejected.Reason)
 	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -482,6 +483,74 @@ func TestWorkerBudgetExhaustedDefersToNextDay(t *testing.T) {
 	assertNoTurnSkipped(t, journal, ctx, turnID)
 	if got := runner.callCount(); got != 3 {
 		t.Fatalf("исполнитель вызван %d раз, хочу 3 (две бюджетные встречи + успех)", got)
+	}
+}
+
+// syncLogBuffer — потокобезопасный приёмник лога: worker пишет из своей
+// горутины, тест читает из основной.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// loggingRunner — двойной исполнитель, который пишет ту же полную строку
+// завершения хода, что и продакшн *character.Runner (turn.go). Нужен, чтобы
+// поймать дубль: worker не должен добавлять к ней свою короткую копию.
+type loggingRunner struct {
+	pool   *runtime.Pool
+	logger *log.Logger
+}
+
+func (r *loggingRunner) Run(ctx context.Context, in character.Input) (character.Outcome, error) {
+	if _, err := r.pool.Exec(ctx, `UPDATE turns SET status = 'applied' WHERE id = $1`, in.TurnID); err != nil {
+		return character.Outcome{}, err
+	}
+	r.logger.Printf("ход %d выполнен: decision=answer сообщений=1 памяти=0 намерений=0 доставки=1 recovered=false",
+		in.TurnID)
+	return character.Outcome{Apply: character.ApplyResult{OutboxIDs: []int64{1}}}, nil
+}
+
+// TestWorkerLogsOneCompletionLinePerTurn — 26.1: на ход ровно одна строка
+// «ход N выполнен» — полная из character.Runner. Воркер не дублирует её
+// короткой версией (было две строки на каждый ход).
+func TestWorkerLogsOneCompletionLinePerTurn(t *testing.T) {
+	pool := newWorkerPool(t)
+	turnID := seedTurn(t, pool, 4601, "private", "ход с одной строкой лога")
+
+	logs := &syncLogBuffer{}
+	logger := log.New(logs, "", 0)
+	w := New(Deps{Pool: pool, Runner: &loggingRunner{pool: pool, logger: logger}, Logger: logger},
+		Options{PollInterval: 5 * time.Millisecond})
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = w.Run(runCtx) }()
+
+	eventually(t, "ход применён", func() bool {
+		var status string
+		var attempts int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT status, attempts FROM turns WHERE id = $1`, turnID).Scan(&status, &attempts); err != nil {
+			return false
+		}
+		return status == "applied" && attempts == 1
+	})
+	w.StopDrain()
+	<-w.Done()
+
+	if got := strings.Count(logs.String(), "выполнен"); got != 1 {
+		t.Fatalf("строк «ход N выполнен» за ход: %d, хочу 1\nлог:\n%s", got, logs.String())
 	}
 }
 

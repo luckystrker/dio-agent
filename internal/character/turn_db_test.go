@@ -457,7 +457,7 @@ func TestTurnRecoveryWithoutNewGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("turn_started не записан: %v", err)
 	}
-	if err := f.journal.WriteModelOutput(ctx, turnID, valid, nil, 0); err != nil {
+	if err := f.journal.WriteModelOutput(ctx, turnID, valid, nil, 0, "", ""); err != nil {
 		t.Fatalf("model_output не записан: %v", err)
 	}
 
@@ -511,7 +511,7 @@ func TestTurnRecoveryInvalidModelOutputSkips(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("turn_started не записан: %v", err)
 	}
-	if err := f.journal.WriteModelOutput(ctx, turnID, TurnResult{Decision: DecisionDefer}, nil, 0); err != nil {
+	if err := f.journal.WriteModelOutput(ctx, turnID, TurnResult{Decision: DecisionDefer}, nil, 0, "", ""); err != nil {
 		t.Fatalf("битой model_output не записан: %v", err)
 	}
 
