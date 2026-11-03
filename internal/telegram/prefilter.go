@@ -23,6 +23,12 @@ func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 		return StatusJournalOnly
 	}
 	if event.ChatType == ChatPrivate {
+		// Правка не создаёт новый ход и повторный платный ответ (minor 13):
+		// текст правки в историю не попадает, пока нет отдельной обработки
+		// edit/delete (бэклог §19).
+		if event.Kind == KindEdited {
+			return StatusJournalOnly
+		}
 		return StatusPending
 	}
 	switch event.Kind {

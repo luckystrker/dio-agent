@@ -68,8 +68,8 @@ func TestDecideIngestStatus(t *testing.T) {
 	}{
 		{"личка — всегда прямое общение",
 			NormalizedEvent{Supported: true, ChatType: ChatPrivate, Kind: KindMessage}, StatusPending},
-		{"личка — даже правка",
-			NormalizedEvent{Supported: true, ChatType: ChatPrivate, Kind: KindEdited}, StatusPending},
+		{"личка — правка не запускает новый ход (minor 13)",
+			NormalizedEvent{Supported: true, ChatType: ChatPrivate, Kind: KindEdited}, StatusJournalOnly},
 		{"reply в группе — прямое обращение",
 			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindReply}, StatusPending},
 		{"mention в группе — прямое обращение",
