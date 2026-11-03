@@ -548,6 +548,14 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 			r.logf("ход %d: проиндексировано записей памяти: %d", in.TurnID, n)
 		}
 	}
+	// Стикеры (этап 25.4–25.5): мягко обнулённая метка и сохранение — в лог,
+	// иначе «модель просила стикер, а его нет» не отличить от «не просила».
+	if out.Apply.SkippedSticker {
+		r.logf("ход %d: метка стикера %q не найдена в коллекции — стикер не отправлен", in.TurnID, result.Sticker)
+	}
+	if out.Apply.SavedStickerID != 0 {
+		r.logf("ход %d: стикер из пачки сохранён в коллекцию (#%d)", in.TurnID, out.Apply.SavedStickerID)
+	}
 	// Дубли намерений (§14.1, блок 17.5): причина отклонения предложения —
 	// в лог оператора, молчаливая потеря не видна ни в чате, ни в журнале.
 	for _, dup := range out.Apply.DuplicateIntentions {

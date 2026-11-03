@@ -134,6 +134,7 @@ type API interface {
 	GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error)
 	GetMe(ctx context.Context) (BotIdentity, error)
 	SendMessage(ctx context.Context, chatID int64, text string) (int64, error)
+	SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error)
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 	SetMessageReaction(ctx context.Context, chatID int64, messageID int64, emoji string) error
 }
@@ -206,6 +207,26 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (in
 	}
 	if err := json.Unmarshal(raw, &result); err != nil || result.MessageID == 0 {
 		return 0, &APIError{Method: "sendMessage", HTTPStatus: 200,
+			Description: "ответ без message_id"}
+	}
+	return result.MessageID, nil
+}
+
+// SendSticker отправляет стикер из коллекции персонажа (этап 25.4) и
+// возвращает Telegram message_id: file_id выбирает runtime, не модель.
+func (c *Client) SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+	defer cancel()
+
+	raw, err := c.call(ctx, "sendSticker", map[string]any{"chat_id": chatID, "sticker": fileID}, maxSmallBody)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || result.MessageID == 0 {
+		return 0, &APIError{Method: "sendSticker", HTTPStatus: 200,
 			Description: "ответ без message_id"}
 	}
 	return result.MessageID, nil

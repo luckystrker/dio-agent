@@ -18,6 +18,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/telegram"
 )
 
 // isNoRows отличает «строки нет» от прочих ошибок запроса.
@@ -40,6 +41,11 @@ type ApplyResult struct {
 	OutboxIDs       []int64
 	MoodNext        *Mood
 	SkippedReaction bool // react без целевого сообщения — реакция пропущена
+	// SkippedSticker — метка стикера не нашлась в коллекции: мягко обнулена,
+	// ход живёт (как мусорная reaction при answer, этап 25.4).
+	SkippedSticker bool
+	// SavedStickerID — стикер из пачки сохранён в коллекцию (25.5); 0 — нет.
+	SavedStickerID int64
 	// DuplicateIntentions — предложения модели, отклонённые живым дублем
 	// (§14.1): причина дубля (какое намерение живо) видна оператору в логе.
 	DuplicateIntentions []DuplicateIntention
@@ -109,20 +115,28 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 
 	res := ApplyResult{Applied: true}
 
-	// --- доставка (§11.2, §13.1): сообщения и/или реакция ---
+	// --- доставка (§11.2, §13.1): сообщения, реакция, стикер ---
 	delivery := &DeliveryQueued{TurnID: opts.TurnID, ChatID: opts.ChatID}
+	position := 0
+	enqueue := func(payload map[string]any, queued QueuedDelivery) error {
+		id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, position, payload)
+		if err != nil {
+			return err
+		}
+		queued.ID = id
+		queued.Position = position
+		res.OutboxIDs = append(res.OutboxIDs, id)
+		delivery.Outbox = append(delivery.Outbox, queued)
+		position++
+		return nil
+	}
 	switch opts.Result.Decision {
 	case DecisionAnswer:
-		for i, text := range opts.Result.Messages {
-			id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, i, map[string]any{
-				"kind": "message",
-				"text": text,
-			})
-			if err != nil {
+		for _, text := range opts.Result.Messages {
+			if err := enqueue(map[string]any{"kind": "message", "text": text},
+				QueuedDelivery{Kind: "message", Text: text}); err != nil {
 				return ApplyResult{}, err
 			}
-			res.OutboxIDs = append(res.OutboxIDs, id)
-			delivery.Outbox = append(delivery.Outbox, QueuedDelivery{ID: id, Position: i, Kind: "message", Text: text})
 		}
 		// Необязательная reaction при answer (§11.2): цель недоступна —
 		// реакция пропускается без дополнительного вызова модели.
@@ -133,17 +147,12 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			}
 			if target == 0 {
 				res.SkippedReaction = true
-			} else {
-				id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, len(opts.Result.Messages), map[string]any{
-					"kind":              "reaction",
-					"reaction":          opts.Result.Reaction,
-					"target_message_id": target,
-				})
-				if err != nil {
-					return ApplyResult{}, err
-				}
-				res.OutboxIDs = append(res.OutboxIDs, id)
-				delivery.Outbox = append(delivery.Outbox, QueuedDelivery{ID: id, Position: len(opts.Result.Messages), Kind: "reaction", Reaction: opts.Result.Reaction})
+			} else if err := enqueue(map[string]any{
+				"kind":              "reaction",
+				"reaction":          opts.Result.Reaction,
+				"target_message_id": target,
+			}, QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
+				return ApplyResult{}, err
 			}
 		}
 	case DecisionReact:
@@ -155,18 +164,43 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			// Нужной реакции нет — runtime пропускает её, не создаёт вызов ради
 			// emoji (§11.2); валидные дельты при этом применяются.
 			res.SkippedReaction = true
-		} else {
-			id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, 0, map[string]any{
-				"kind":              "reaction",
-				"reaction":          opts.Result.Reaction,
-				"target_message_id": target,
-			})
-			if err != nil {
-				return ApplyResult{}, err
-			}
-			res.OutboxIDs = append(res.OutboxIDs, id)
-			delivery.Outbox = append(delivery.Outbox, QueuedDelivery{ID: id, Position: 0, Kind: "reaction", Reaction: opts.Result.Reaction})
+		} else if err := enqueue(map[string]any{
+			"kind":              "reaction",
+			"reaction":          opts.Result.Reaction,
+			"target_message_id": target,
+		}, QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
+			return ApplyResult{}, err
 		}
+	}
+
+	// --- стикер (25.4): метка из панели → file_id из коллекции; неизвестная
+	// метка мягко обнуляется, как мусорная реакция при answer. Стикер уходит
+	// после сообщений и реакции этого хода.
+	if opts.Result.Sticker != "" {
+		sticker, err := NewStickerRepo().ByLabel(ctx, tx, opts.Result.Sticker)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		if sticker == nil {
+			res.SkippedSticker = true
+		} else if err := enqueue(map[string]any{
+			"kind":    "sticker",
+			"file_id": sticker.FileID,
+			"emoji":   sticker.Emoji,
+		}, QueuedDelivery{Kind: "sticker", FileID: sticker.FileID}); err != nil {
+			return ApplyResult{}, err
+		}
+	}
+
+	// --- «сохраню себе» (25.5): file_id берём из пачки, заметку — у модели;
+	// дубли отсекаются по file_unique_id. В пачке нет стикера — сохранять
+	// нечего, предложение честно пропускается.
+	if opts.Result.SaveSticker != nil {
+		savedID, err := saveStickerFromBatch(ctx, tx, opts.TurnID, opts.Result.SaveSticker.Note)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		res.SavedStickerID = savedID
 	}
 
 	// --- память (§10.1): модель предлагает, runtime назначает источники и разрешение ---
@@ -510,4 +544,43 @@ func resolveActorEntity(ctx context.Context, tx pgx.Tx, turnID int64, scopeID st
 		return nil, fmt.Errorf("применение: сущность собеседника: %w", err)
 	}
 	return &entity, nil
+}
+
+// saveStickerFromBatch сохраняет в коллекцию первый незнакомый стикер пачки
+// (25.5): file_id/file_unique_id/эмодзи берёт runtime из события, модель даёт
+// только заметку. Возвращает id сохранённого стикера; 0 — сохранять нечего
+// (стикера в пачке нет или все уже в коллекции).
+func saveStickerFromBatch(ctx context.Context, tx pgx.Tx, turnID int64, note string) (int64, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT raw_update FROM social_events WHERE turn_id = $1 ORDER BY id`, turnID)
+	if err != nil {
+		return 0, fmt.Errorf("применение: события пачки не читаются: %w", err)
+	}
+	var sticker *telegram.StickerInfo
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("применение: событие пачки не читается: %w", err)
+		}
+		if info := telegram.StickerFromUpdate(raw); info != nil {
+			sticker = info
+			break
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("применение: события пачки не дочитаны: %w", err)
+	}
+	if sticker == nil {
+		return 0, nil
+	}
+	id, created, err := NewStickerRepo().Save(ctx, tx, *sticker, note)
+	if err != nil {
+		return 0, fmt.Errorf("применение: стикер не сохранён: %w", err)
+	}
+	if !created {
+		return 0, nil // уже в коллекции — дубль отсечён
+	}
+	return id, nil
 }

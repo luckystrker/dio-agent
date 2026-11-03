@@ -97,18 +97,30 @@ type RelationshipDelta struct {
 	Reason   string   `json:"reason"`
 }
 
+// SaveStickerProposal — предложение сохранить присланный стикер в коллекцию
+// (этап 25.5): модель даёт только заметку «когда уместен», file_id берёт
+// runtime из пачки — придумать стикер модель не может.
+type SaveStickerProposal struct {
+	Note string `json:"note"`
+}
+
 // TurnResult — строгий контракт результата хода (§11.2).
 type TurnResult struct {
-	Decision          string              `json:"decision"`
-	Messages          []string            `json:"messages,omitempty"`
-	Notes             []string            `json:"notes,omitempty"`
-	Memory            []MemoryCandidate   `json:"memory,omitempty"`
-	Reaction          string              `json:"reaction,omitempty"`
-	Intentions        []IntentionProposal `json:"intentions,omitempty"`
-	DeferHours        *float64            `json:"defer_hours,omitempty"`
-	MoodDelta         *MoodDelta          `json:"mood_delta,omitempty"`
-	RelationshipDelta *RelationshipDelta  `json:"relationship_delta,omitempty"`
-	Reason            string              `json:"reason,omitempty"`
+	Decision string            `json:"decision"`
+	Messages []string          `json:"messages,omitempty"`
+	Notes    []string          `json:"notes,omitempty"`
+	Memory   []MemoryCandidate `json:"memory,omitempty"`
+	Reaction string            `json:"reaction,omitempty"`
+	// Sticker — метка стикера из коллекции в панели («#3»). Отправляет
+	// runtime: неизвестная метка мягко обнуляется (этап 25.4).
+	Sticker string `json:"sticker,omitempty"`
+	// SaveSticker — сохранить стикер из текущей пачки (этап 25.5).
+	SaveSticker       *SaveStickerProposal `json:"save_sticker,omitempty"`
+	Intentions        []IntentionProposal  `json:"intentions,omitempty"`
+	DeferHours        *float64             `json:"defer_hours,omitempty"`
+	MoodDelta         *MoodDelta           `json:"mood_delta,omitempty"`
+	RelationshipDelta *RelationshipDelta   `json:"relationship_delta,omitempty"`
+	Reason            string               `json:"reason,omitempty"`
 }
 
 // ParseTurnResult разбирает и валидирует ответ модели: строгий JSON (неизвестные
@@ -311,6 +323,15 @@ func (r TurnResult) Validate() error {
 	if r.Reaction != "" && !validReaction(r.Reaction) {
 		return fmt.Errorf("turnresult: reaction %q не входит в ReactionTypeEmoji Telegram", r.Reaction)
 	}
+	if r.Sticker != "" && (strings.TrimSpace(r.Sticker) == "" || runeLen(r.Sticker) > maxStickerLabel) {
+		return fmt.Errorf("turnresult: sticker — метка из панели до %d символов, получено %q", maxStickerLabel, r.Sticker)
+	}
+	if r.SaveSticker != nil {
+		note := strings.TrimSpace(r.SaveSticker.Note)
+		if note == "" || runeLen(note) > stickerNoteLimit {
+			return fmt.Errorf("turnresult: save_sticker.note от 1 до %d символов", stickerNoteLimit)
+		}
+	}
 	if len(r.Intentions) > maxIntentions {
 		return fmt.Errorf("turnresult: не более %d предложений намерений, получено %d", maxIntentions, len(r.Intentions))
 	}
@@ -413,6 +434,11 @@ func stripInertContradictions(r TurnResult) TurnResult {
 		}
 		// При react недопустимую реакцию оставляем Validate: это смысл хода,
 		// ошибка ведёт в repair-retry, а не в молчаливую отправку.
+	}
+	if r.Decision != DecisionAnswer && r.Decision != DecisionReact {
+		// Стикер — внешнее действие, как реакция: при ignore/defer его не
+		// отправляем, мусорное поле не превращается в сюрприз в чате.
+		r.Sticker = ""
 	}
 	for i := range r.Memory {
 		if r.Memory[i].Kind != "claim" {

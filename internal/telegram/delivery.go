@@ -258,6 +258,30 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	}
 
 	switch row.Kind {
+	case "sticker":
+		if row.FileID == "" {
+			qctx, cancel := l.persistCtx()
+			defer cancel()
+			if ferr := l.repo.MarkFailed(qctx, row.ID, "стикер без file_id"); ferr != nil {
+				l.requeueOnDBError(ctx, row, ferr.Error())
+			}
+			return
+		}
+		messageID, err := l.api.SendSticker(ctx, row.ChatID, row.FileID)
+		if err != nil {
+			l.handleSendError(ctx, row, err)
+			return
+		}
+		qctx, cancel := l.persistCtx()
+		err = l.repo.MarkSent(qctx, row.ID, &messageID)
+		cancel()
+		if err != nil {
+			l.markUnknownAfterDBError(ctx, row, err.Error())
+			return
+		}
+		l.noteSent(row)
+		l.logger.Printf("delivery: стикер отправлен (turn %d, поз. %d, message_id %d)",
+			row.TurnID, row.Position, messageID)
 	case "reaction":
 		if row.TargetMessageID == 0 || row.Reaction == "" {
 			qctx, cancel := l.persistCtx()

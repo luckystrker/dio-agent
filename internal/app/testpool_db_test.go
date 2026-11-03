@@ -123,6 +123,15 @@ func (s *stubAPI) SendMessage(ctx context.Context, chatID int64, text string) (i
 	return id, err
 }
 
+func (s *stubAPI) SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error) {
+	s.mu.Lock()
+	s.msgID++
+	id := s.msgID
+	s.calls = append(s.calls, stubCall{Method: "sendSticker", ChatID: chatID, Text: fileID, MessageID: id})
+	s.mu.Unlock()
+	return id, nil
+}
+
 func (s *stubAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {
 	s.mu.Lock()
 	s.calls = append(s.calls, stubCall{Method: "sendChatAction", ChatID: chatID})
@@ -425,8 +434,8 @@ func newTestPool(t *testing.T) (*runtime.Pool, string) {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 14 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 14/0", result.Applied, result.Skipped)
+	if result.Applied != 15 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 15/0", result.Applied, result.Skipped)
 	}
 	return pool, testDSN
 }
