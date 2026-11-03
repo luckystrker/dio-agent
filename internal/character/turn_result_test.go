@@ -381,6 +381,20 @@ func TestSchemaMatchesValidatorLimits(t *testing.T) {
 	}
 }
 
+// TestValidateMessageUTF16Limit — minor 4: 4000 рун из эмодзи вне BMP дают
+// больше 4096 единиц UTF-16; Telegram отвечает 400, и ответ теряется. Ловим
+// это валидацией до применения, а не в доставке.
+func TestValidateMessageUTF16Limit(t *testing.T) {
+	tooLong := strings.Repeat("👍", 2100) // 2100 рун, 4200 units UTF-16
+	if err := (TurnResult{Decision: DecisionAnswer, Messages: []string{tooLong}}).Validate(); err == nil {
+		t.Fatalf("сообщение %d единиц UTF-16 прошло валидацию", utf16Len(tooLong))
+	}
+	ok := strings.Repeat("👍", 2048) // ровно 4096 units
+	if err := (TurnResult{Decision: DecisionAnswer, Messages: []string{ok}}).Validate(); err != nil {
+		t.Fatalf("сообщение ровно 4096 units отвергнуто: %v", err)
+	}
+}
+
 // TestSanitizeInitiativeResult — M4: инициативный ход не создаёт новых
 // намерений, defer превращается в ignore (иначе бесконечная цепочка фона).
 func TestSanitizeInitiativeResult(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -27,18 +28,22 @@ import (
 const (
 	maxMessages      = 4
 	maxMessageLength = 4000
-	maxNotes         = 5
-	maxNoteLength    = 2000
-	maxMemories      = 5
-	maxMemoryText    = 2000
-	maxEntityName    = 200
-	maxEntityLinks   = 3
-	maxIntentions    = 2
-	maxReasonLength  = 500
-	maxReactionLen   = 64
-	minDeferHours    = 0.05
-	maxDeferHours    = 168
-	minDelayHours    = 0.05
+	// maxMessageUTF16Units — жёсткий предел Telegram (4096 UTF-16 code units).
+	// 4000 рун с эмодзи вне BMP дают до 8000 units и 400 Bad Request, после
+	// которого ответ уже не спасти (minor 4).
+	maxMessageUTF16Units = 4096
+	maxNotes             = 5
+	maxNoteLength        = 2000
+	maxMemories          = 5
+	maxMemoryText        = 2000
+	maxEntityName        = 200
+	maxEntityLinks       = 3
+	maxIntentions        = 2
+	maxReasonLength      = 500
+	maxReactionLen       = 64
+	minDeferHours        = 0.05
+	maxDeferHours        = 168
+	minDelayHours        = 0.05
 )
 
 // Действия хода (§11.2). В JSON-схеме — decision.
@@ -228,6 +233,9 @@ func rangeErr(what string, v, min, max float64) error {
 // тоже в символах, а не в байтах.
 func runeLen(s string) int { return utf8.RuneCountInString(s) }
 
+// utf16Len — длина в единицах UTF-16 (так считает лимит Telegram, а не Go).
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+
 func optInRange(what string, v *float64, min, max float64) error {
 	if v == nil {
 		return nil
@@ -272,6 +280,10 @@ func (r TurnResult) Validate() error {
 	for _, m := range r.Messages {
 		if runeLen(m) == 0 || runeLen(m) > maxMessageLength {
 			return fmt.Errorf("turnresult: сообщение должно быть от 1 до %d символов, получено %d", maxMessageLength, runeLen(m))
+		}
+		if units := utf16Len(m); units > maxMessageUTF16Units {
+			return fmt.Errorf("turnresult: сообщение длиннее %d единиц UTF-16 (Telegram), получено %d",
+				maxMessageUTF16Units, units)
 		}
 	}
 	if len(r.Messages) > maxMessages {
