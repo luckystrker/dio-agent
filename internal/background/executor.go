@@ -394,7 +394,12 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			if aerr != nil {
 				if errors.Is(aerr, errInitiativeStale) {
 					reason := "чат ушёл вперёд до применения (§14.3)"
-					_, _ = s.intentions.Cancel(ctx, it.ID, reason)
+					if _, cerr := s.intentions.Cancel(ctx, it.ID, reason); cerr != nil {
+						// Намерение осталось running: повтор по WAL после
+						// рестарта мог бы применить устаревшее — не терминализуем.
+						return out, fmt.Errorf("фон: устаревшее намерение %d не отменено: %w", it.ID, cerr)
+					}
+					_ = task.Cancel(reason)
 					s.skipTurn(ctx, cp.TurnID, "apply", reason)
 					out.Outcome, out.Detail = "cancelled", reason
 					out.Latency = s.now().Sub(started)

@@ -38,6 +38,43 @@ func TestEnsurePersonAdoptsLegacyEntity(t *testing.T) {
 	}
 }
 
+// TestEnsurePersonKeepsAdoptedIdentityAfterRename — замечание финального
+// ревью: усыновлённая сущность хранит ключ алиасом, и при следующей смене
+// имени актор не должен усыновить вторую чужую карточку.
+func TestEnsurePersonKeepsAdoptedIdentityAfterRename(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := EntityRepo{}
+	scope := "chat:99"
+
+	legacy, err := repo.FindOrCreate(ctx, pool, EntityPerson, "Саша", scope)
+	if err != nil {
+		t.Fatalf("легаси-Саша: %v", err)
+	}
+	adopted, err := repo.EnsurePerson(ctx, pool, 4001, "Саша", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson(4001, Саша): %v", err)
+	}
+	if adopted.ID != legacy.ID {
+		t.Fatalf("легаси не усыновлена: %d вместо %d", adopted.ID, legacy.ID)
+	}
+
+	other, err := repo.FindOrCreate(ctx, pool, EntityPerson, "Коля", scope)
+	if err != nil {
+		t.Fatalf("легаси-Коля: %v", err)
+	}
+	afterRename, err := repo.EnsurePerson(ctx, pool, 4001, "Коля", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson(4001, Коля): %v", err)
+	}
+	if afterRename.ID != adopted.ID {
+		t.Fatalf("после смены имени актор переехал на чужую сущность: %d вместо %d", afterRename.ID, adopted.ID)
+	}
+	if afterRename.ID == other.ID {
+		t.Fatal("актор усыновил вторую легаси-сущность")
+	}
+}
+
 // TestEnsurePersonDoesNotStealWhenCanonicalExists — замечание повторного
 // ревью: у актора уже есть user:<id>, поэтому одноимённая легаси-запись
 // (созданная инструментом памяти) не должна подменять его историю.

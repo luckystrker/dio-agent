@@ -103,12 +103,28 @@ type turnModelRun struct {
 // runTurnModel — модельный ход фоновой задачи: строгий TurnResult, один
 // repair-retry (§11.3), резерв бюджета до вызова (§16, пул background), сессия
 // провайдера по чату (x-opencode-session). sessionID пуст — заголовка нет.
-func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
-	release, ok := s.cognition.Acquire(ctx)
+// cognitionGate — семафор когниции на каждый модельный вызов (§5.2): фон не
+// держит общий замок на всё поколение (несколько вызовов инструментов и
+// repair), поэтому прямой ход может вклиниться между ними. nil-замок — no-op.
+type cognitionGate struct {
+	agomiddleware.Base
+	lock *runtime.CognitionLock
+}
+
+func (g *cognitionGate) OnLLMCall(next agomiddleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
+	release, ok := g.lock.Acquire(context.Background())
 	if !ok {
-		return turnModelRun{}, ctx.Err()
+		return nil, context.Canceled
 	}
 	defer release()
+	return next(evs, cx)
+}
+
+func (s *Scheduler) cognitionMiddleware() agomiddleware.Middleware {
+	return &cognitionGate{lock: s.cognition}
+}
+
+func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -145,6 +161,9 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 			response.WithRawName("TurnResult"),
 			response.WithRawDescription("Цельный результат фонового хода: решение, сообщения, кандидаты памяти."))),
 		agent.WithMiddleware(
+			// Когниция — на каждый модельный вызов, а не на всё поколение:
+			// прямой ход может вклиниться между вызовами инструментов (M1).
+			s.cognitionMiddleware,
 			// Бюджет — внешний слой: резерв до всего остального (§16).
 			func() agomiddleware.Middleware {
 				return character.NewBudgetMiddlewarePool(s.budget, operation, s.dailyLimit,
@@ -203,11 +222,6 @@ func parseTurnReply(reply *agent.AgentReply) (character.TurnResult, error) {
 // эпизода (x-opencode-session, как у прямого хода; находка 2026-10-31: вызовы
 // без заголовка падали HTTP 400 MissingSessionID). sessionID пуст — заголовка нет.
 func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system, userText, sessionID string) (consolidationProposal, modelStats, error) {
-	release, ok := s.cognition.Acquire(ctx)
-	if !ok {
-		return consolidationProposal{}, modelStats{}, ctx.Err()
-	}
-	defer release()
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -234,6 +248,7 @@ func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system
 			response.WithRawName("ConsolidationProposal"),
 			response.WithRawDescription("Предложение консолидации: summary эпизода и пересмотры stances."))),
 		agent.WithMiddleware(
+			s.cognitionMiddleware,
 			func() agomiddleware.Middleware {
 				return character.NewBudgetMiddlewarePool(s.budget, operation, s.dailyLimit,
 					runtime.BudgetPoolBackground, s.logger)

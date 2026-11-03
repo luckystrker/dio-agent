@@ -31,6 +31,11 @@ func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 		}
 		return StatusPending
 	}
+	// Прямое упоминание бота — обращение независимо от типа события (фото с
+	// подписью, стикер и т.п.), а не только когда detectKind дал mention.
+	if event.BotKnown && event.MentionBot {
+		return StatusPending
+	}
 	switch event.Kind {
 	case KindCommand:
 		return StatusPending

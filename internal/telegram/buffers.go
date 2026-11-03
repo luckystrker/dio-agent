@@ -95,6 +95,9 @@ type ChatBufferManager struct {
 	mu      sync.Mutex
 	buffers map[int64]*bufferState
 	wg      sync.WaitGroup // незакрытые createTurn для FlushAll/Wait
+	// turnMu сериализует создание ходов: два closeAsync одного чата не должны
+	// получить id в порядке, обратном порядку событий (находка ревью).
+	turnMu sync.Mutex
 }
 
 type bufferState struct {
@@ -197,10 +200,20 @@ func (m *ChatBufferManager) closeAsync(ctx context.Context, chatID int64, ids []
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		if err := m.createTurn(ctx, chatID, ids); err != nil {
-			m.logger.Printf("буфер: порция чата %d не закрыта (%d событий остаются pending до recovery): %v",
-				chatID, len(ids), err)
+		// Транзиентный сбой закрытия (таймаут acquire, рестарт PG) повторяем
+		// здесь же: периодический recovery — последний пояс, а не первый;
+		// без повтора события ждали его и могли обогнать более новый ход.
+		var err error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if err = m.createTurn(ctx, chatID, ids); err == nil {
+				return
+			}
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+			}
 		}
+		m.logger.Printf("буфер: порция чата %d не закрыта после повторов (%d событий остаются pending до recovery): %v",
+			chatID, len(ids), err)
 	}()
 }
 
@@ -292,7 +305,9 @@ func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, ag
 // привязка событий — атомарно. Успех нельзя разделить: либо события в turn,
 // либо остаются pending.
 func (m *ChatBufferManager) createTurn(ctx context.Context, chatID int64, ids []int64) error {
+	m.turnMu.Lock()
 	turnID, kind, err := m.startTurn(ctx, chatID, ids)
+	m.turnMu.Unlock()
 	if err != nil {
 		return err
 	}

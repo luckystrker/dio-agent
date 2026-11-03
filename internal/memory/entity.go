@@ -168,7 +168,12 @@ func (EntityRepo) findPersonByKey(ctx context.Context, db DBTX, key, scopeID str
 	var e Entity
 	err := db.QueryRow(ctx,
 		`SELECT id, kind, canonical_name, scope_id FROM entities e
-		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.name_key = `+entityKeySQL("$3")+`
+		 WHERE e.kind = $1 AND e.scope_id = $2
+		   AND (e.name_key = `+entityKeySQL("$3")+`
+		    OR e.id IN (
+		      SELECT a.entity_id FROM entity_aliases a
+		      WHERE a.scope_id = $2 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$3")+`))
+		 ORDER BY (e.name_key = `+entityKeySQL("$3")+`) DESC, e.id
 		 LIMIT 1`,
 		EntityPerson, scopeID, norm.NFC.String(strings.TrimSpace(key))).
 		Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)

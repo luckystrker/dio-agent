@@ -115,6 +115,8 @@ func TestDecideIngestStatus(t *testing.T) {
 			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindMention, BotKnown: true, MentionBot: true}, StatusPending},
 		{"reply человеку с mention бота — обращение (minor ревью)",
 			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindReply, BotKnown: true, ReplyToBot: false, MentionBot: true}, StatusPending},
+		{"фото с mention бота в подписи — обращение (ревью-2)",
+			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindPhoto, BotKnown: true, MentionBot: true}, StatusPending},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
