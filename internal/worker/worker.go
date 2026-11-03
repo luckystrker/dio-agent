@@ -305,6 +305,7 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 		JOIN LATERAL (
 		  SELECT min(chat_type) AS chat_type, bool_or(direct) AS direct
 		  FROM social_events WHERE turn_id = t.id
+		  HAVING count(*) > 0
 		) e ON true
 		WHERE t.status = 'created'
 		  AND (t.not_before IS NULL OR t.not_before <= now())
