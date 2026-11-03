@@ -1,6 +1,6 @@
 // События хода в событийном журнале (§12.1, §18 event_streams). Минимальный
 // набор: turn_started, tool_call, tool_result, model_output, deltas_applied,
-// delivery_queued, turn_skipped. Единица записи — событие; stream —
+// delivery_queued, turn_skipped, turn_failed. Единица записи — событие; stream —
 // идентификатор хода ("turn:<id>"), UNIQUE(stream_id, seq) даёт однократность
 // записи, из которой выводится однократность применения хода (инвариант 4).
 //
@@ -29,7 +29,8 @@ const (
 	EventTypeTurnSkipped    = "turn_skipped"
 	// EventTypeTurnPlan — план инструментов памяти разговорного хода (этап
 	// 31.2): метрики считают причины включения по журналу, а не по логам.
-	EventTypeTurnPlan = "turn_plan"
+	EventTypeTurnPlan   = "turn_plan"
+	EventTypeTurnFailed = "turn_failed"
 )
 
 // TurnStarted — начало хода: пачка или цель фоновой задачи, модель/бюджет.
@@ -171,6 +172,23 @@ func (TurnPlan) EventType() string    { return EventTypeTurnPlan }
 func (TurnPlan) Transient() bool      { return false }
 func (TurnPlan) Conversational() bool { return false }
 
+// TurnFailed — терминальный провал хода с причиной (29.1, §11.3): попытки
+// исчерпаны, а «отравленный» результат/сбой применения не даёт ходу
+// завершиться. Отличается от TermSkipped (сознательный пропуск): провал —
+// ошибка исполнения, а не решение не обрабатывать событие. После этого
+// события ход не генерируется и не применяется; воркер строку failed не
+// берёт, recovery её не воскрешает.
+type TurnFailed struct {
+	events.Base
+	TurnID int64  `json:"turn_id"`
+	Phase  string `json:"phase"` // worker | apply | recovery
+	Reason string `json:"reason"`
+}
+
+func (TurnFailed) EventType() string    { return EventTypeTurnFailed }
+func (TurnFailed) Transient() bool      { return false }
+func (TurnFailed) Conversational() bool { return false }
+
 // init регистрирует события в реестре ago — декодирование при чтении журнала.
 func init() {
 	events.RegisterEvent(TurnStarted{})
@@ -181,4 +199,5 @@ func init() {
 	events.RegisterEvent(DeliveryQueued{})
 	events.RegisterEvent(TurnSkipped{})
 	events.RegisterEvent(TurnPlan{})
+	events.RegisterEvent(TurnFailed{})
 }

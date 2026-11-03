@@ -105,3 +105,29 @@ func TestAskMsgs(t *testing.T) {
 		t.Fatalf("без фото — одна текстовая часть, стало %d", len(msgs))
 	}
 }
+
+// TestAskMsgsSkipsImageInputError — 29.4: ветка ошибки events.ImageInput —
+// фото с байтами, но без MIME не конструируется (ago требует media type) и
+// тихо выбрасывается: ход продолжается текстом, а не падает и не шлёт
+// битую часть. Валидное фото рядом остаётся картинкой.
+func TestAskMsgsSkipsImageInputError(t *testing.T) {
+	msgs := askMsgs("подпись", []Photo{
+		{FileID: "broken", Data: []byte("abc")}, // Mime пуст — ImageInput вернёт ошибку
+		{FileID: "ok", Data: []byte("def"), Mime: "image/png"},
+	})
+	if len(msgs) != 2 {
+		t.Fatalf("частей %d, хочу 2 (текст + одно валидное фото, битое выброшено)", len(msgs))
+	}
+	input, ok := msgs[1].(events.Input)
+	if !ok {
+		t.Fatalf("вторая часть не events.Input: %T", msgs[1])
+	}
+	bin, ok := input.(*events.BinaryInput)
+	if !ok || bin.MediaType != "image/png" || string(bin.Data) != "def" {
+		t.Fatalf("провод получил не то фото: %+v", input)
+	}
+	// Только битое фото — текст остаётся один.
+	if only := askMsgs("подпись", []Photo{{Data: []byte("abc")}}); len(only) != 1 {
+		t.Fatalf("битое фото не выброшено: частей %d", len(only))
+	}
+}

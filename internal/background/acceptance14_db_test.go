@@ -383,6 +383,19 @@ func TestExploreAttemptCapNoTurn(t *testing.T) {
 	if turns != 0 {
 		t.Fatalf("в turns для чата %d строк, хочу 0 — exploration не создаёт ход и не помечает пропуск хода", turns)
 	}
+	// Усиленный ассерт (29.4): пропуск несуществующего хода не записан ни в
+	// поток «turn:0», ни с turn_id=0 — безусловный skipTurn(0) был бы только
+	// шумом журнала, а не ошибкой статуса, и без этой проверки проходил бы.
+	var phantom int
+	if err := f.pool.QueryRow(ctx, `
+		SELECT count(*) FROM event_streams
+		WHERE type = 'turn_skipped'
+		  AND (stream_id = 'turn:0' OR payload->>'turn_id' = '0')`).Scan(&phantom); err != nil {
+		t.Fatalf("журнал пропусков не читается: %v", err)
+	}
+	if phantom != 0 {
+		t.Fatalf("turn_skipped несуществующего хода записан %d раз — skipTurn вызван без хода", phantom)
+	}
 
 	// После потолка — тишина: ни модели, ни повторов.
 	time.Sleep(5 * time.Millisecond)

@@ -197,6 +197,10 @@ type Outcome struct {
 	// Skipped — терминальный пропуск (turn_skipped, инвариант 5).
 	Skipped    bool
 	SkipReason string
+	// Failed — терминальный провал (turn_failed, 29.1): попытки исчерпаны,
+	// ход завершён ошибкой с причиной; повторно не генерируется.
+	Failed     bool
+	FailReason string
 	// AlreadyApplied — ход уже применён ранее; повторный прогон ничего не менял.
 	AlreadyApplied bool
 	// Apply — итог транзакции применения.
@@ -217,6 +221,15 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if state.Applied {
 		out.AlreadyApplied = true
 		r.logf("ход %d уже применён (deltas_applied в журнале) — повтор невозможен", in.TurnID)
+		return out, nil
+	}
+	if state.Failed {
+		// Терминальный провал (29.1): попытки исчерпаны, результат «отравлен»
+		// или применение не проходит. Новая генерация не запускается, даже
+		// если в потоке остался model_output.
+		out.Failed = true
+		out.FailReason = state.FailReason
+		r.logf("ход %d терминально провален ранее (%s)", in.TurnID, state.FailReason)
 		return out, nil
 	}
 	if state.Skipped {

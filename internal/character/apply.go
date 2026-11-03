@@ -121,10 +121,11 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// --- CAS строки хода: повторное применение отклоняется (§12.1, инвариант 4) ---
+	// --- CAS строки хода: повторное применение отклоняется (§12.1, инвариант 4);
+	// терминальный провал (29.1) и пропуск тоже не «воскрешаются» применением.
 	tag, err := tx.Exec(ctx,
 		`UPDATE turns SET status = 'applied', applied_at = now()
-		 WHERE id = $1 AND status <> 'applied'`, opts.TurnID)
+		 WHERE id = $1 AND status NOT IN ('applied', 'failed', 'skipped')`, opts.TurnID)
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("применение: CAS хода не удался: %w", err)
 	}
