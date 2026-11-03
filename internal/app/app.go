@@ -194,6 +194,11 @@ func (a *App) Start(ctx context.Context) error {
 		return a.stopFailed(err)
 	}
 
+	// --- общий семафор когниции (§5.2) ---
+	// Прямой ход worker'а и модельные задачи фона делят один семафор: два
+	// ApplyTurn и двойной расход бюджета параллельно невозможны (M1).
+	cognition := runtime.NewCognitionLock()
+
 	// --- когнитивный worker §5.2 ---
 	assembler := &character.Assembler{
 		Mood:            character.NewMoodRepo(),
@@ -241,10 +246,11 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	a.cognit = worker.New(worker.Deps{
-		Pool:    pool,
-		Runner:  runner,
-		Journal: a.journal,
-		Logger:  a.logger,
+		Pool:      pool,
+		Runner:    runner,
+		Journal:   a.journal,
+		Logger:    a.logger,
+		Cognition: cognition,
 	}, a.opts.Cognitive)
 
 	bufferDeps := telegram.BufferDeps{
@@ -297,6 +303,7 @@ func (a *App) Start(ctx context.Context) error {
 		Model:           model,
 		DailyCallsLimit: backgroundCallsLimit(a.opts.Config),
 		ToolCallsLimit:  toolCallsLimit(a.opts.Config),
+		Cognition:       cognition,
 		Logger:          a.logger,
 		Now:             a.opts.Now,
 	}, a.opts.Background)

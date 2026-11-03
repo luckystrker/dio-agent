@@ -104,6 +104,11 @@ type turnModelRun struct {
 // repair-retry (§11.3), резерв бюджета до вызова (§16, пул background), сессия
 // провайдера по чату (x-opencode-session). sessionID пуст — заголовка нет.
 func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
+	release, ok := s.cognition.Acquire(ctx)
+	if !ok {
+		return turnModelRun{}, ctx.Err()
+	}
+	defer release()
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -198,6 +203,11 @@ func parseTurnReply(reply *agent.AgentReply) (character.TurnResult, error) {
 // эпизода (x-opencode-session, как у прямого хода; находка 2026-10-31: вызовы
 // без заголовка падали HTTP 400 MissingSessionID). sessionID пуст — заголовка нет.
 func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system, userText, sessionID string) (consolidationProposal, modelStats, error) {
+	release, ok := s.cognition.Acquire(ctx)
+	if !ok {
+		return consolidationProposal{}, modelStats{}, ctx.Err()
+	}
+	defer release()
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}

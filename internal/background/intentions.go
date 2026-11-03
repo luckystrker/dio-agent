@@ -312,17 +312,26 @@ func (r *IntentionRepo) ChatType(ctx context.Context, chatID int64) (string, err
 // появились события или отправленные доставки новее создания намерения —
 // контекст ушёл вперёд, инициатива по старой теме неуместна.
 func (r *IntentionRepo) ChatMoved(ctx context.Context, chatID int64, since time.Time) (bool, error) {
+	moved, err := chatMovedQuery(ctx, r.pool, chatID, since)
+	if err != nil {
+		return false, fmt.Errorf("намерения: свежий контекст не проверяется: %w", err)
+	}
+	return moved, nil
+}
+
+// chatMovedQuery — тот же предикат для пула и транзакции применения: инициатива
+// обязана перепроверить «чат ушёл вперёд» в той же транзакции, где ставится
+// доставка (M1), иначе свежий ответ пользователя и отправка инициативы
+// расходятся во времени.
+func chatMovedQuery(ctx context.Context, q queryer, chatID int64, since time.Time) (bool, error) {
 	var moved bool
-	err := r.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM social_events WHERE chat_id = $1 AND occurred_at > $2)
 		    OR EXISTS (
 		      SELECT 1 FROM delivery_outbox d
 		      WHERE d.chat_id = $1 AND d.status = 'sent' AND d.created_at > $2)`,
 		chatID, since).Scan(&moved)
-	if err != nil {
-		return false, fmt.Errorf("намерения: свежий контекст не проверяется: %w", err)
-	}
-	return moved, nil
+	return moved, err
 }
 
 // DuplicatePending — «не появилось ли идентичное намерение» (§14.1): другое

@@ -84,9 +84,11 @@ type Deps struct {
 	Model           *character.ChatConfig      // nil — модель не настроена: фон не мыслит
 	DailyCallsLimit int64                      // дневной лимит пула background (§16); 0 — не ограничивать
 	ToolCallsLimit  int                        // лимит обращений к инструментам за ход (§11.2)
-	Logger          *log.Logger
-	Now             func() time.Time // часы; nil — time.Now (тесты подменяют)
-	Rand            *rand.Rand       // источник jitter; nil — локальный
+	// Cognition — общий с worker'ом семафор модельных заданий (§5.2); nil — без него.
+	Cognition *runtime.CognitionLock
+	Logger    *log.Logger
+	Now       func() time.Time // часы; nil — time.Now (тесты подменяют)
+	Rand      *rand.Rand       // источник jitter; nil — локальный
 }
 
 // Scheduler — фон: намерения, консолидация, cleanup, наблюдаемость (§14, §20).
@@ -107,6 +109,7 @@ type Scheduler struct {
 	model        *character.ChatConfig
 	dailyLimit   int64
 	toolLimit    int
+	cognition    *runtime.CognitionLock
 	logger       *log.Logger
 	now          func() time.Time
 	rnd          *rand.Rand
@@ -166,6 +169,7 @@ func New(deps Deps, opts Options) (*Scheduler, error) {
 		model:        deps.Model,
 		dailyLimit:   deps.DailyCallsLimit,
 		toolLimit:    deps.ToolCallsLimit,
+		cognition:    deps.Cognition,
 		logger:       logger,
 		now:          now,
 		rnd:          rnd,

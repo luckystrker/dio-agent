@@ -95,6 +95,8 @@ type Deps struct {
 	Runner  TurnRunner
 	Journal *character.TurnJournal // терминальный пропуск после исчерпания попыток (§12.1)
 	Logger  *log.Logger
+	// Cognition — общий с фоном семафор модельных заданий (§5.2); nil — без него.
+	Cognition *runtime.CognitionLock
 }
 
 // claimedTurn — захваченный ход.
@@ -113,6 +115,8 @@ type Worker struct {
 	journal *character.TurnJournal
 	logger  *log.Logger
 	opts    Options
+	// cognition — общий с фоном семафор модельных заданий (§5.2).
+	cognition *runtime.CognitionLock
 
 	// notBefore — локальные паузы повтора после сбоя (turn_id → срок).
 	notBeforeMu sync.Mutex
@@ -136,6 +140,7 @@ func New(deps Deps, opts Options) *Worker {
 		journal:   deps.Journal,
 		logger:    logger,
 		opts:      opts.withDefaults(),
+		cognition: deps.Cognition,
 		notBefore: map[int64]time.Time{},
 		wake:      make(chan struct{}, 1),
 		drain:     make(chan struct{}),
@@ -298,6 +303,12 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 		return
 	}
 	scope := memory.ChatScope(fmt.Sprintf("%d", turn.ChatID))
+	release, ok := w.cognition.Acquire(ctx)
+	if !ok {
+		// Отмена, пока ждали семафор: ход не выполнялся.
+		return
+	}
+	defer release()
 	out, err := w.runner.Run(ctx, character.Input{
 		TurnID:  turn.ID,
 		ChatID:  turn.ChatID,

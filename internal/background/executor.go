@@ -393,6 +393,14 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 		if isInitiativeKind(it.Kind) {
 			applied, detail, aerr := s.applyInitiative(ctx, it, cp.TurnID, result)
 			if aerr != nil {
+				if errors.Is(aerr, errInitiativeStale) {
+					reason := "чат ушёл вперёд до применения (§14.3)"
+					_, _ = s.intentions.Cancel(ctx, it.ID, reason)
+					s.skipTurn(ctx, cp.TurnID, "apply", reason)
+					out.Outcome, out.Detail = "cancelled", reason
+					out.Latency = s.now().Sub(started)
+					return out, nil
+				}
 				return out, aerr // транзакция откачена; WAL видит apply без done — повтор
 			}
 			if !applied {
@@ -642,6 +650,12 @@ func (s *Scheduler) skipTurn(ctx context.Context, turnID int64, phase, reason st
 	}
 }
 
+// errInitiativeStale — чат ушёл вперёд уже после генерации инициативы: гейты
+// перед генерацией это ловили, но между модельным вызовом и применением мог
+// прийти свежий ответ пользователя. Применение откатывается, намерение
+// отменяется, ход помечается skipped (M1).
+var errInitiativeStale = errors.New("инициатива устарела: чат ушёл вперёд до применения")
+
 // applyInitiative — применение инициативы одной транзакцией (§12.1): CAS
 // статуса хода, outbox, память, дельты — и CAS намерения тем же «всё или
 // ничего» (§14.3: победитель исполнения один, двойная отправка невозможна).
@@ -655,6 +669,13 @@ func (s *Scheduler) applyInitiative(ctx context.Context, it Intention, turnID in
 		PersonaBaseline: s.persona.MoodBaseline,
 		Journal:         s.journal,
 		Extra: func(ctx context.Context, tx pgx.Tx) error {
+			moved, cerr := chatMovedQuery(ctx, tx, it.TargetChatID, s.now().Add(-InitiativeQuietWindow))
+			if cerr != nil {
+				return fmt.Errorf("фон: повторная проверка «чат ушёл вперёд»: %w", cerr)
+			}
+			if moved {
+				return errInitiativeStale
+			}
 			tag, err := tx.Exec(ctx,
 				`UPDATE intentions SET status = 'completed', updated_at = now()
 				 WHERE id = $1 AND status = 'running'`, it.ID)
