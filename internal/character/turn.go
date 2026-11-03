@@ -263,14 +263,15 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	// перед пачкой (решение 2026-11-02): динамика не в system.
 	userText = composeUserText(bctx.StatePanel, userText)
 
-	// Фото пачки (vision §6.1): скачивание до вызова, ошибки — ход по тексту.
-	photos := CollectPhotos(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn, func(format string, args ...any) {
+	// Картинки пачки (vision §6.1, этап 25): фото, статичные стикеры, превью
+	// анимированных стикеров и кадр гифки — до вызова модели; ошибки — текст.
+	images := CollectImages(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn, func(format string, args ...any) {
 		r.logf("ход %d: "+format, append([]any{in.TurnID}, args...)...)
 	})
-	if len(photos) > 0 {
-		r.logf("ход %d: фото в запросе модели: %d", in.TurnID, len(photos))
+	if len(images) > 0 {
+		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки)", in.TurnID, len(images))
 	}
-	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation, photos)
+	result, repairs, llmCalls, err := r.generate(ctx, in, bctx, userText, operation, images)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
 	if errors.As(err, &invalidErr) {
@@ -346,7 +347,7 @@ func repairHint(perr error) string {
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток и число модельных вызовов.
-func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, photos []Photo) (TurnResult, int, int, error) {
+func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, images []Photo) (TurnResult, int, int, error) {
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
@@ -359,29 +360,6 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// отката (MODEL_MEMORY_PREFETCH=false). В обычном режиме память уже
 		// в карточке панели (решение 2026-11-02).
 		cfg.ForcedTool = plan.ForcedTool
-	}
-
-	opts := []agent.Option{
-		agent.WithConfig(cfg),
-		// Системный промпт из шаблона §7.1; constraints — отдельная структурная
-		// секция контекста (§17), не смешанная с данными пачки.
-		agent.WithPromptFragments(bctx.Constraints),
-		agent.WithResponseSchema(response.RawSchema(TurnResultJSONSchema(),
-			response.WithRawName("TurnResult"),
-			response.WithRawDescription("Цельный результат хода: решение, сообщения, кандидаты памяти, дельты состояния."))),
-	}
-	if plan.Enabled {
-		opts = append(opts, agent.WithTools(r.Memory.Tools()...))
-	}
-	// История чата (§11.1 п.5): реплики прошлых ходов — настоящими user/
-	// assistant сообщениями до пачки, append-only (кэш префикса провайдера
-	// не страдает). Метки времени абсолютные, автор — из БД.
-	if len(bctx.History) > 0 {
-		seeded, err := historyStream(bctx.History, r.Timezone)
-		if err != nil {
-			return TurnResult{}, 0, 0, fmt.Errorf("ход %d: история чата не посеяна: %w", in.TurnID, err)
-		}
-		opts = append(opts, agent.WithStreamBase(seeded))
 	}
 
 	// Middleware: бюджет §16 — внешний слой (резерв до всего остального);
@@ -404,19 +382,62 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	if r.Typing != nil {
 		mws = append(mws, func() agomiddleware.Middleware { return NewTypingMiddleware(r.Typing, in.ChatID) })
 	}
-	opts = append(opts, agent.WithMiddleware(mws...))
-	// DI аудитории хода: инструменты памяти фильтруют приватность до выдачи (§9.2).
-	// Состояние поиска памяти — своё на ход: new_items/hint считают только
-	// записи, уже выданные в этом ходе (bug 2026-11-02).
-	opts = append(opts, agent.WithDependencies(map[string]any{
-		memory.ScopeDependency:       in.ScopeID,
-		memory.SearchStateDependency: memory.NewSearchState(),
-	}))
 
-	a := agent.New("dio", bctx.System, opts...)
-	// Части Ask: текст пачки + фото BinaryInput (находка приёмки Р: фото
-	// скачивалось, но в вызов модели уходил только текст).
-	reply, err := a.Ask(ctx, askMsgs(userText, photos)...)
+	// newAgent — сборка запуска агента: откат «провайдер не принял картинку»
+	// строит НОВЫЙ запуск, иначе неудачный запрос с картинкой остался бы в
+	// потоке и повторился бы в истории.
+	newAgent := func() (*agent.Agent, error) {
+		opts := []agent.Option{
+			agent.WithConfig(cfg),
+			// Системный промпт из шаблона §7.1; constraints — отдельная структурная
+			// секция контекста (§17), не смешанная с данными пачки.
+			agent.WithPromptFragments(bctx.Constraints),
+			agent.WithResponseSchema(response.RawSchema(TurnResultJSONSchema(),
+				response.WithRawName("TurnResult"),
+				response.WithRawDescription("Цельный результат хода: решение, сообщения, кандидаты памяти, дельты состояния."))),
+		}
+		if plan.Enabled {
+			opts = append(opts, agent.WithTools(r.Memory.Tools()...))
+		}
+		// История чата (§11.1 п.5): реплики прошлых ходов — настоящими user/
+		// assistant сообщениями до пачки, append-only (кэш префикса провайдера
+		// не страдает). Метки времени абсолютные, автор — из БД.
+		if len(bctx.History) > 0 {
+			seeded, err := historyStream(bctx.History, r.Timezone)
+			if err != nil {
+				return nil, fmt.Errorf("ход %d: история чата не посеяна: %w", in.TurnID, err)
+			}
+			opts = append(opts, agent.WithStreamBase(seeded))
+		}
+		opts = append(opts, agent.WithMiddleware(mws...))
+		// DI аудитории хода: инструменты памяти фильтруют приватность до выдачи (§9.2).
+		// Состояние поиска памяти — своё на ход: new_items/hint считают только
+		// записи, уже выданные в этом ходе (bug 2026-11-02).
+		opts = append(opts, agent.WithDependencies(map[string]any{
+			memory.ScopeDependency:       in.ScopeID,
+			memory.SearchStateDependency: memory.NewSearchState(),
+		}))
+		return agent.New("dio", bctx.System, opts...), nil
+	}
+
+	a, err := newAgent()
+	if err != nil {
+		return TurnResult{}, 0, 0, err
+	}
+	// Части Ask: текст пачки + картинки BinaryInput (находка приёмки Р: фото
+	// скачивалось, но в вызов модели уходил только текст; этап 25 добавил
+	// стикеры и превью гифок).
+	reply, err := a.Ask(ctx, askMsgs(userText, images)...)
+	if err != nil && len(images) > 0 && looksLikeMediaRejection(err) {
+		// Honest fallback (25.1): провайдер не принял картинку (например,
+		// image/webp) — повтор без картинок, стикеры/гифки остаются текстом.
+		// Молча терять ответ нельзя, поэтому причина — в лог.
+		r.logf("ход %d: провайдер не принял картинку (%v) — повтор без картинок, стикеры/гифки остаются текстом", in.TurnID, err)
+		if a, err = newAgent(); err != nil {
+			return TurnResult{}, 0, budgetMW.callCount(), err
+		}
+		reply, err = a.Ask(ctx, userText)
+	}
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), err
 	}

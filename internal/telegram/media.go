@@ -124,11 +124,24 @@ func (c *Client) FetchPhotoByFileID(ctx context.Context, fileID string) (*PhotoM
 	if len(data) == 0 || len(data) > MaxPhotoBytes {
 		return nil, nil
 	}
-	mime := "image/jpeg"
-	if len(filePath) >= 4 && filePath[len(filePath)-4:] == ".png" {
-		mime = "image/png"
+	return &PhotoMedia{Mime: mimeForFilePath(filePath), Base64: base64.StdEncoding.EncodeToString(data)}, nil
+}
+
+// mimeForFilePath — тип картинки из расширения файла Bot API: статичные
+// стикеры приходят .webp, фото — .jpg/.png, превью гифок — .webp/.jpg.
+// Жёсткий image/jpeg врал модели о webp (этап 25.1).
+func mimeForFilePath(filePath string) string {
+	lower := strings.ToLower(filePath)
+	switch {
+	case strings.HasSuffix(lower, ".webp"):
+		return "image/webp"
+	case strings.HasSuffix(lower, ".png"):
+		return "image/png"
+	case strings.HasSuffix(lower, ".gif"):
+		return "image/gif"
+	default:
+		return "image/jpeg"
 	}
-	return &PhotoMedia{Mime: mime, Base64: base64.StdEncoding.EncodeToString(data)}, nil
 }
 
 // downloadFile качает файл по пути из getFile (файловый хост Bot API).

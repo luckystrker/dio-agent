@@ -86,19 +86,83 @@ type telegramMessage struct {
 	Caption         *string             `json:"caption"`
 	Photo           []telegramPhotoSize `json:"photo"`
 	Sticker         *telegramSticker    `json:"sticker"`
+	Animation       *telegramAnimation  `json:"animation"`
+	Voice           *telegramVoice      `json:"voice"`
+	VideoNote       *telegramVideoNote  `json:"video_note"`
 	Entities        []telegramEntity    `json:"entities"`
 	CaptionEntities []telegramEntity    `json:"caption_entities"`
 	ReplyToMessage  *telegramMessage    `json:"reply_to_message"`
 	Chat            *telegramChat       `json:"chat"`
 }
 
-// telegramSticker — минимальный хвост стикера: эмодзи как текст события
-// (находка приёмки Р: стикер приходил «сообщением без текста»). Сама картинка
-// стикера модели не показывается (см. бэклог чек-листа).
+// telegramSticker — стикер (этап 25): эмодзи становится текстом события,
+// file_id — картинкой в запрос модели (статичный) или источником для
+// коллекции/отправки; анимированный/видео отдаются превью.
 type telegramSticker struct {
-	Emoji      string `json:"emoji"`
-	IsVideo    bool   `json:"is_video"`
-	IsAnimated bool   `json:"is_animated"`
+	FileID       string         `json:"file_id"`
+	FileUniqueID string         `json:"file_unique_id"`
+	Emoji        string         `json:"emoji"`
+	SetName      string         `json:"set_name"`
+	IsVideo      bool           `json:"is_video"`
+	IsAnimated   bool           `json:"is_animated"`
+	Thumbnail    *telegramThumb `json:"thumbnail"`
+	Thumb        *telegramThumb `json:"thumb"` // устаревшее имя поля (Bot API < 6.6)
+}
+
+// previewFileID — картинка стикера для модели: своё превью (thumbnail, затем
+// устаревшее thumb); пусто — превью нет.
+func (s *telegramSticker) previewFileID() string {
+	if s == nil {
+		return ""
+	}
+	if s.Thumbnail != nil && s.Thumbnail.FileID != "" {
+		return s.Thumbnail.FileID
+	}
+	if s.Thumb != nil {
+		return s.Thumb.FileID
+	}
+	return ""
+}
+
+// telegramAnimation — гифка: собственный файл (.mp4) картинкой не отдаётся,
+// модели идёт кадр-превью (этап 25.2).
+type telegramAnimation struct {
+	FileID       string         `json:"file_id"`
+	FileUniqueID string         `json:"file_unique_id"`
+	Duration     int            `json:"duration"`
+	Thumbnail    *telegramThumb `json:"thumbnail"`
+	Thumb        *telegramThumb `json:"thumb"`
+}
+
+// previewFileID — file_id кадра-превью гифки; пусто — превью нет.
+func (a *telegramAnimation) previewFileID() string {
+	if a == nil {
+		return ""
+	}
+	if a.Thumbnail != nil && a.Thumbnail.FileID != "" {
+		return a.Thumbnail.FileID
+	}
+	if a.Thumb != nil {
+		return a.Thumb.FileID
+	}
+	return ""
+}
+
+// telegramThumb — превью вложения (thumbnail/thumb).
+type telegramThumb struct {
+	FileID string `json:"file_id"`
+}
+
+// telegramVoice / telegramVideoNote — голосовое и «кружок»: до модели доходит
+// только длительность (25.6), транскрипции нет (бэклог).
+type telegramVoice struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+}
+
+type telegramVideoNote struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
 }
 
 // telegramPhotoSize — один размер из массива photo (Telegram отдаёт по возрастанию).
@@ -229,12 +293,12 @@ func extractMessage(shape *telegramUpdateShape) (*telegramMessage, bool) {
 	}
 }
 
-// messageText — текст сообщения; для фото это caption (если есть).
+// messageText — текст сообщения; для фото и гифки это caption (если есть).
 func messageText(m *telegramMessage) *string {
 	if m.Text != nil {
 		return m.Text
 	}
-	if len(m.Photo) > 0 && m.Caption != nil {
+	if (len(m.Photo) > 0 || m.Animation != nil || m.Sticker != nil) && m.Caption != nil {
 		return m.Caption
 	}
 	return nil
@@ -245,7 +309,8 @@ func messageText(m *telegramMessage) *string {
 const replyQuoteLimit = 200
 
 // eventText — текст события для хода и истории: собственный текст/подпись;
-// у стикера — эмодзи; у реплая — цитата сообщения, на которое ответили
+// у стикера — эмодзи, у гифки — «[гифка]» с подписью, у голосового/кружка —
+// вид и длительность. У реплая — цитата сообщения, на которое ответили
 // (находка приёмки Р: без неё модель слепа, когда исходное вне окна недавнего
 // разговора). nil — текста нет.
 func eventText(m *telegramMessage) *string {
@@ -259,6 +324,17 @@ func eventText(m *telegramMessage) *string {
 			// текста» в пачке хода (замечание приёмки 13).
 			base = "[стикер]"
 		}
+	case m.Animation != nil:
+		// Гифка: модели идёт кадр-превью (media_stickers.go), а в тексте
+		// события — вид вложения и подпись, чтобы смысл не терялся.
+		base = "[гифка]"
+		if caption := strings.TrimSpace(deref(m.Caption)); caption != "" {
+			base += " " + caption
+		}
+	case m.Voice != nil:
+		base = "[голосовое, " + formatMediaDuration(m.Voice.Duration) + "]"
+	case m.VideoNote != nil:
+		base = "[кружок, " + formatMediaDuration(m.VideoNote.Duration) + "]"
 	default:
 		if t := messageText(m); t != nil {
 			base = *t
@@ -271,6 +347,27 @@ func eventText(m *telegramMessage) *string {
 		return nil
 	}
 	return &base
+}
+
+// formatMediaDuration — длительность вложения «0:42», «2:05», «1:02:03»:
+// короткий и однозначный вид для текста события и истории.
+func formatMediaDuration(seconds int) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	h, m, s := seconds/3600, (seconds%3600)/60, seconds%60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// deref — значение строки-указателя; nil — пусто.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // replyPrefix — метка-цитата «в ответ на …»: имя автора и потолок текста.
