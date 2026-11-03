@@ -21,6 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +44,14 @@ const (
 	// DefaultMaxAttempts — предел попыток одного хода (§12.2 «повторить
 	// ограниченно»; паритет WORK_MAX_ATTEMPTS TS).
 	DefaultMaxAttempts = 3
+	// DefaultTransientMaxAttempts — предел попыток для транзитного отказа
+	// провайдера (5xx/429/сеть): 5-минутная недоступность API не должна
+	// превращать сообщение в терминальный skipped за 6 секунд (§12.2, M10).
+	DefaultTransientMaxAttempts = 8
+	// transientMinPause — минимальная пауза между попытками транзитного
+	// отказа провайдера: короткая экспонента 2–4 с выжигает лимит попыток
+	// раньше, чем провайдер успевает восстановиться.
+	transientMinPause = 30 * time.Second
 )
 
 // Options — параметры цикла (нули — значения по умолчанию; тесты сжимают).
@@ -48,6 +60,9 @@ type Options struct {
 	RetryBase    time.Duration
 	RetryMax     time.Duration
 	MaxAttempts  int
+	// TransientMaxAttempts — предел попыток для транзитных отказов провайдера;
+	// 0 — DefaultTransientMaxAttempts.
+	TransientMaxAttempts int
 }
 
 func (o Options) withDefaults() Options {
@@ -62,6 +77,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.MaxAttempts <= 0 {
 		o.MaxAttempts = DefaultMaxAttempts
+	}
+	if o.TransientMaxAttempts <= 0 {
+		o.TransientMaxAttempts = DefaultTransientMaxAttempts
 	}
 	return o
 }
@@ -297,7 +315,14 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 		// обнуляется, ход откладывается до завтра, а не теряется (решение 16.7,
 		// паритет с фоном). Ошибка хода несёт ErrBudgetExhausted через %w.
 		if errors.Is(err, runtime.ErrBudgetExhausted) {
-			w.deferBudgetExhausted(ctx, turn)
+			w.deferTurn(ctx, turn, runtime.NextDay(time.Now()), "бюджет")
+			return
+		}
+		// Модель не настроена: конфигурация приходит рестартом процесса.
+		// Терминальный skipped за 3 попытки терял бы сообщение пользователя
+		// (M10); откладываем, не расходуя попытку.
+		if errors.Is(err, character.ErrModelNotConfigured) {
+			w.deferTurn(ctx, turn, time.Now().Add(w.opts.RetryMax), "модель не настроена")
 			return
 		}
 		w.fail(ctx, turn, err)
@@ -346,7 +371,7 @@ func (w *Worker) loadBatch(ctx context.Context, turnID int64) ([]character.Batch
 // попытки (§12.1 retry_wait); исчерпание лимита — терминальный пропуск
 // (инвариант 5: событие не теряется, пропуск фиксируется явно).
 func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
-	if turn.Attempt >= w.opts.MaxAttempts {
+	if turn.Attempt >= w.attemptLimitFor(runErr) {
 		// Причина — для журнала и наблюдаемости: текст ошибки провайдера может
 		// быть простынёй (429-блобы OpenRouter), в логах достаточно хвоста.
 		reason := fmt.Sprintf("превышен лимит попыток (%d): %v", turn.Attempt, truncateRunes(fmt.Sprint(runErr), 300))
@@ -363,7 +388,7 @@ func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 		return
 	}
 
-	pause := w.backoff(turn.Attempt)
+	pause := w.pauseFor(turn.Attempt, runErr)
 	w.notBeforeMu.Lock()
 	w.notBefore[turn.ID] = time.Now().Add(pause)
 	w.notBeforeMu.Unlock()
@@ -371,22 +396,73 @@ func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 		turn.ID, pause, turn.Attempt, runErr)
 }
 
-// deferBudgetExhausted — исчерпание дневного бюджета на прямом ходе (§16):
-// попытка не сжигается (claim её добавил — возвращаем), ход стоит в очереди
-// до следующего дня 00:05 UTC — общей с фоном границы суток (runtime.NextDay,
-// решение 16.7). notBefore живёт в памяти процесса: рестарт делает ход
-// доступным сразу, но попытки бюджетной ошибкой не тратятся — вторая встреча
-// снова отложит, бесконечного терминального пропуска нет.
-func (w *Worker) deferBudgetExhausted(ctx context.Context, turn *claimedTurn) {
+// attemptLimitFor — предел попыток: для транзитного отказа провайдера он выше,
+// чтобы 5-минутная недоступность не превращалась в терминальный пропуск (M10).
+func (w *Worker) attemptLimitFor(runErr error) int {
+	if transientModelError(runErr) {
+		return w.opts.TransientMaxAttempts
+	}
+	return w.opts.MaxAttempts
+}
+
+// pauseFor — пауза повтора: у транзитного отказа провайдера не короче
+// transientMinPause (M10).
+func (w *Worker) pauseFor(attempt int, runErr error) time.Duration {
+	pause := w.backoff(attempt)
+	if transientModelError(runErr) && pause < transientMinPause {
+		pause = transientMinPause
+	}
+	return pause
+}
+
+// statusCodeRe достаёт HTTP-код из текста ошибки OpenAI-совместимого слоя
+// ago («config: chat completions returned 502: …»): типизированных ошибок
+// провайдер не отдаёт.
+var statusCodeRe = regexp.MustCompile(`returned (\d{3})`)
+
+// transientModelError — отказ провайдера, который имеет смысл повторить:
+// 5xx, 429 и сетевые ошибки. Постоянные 4xx и отмена хода — нет.
+func transientModelError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	if m := statusCodeRe.FindStringSubmatch(msg); len(m) == 2 {
+		code, perr := strconv.Atoi(m[1])
+		if perr == nil {
+			return code == 429 || code >= 500
+		}
+	}
+	// Сетевые формулировки транспорта без типизированной ошибки.
+	for _, marker := range []string{
+		"connection reset", "connection refused", "no such host",
+		"i/o timeout", "TLS handshake timeout", "unexpected EOF",
+		"network is unreachable", "broken pipe",
+	} {
+		if strings.Contains(strings.ToLower(msg), strings.ToLower(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+// deferTurn — отложить ход без расхода попытки: бюджет откладывается до
+// следующей границы суток (решение 16.7), ненастроенная модель — на RetryMax
+// (конфигурация приходит рестартом, попытка не должна сгорать).
+// notBefore живёт в памяти процесса: рестарт делает ход доступным сразу.
+func (w *Worker) deferTurn(ctx context.Context, turn *claimedTurn, notBefore time.Time, reason string) {
 	if _, err := w.pool.Exec(ctx,
 		`UPDATE turns SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'created'`, turn.ID); err != nil {
-		w.logger.Printf("ход %d: попытка не возвращена после откладывания по бюджету: %v", turn.ID, err)
+		w.logger.Printf("ход %d: попытка не возвращена после откладывания (%s): %v", turn.ID, reason, err)
 	}
-	notBefore := runtime.NextDay(time.Now())
 	w.notBeforeMu.Lock()
 	w.notBefore[turn.ID] = notBefore
 	w.notBeforeMu.Unlock()
-	w.logger.Printf("ход %d отложено до завтра: бюджет (до %s)", turn.ID, notBefore.UTC().Format("2006-01-02 15:04"))
+	w.logger.Printf("ход %d отложен (%s) до %s", turn.ID, reason, notBefore.UTC().Format("2006-01-02 15:04"))
 }
 
 // backoff — экспоненциальная пауза: base * 2^(попытка-1), с потолком RetryMax.
