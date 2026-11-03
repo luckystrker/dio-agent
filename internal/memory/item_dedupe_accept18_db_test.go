@@ -115,7 +115,7 @@ func newPoolWithoutDedupe(t *testing.T) *runtime.Pool {
 		t.Fatalf("миграции без 000014 не применены: %v", err)
 	}
 	// Набор без одной миграции 000014: все остальные (число файлов минус один),
-	// включая 000015 (стикеры), 000016 (скука), 000017/000018 (этап 29).
+	// включая 000015 (стикеры), 000016 (скука), 000017/000018 (этап 29), 000019 (объединение сущностей).
 	wantApplied := len(names) - 1
 	if result.Applied != wantApplied || result.Skipped != 0 {
 		t.Fatalf("миграции: applied=%d skipped=%d, хочу %d/0", result.Applied, result.Skipped, wantApplied)

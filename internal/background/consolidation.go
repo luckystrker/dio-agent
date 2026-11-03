@@ -284,7 +284,7 @@ func (s *Scheduler) consolidationPrompt(ctx context.Context, ep Episode) (system
 		}
 	}
 	if len(entities) > 0 {
-		b.WriteString("\nСущности эпизода (поле entity у stance — только эти имена):\n")
+		b.WriteString("\nСущности эпизода (поле entity у stance и имена keep/merge у entity_merges — только эти имена):\n")
 		for _, e := range entities {
 			b.WriteString(fmt.Sprintf("- %s\n", e.Name))
 		}
@@ -356,9 +356,12 @@ func (s *Scheduler) applyConsolidation(ctx context.Context, ep Episode, p consol
 	if err != nil {
 		return false, "", err
 	}
-	byName := map[string]int64{}
-	for _, e := range entities {
-		byName[strings.ToLower(e.Name)] = e.ID
+	// Словарь имён эпизода — канонические имена и алиасы (M7: у собеседника
+	// каноническое имя user:<id>, отображаемое — алиас). Неоднозначное имя
+	// (один алиас у двух сущностей) резолвер не отдаёт.
+	byName, err := episodeEntityNameIndex(ctx, tx, entities)
+	if err != nil {
+		return false, "", err
 	}
 
 	revised, skipped := 0, 0
@@ -396,10 +399,41 @@ func (s *Scheduler) applyConsolidation(ctx context.Context, ep Episode, p consol
 		revised++
 	}
 
+	// Объединение сущностей (§8.5, 32.2): модель предлагает «A = B» по именам
+	// эпизода, runtime проверяет и склеивает. Отказ правила — пропуск предложения
+	// (как неизвестное имя stance), прочие ошибки БД откатывают транзакцию.
+	merged, mergeSkipped := 0, 0
+	for _, mp := range p.EntityMerges {
+		keepID, kok := byName[strings.ToLower(mp.Keep)]
+		mergeID, mok := byName[strings.ToLower(mp.Merge)]
+		if !kok || !mok {
+			mergeSkipped++
+			continue
+		}
+		res, merr := (memory.EntityRepo{}).MergeEntities(ctx, tx, memory.EntityMergeRequest{
+			KeepID: keepID, MergeID: mergeID, Reason: mp.Reason,
+			ProposedBy: "consolidation", Audience: scope,
+		})
+		if merr != nil {
+			if errors.Is(merr, memory.ErrMergeRefused) || errors.Is(merr, memory.ErrNotFound) {
+				mergeSkipped++
+				s.logInfo("консолидация: склейка %q → %q отклонена: %v", mp.Keep, mp.Merge, merr)
+				continue
+			}
+			return false, "", fmt.Errorf("консолидация: склейка %q → %q: %w", mp.Keep, mp.Merge, merr)
+		}
+		if res.AlreadyMerged {
+			mergeSkipped++
+			continue
+		}
+		merged++
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return false, "", fmt.Errorf("консолидация: транзакция не зафиксирована: %w", err)
 	}
-	detail := fmt.Sprintf("событий=%d stances=%d отклонено=%d", len(ep.EventIDs), revised, skipped)
+	detail := fmt.Sprintf("событий=%d stances=%d отклонено=%d склеек=%d отклонено_склеек=%d",
+		len(ep.EventIDs), revised, skipped, merged, mergeSkipped)
 	return true, detail, nil
 }
 
@@ -531,6 +565,7 @@ func episodeEntities(ctx context.Context, q queryer, turnRefs []string) ([]episo
 		JOIN memory_links ml ON ml.entity_id = e.id
 		JOIN memory_sources ms ON ms.memory_id = ml.memory_id
 		JOIN sources s ON s.id = ms.source_id AND s.kind = 'journal_event' AND s.ref = ANY($1)
+		WHERE e.merged_into IS NULL
 		ORDER BY e.canonical_name`, turnRefs)
 	if err != nil {
 		return nil, fmt.Errorf("консолидация: сущности эпизода не читаются: %w", err)
@@ -545,6 +580,51 @@ func episodeEntities(ctx context.Context, q queryer, turnRefs []string) ([]episo
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// episodeEntityNameIndex — словарь имён сущностей эпизода: канонические имена
+// и алиасы (M7: у собеседника каноническое имя user:<id>, отображаемое — алиас).
+// Неоднозначное имя (один алиас у двух сущностей) не резолвится: runtime не
+// угадывает, какую сущность имела в виду модель.
+func episodeEntityNameIndex(ctx context.Context, q queryer, entities []episodeEntityRow) (map[string]int64, error) {
+	idx := make(map[string]int64, len(entities))
+	ambiguous := map[string]bool{}
+	add := func(name string, id int64) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" || ambiguous[key] {
+			return
+		}
+		if prev, ok := idx[key]; ok && prev != id {
+			ambiguous[key] = true
+			delete(idx, key)
+			return
+		}
+		idx[key] = id
+	}
+	ids := make([]int64, 0, len(entities))
+	for _, e := range entities {
+		add(e.Name, e.ID)
+		ids = append(ids, e.ID)
+	}
+	if len(ids) == 0 {
+		return idx, nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT entity_id, alias FROM entity_aliases
+		WHERE entity_id = ANY($1) ORDER BY entity_id, id`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("консолидация: алиасы сущностей эпизода не читаются: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var alias string
+		if err := rows.Scan(&id, &alias); err != nil {
+			return nil, fmt.Errorf("консолидация: строка алиаса не читается: %w", err)
+		}
+		add(alias, id)
+	}
+	return idx, rows.Err()
 }
 
 // episodeBasis — основания пересмотра stance: записи памяти эпизода, связанные

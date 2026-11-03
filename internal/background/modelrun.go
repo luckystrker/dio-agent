@@ -39,12 +39,14 @@ const (
 // Ограничения proposal-контракта консолидации (§10.1: runtime проверяет
 // типы и длины; значения — начальные пределы спеки).
 const (
-	maxSummaryLength = 2000
-	maxStanceAspects = 5
-	maxAspectLength  = 100
-	maxEntityNameLen = 200
-	episodeItemLimit = 30  // записей памяти в промпт консолидации
-	episodeTextLimit = 300 // символов события в промпте консолидации
+	maxSummaryLength  = 2000
+	maxStanceAspects  = 5
+	maxEntityMerges   = 5
+	maxAspectLength   = 100
+	maxEntityNameLen  = 200
+	maxMergeReasonLen = 300
+	episodeItemLimit  = 30  // записей памяти в промпт консолидации
+	episodeTextLimit  = 300 // символов события в промпте консолидации
 )
 
 // errInvalidResult — ответ модели не прошёл валидацию ни с первой, ни с
@@ -249,6 +251,7 @@ func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system
 		"- Финальный ответ — только JSON по схеме ConsolidationProposal, без текста вокруг него.",
 		"- summary — только из содержания эпизода; ничего не выдумывай сверх записанного.",
 		"- stances — только по перечисленным сущностям эпизода; strength/interest в границах 0..1.",
+		"- entity_merges — только если в эпизоде явно видно, что два имени — одна и та же сущность; keep — оставляемое имя, merge — поглощаемое, reason — основание. Разные Telegram-аккаунты (user:<id>) — разные люди: не склеивать. При сомнении не склеивай (§8.5).",
 		"- Повторное чтение тех же источников не повышает устойчивость позиции (strength) — оценивай содержание, а не количество записей (§10.3).",
 		"- Предположение не превращается в подтверждённый факт.",
 	}
@@ -313,13 +316,25 @@ type stanceProposal struct {
 	Interest float64 `json:"interest"`
 }
 
+// entityMergeProposal — предложение «A = B» (§8.5): keep — выжившее имя,
+// merge — поглощаемое, reason — основание. Имена резолвит и проверяет runtime;
+// модель не оперирует id и не решает, склеивать ли.
+type entityMergeProposal struct {
+	Keep   string `json:"keep"`
+	Merge  string `json:"merge"`
+	Reason string `json:"reason"`
+}
+
 // consolidationProposal — ответ модели консолидации: краткое summary эпизода
 // и предложения stances. Confidence модель не предлагает вовсе: summary —
 // experience без confidence, повторное чтение источника не повышает уверенность
-// (§10.2, §10.3).
+// (§10.2, §10.3). EntityMerges — необязательные предложения объединения
+// сущностей эпизода (§8.5): в TurnResult их нет — склейка обслуживающая
+// операция, а разговорный ход не видит эпизод целиком.
 type consolidationProposal struct {
-	Summary string           `json:"summary"`
-	Stances []stanceProposal `json:"stances,omitempty"`
+	Summary      string                `json:"summary"`
+	Stances      []stanceProposal      `json:"stances,omitempty"`
+	EntityMerges []entityMergeProposal `json:"entity_merges,omitempty"`
 }
 
 func consolidationJSONSchema() map[string]any {
@@ -362,6 +377,30 @@ func consolidationJSONSchema() map[string]any {
 						},
 					},
 					"required": []string{"entity", "aspect", "summary", "strength", "interest"},
+				},
+			},
+			"entity_merges": map[string]any{
+				"type":        "array",
+				"maxItems":    maxEntityMerges,
+				"description": "Необязательные предложения объединения сущностей эпизода. Только при явной уверенности, что это одна и та же сущность; при сомнении список пуст.",
+				"items": map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]any{
+						"keep": map[string]any{
+							"type":        "string",
+							"description": "Имя выживающей сущности — из списка сущностей эпизода.",
+						},
+						"merge": map[string]any{
+							"type":        "string",
+							"description": "Имя поглощаемой сущности — из списка сущностей эпизода.",
+						},
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "Основание: почему это одна и та же сущность (не просто похожие имена).",
+						},
+					},
+					"required": []string{"keep", "merge", "reason"},
 				},
 			},
 		},
@@ -415,6 +454,27 @@ func parseConsolidationProposal(raw []byte) (consolidationProposal, error) {
 		}
 		sp.Strength = clamp01(sp.Strength)
 		sp.Interest = clamp01(sp.Interest)
+	}
+	if len(p.EntityMerges) > maxEntityMerges {
+		return consolidationProposal{}, fmt.Errorf("консолидация: больше %d предложений entity_merges", maxEntityMerges)
+	}
+	for i := range p.EntityMerges {
+		mp := &p.EntityMerges[i]
+		mp.Keep = strings.TrimSpace(mp.Keep)
+		mp.Merge = strings.TrimSpace(mp.Merge)
+		mp.Reason = strings.TrimSpace(mp.Reason)
+		if mp.Keep == "" || mp.Merge == "" {
+			return consolidationProposal{}, fmt.Errorf("консолидация: entity_merges #%d без keep/merge", i)
+		}
+		if len([]rune(mp.Keep)) > maxEntityNameLen || len([]rune(mp.Merge)) > maxEntityNameLen {
+			return consolidationProposal{}, fmt.Errorf("консолидация: entity_merges #%d: имя сущности длиннее %d символов", i, maxEntityNameLen)
+		}
+		if mp.Reason == "" {
+			return consolidationProposal{}, fmt.Errorf("консолидация: entity_merges #%d без основания", i)
+		}
+		if len([]rune(mp.Reason)) > maxMergeReasonLen {
+			return consolidationProposal{}, fmt.Errorf("консолидация: entity_merges #%d: основание длиннее %d символов", i, maxMergeReasonLen)
+		}
 	}
 	return p, nil
 }
