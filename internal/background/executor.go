@@ -359,7 +359,8 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			// §12.1: model_output ДО применения — сбой между ними восстанавливает
 			// ход применением сохранённого результата без новой генерации.
 			if err := s.journal.WriteModelOutput(ctx, turnID, run.Result,
-				map[string]any{"calls": run.Stats.Calls, "tokens": run.Stats.Tokens}, run.Repairs); err != nil {
+				map[string]any{"calls": run.Stats.Calls, "tokens": run.Stats.Tokens}, run.Repairs,
+				run.Reasoning, run.ReasoningRepair); err != nil {
 				return out, err
 			}
 		} else {

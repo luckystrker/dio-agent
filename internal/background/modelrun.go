@@ -94,6 +94,10 @@ type turnModelRun struct {
 	Result  character.TurnResult
 	Repairs int
 	Stats   modelStats
+	// Reasoning/ReasoningRepair — рассуждение модели первой и repair-попытки
+	// (26.3): журнал фонового хода, в контекст не возвращается.
+	Reasoning       string
+	ReasoningRepair string
 }
 
 // runTurnModel выполняет один фоновый ход (§11.2): strict TurnResult, один
@@ -139,6 +143,7 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 		"- Финальный ответ — только JSON по схеме TurnResult, без текста вокруг него.",
 		"- decision=answer: от 1 до 4 сообщений, каждое не длиннее 4000 символов.",
 		"- ignore — без сообщений; результаты инструментов памяти — контекст, а не отправляемый текст.",
+		"- " + character.DelayHoursHint + ".",
 	}
 
 	// Clone возвращает *character.ChatConfig; на нём выключаем инструменты,
@@ -153,6 +158,7 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 	toolMW.SetOnExhausted(chatCfg.DisableTools)
 
 	counting := &usageCounter{}
+	reasoning := character.NewReasoningCapture()
 	opts := []agent.Option{
 		agent.WithConfig(cfg),
 		// Constraints — отдельная структурная секция (§17), не смешанная с данными.
@@ -171,6 +177,8 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 			},
 			func() agomiddleware.Middleware { return counting },
 			func() agomiddleware.Middleware { return toolMW },
+			// Reasoning (26.3) — отдельно от истории, только для журнала.
+			func() agomiddleware.Middleware { return reasoning },
 		),
 		agent.WithDependencies(map[string]any{
 			memory.ScopeDependency:       scopeID,
@@ -189,6 +197,7 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 	if err != nil {
 		return turnModelRun{Stats: counting.stats()}, err
 	}
+	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: reasoning.Take()}
 
 	result, perr := parseTurnReply(first)
 	if perr != nil {
@@ -196,15 +205,19 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 		fixed, ferr := first.Ask(ctx, fmt.Sprintf(
 			"Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr))
 		if ferr != nil {
-			return turnModelRun{Stats: counting.stats()}, ferr
+			return reasoningOut, ferr
 		}
+		reasoningOut.ReasoningRepair = reasoning.Take()
 		result, perr = parseTurnReply(fixed)
 		if perr != nil {
-			return turnModelRun{Stats: counting.stats()}, &errInvalidResult{err: perr}
+			return reasoningOut, &errInvalidResult{err: perr}
 		}
-		return turnModelRun{Result: result, Repairs: 1, Stats: counting.stats()}, nil
+		reasoningOut.Result = result
+		reasoningOut.Repairs = 1
+		return reasoningOut, nil
 	}
-	return turnModelRun{Result: result, Stats: counting.stats()}, nil
+	reasoningOut.Result = result
+	return reasoningOut, nil
 }
 
 // parseTurnReply разбирает тело ответа как строгий TurnResult (§11.2).

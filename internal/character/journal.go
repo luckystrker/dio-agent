@@ -125,12 +125,21 @@ func (j *TurnJournal) WriteToolResultFor(ctx context.Context, turnID int64, ev *
 }
 
 // WriteModelOutput записывает валидированный результат ДО применения дельт (§12.1).
-func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result TurnResult, usage map[string]any, repairs int) error {
+// reasoning/reasoningRepair — рассуждение модели первой и repair-попытки (26.3);
+// пустые строки в событие не попадают (omitempty).
+func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result TurnResult,
+	usage map[string]any, repairs int, reasoning, reasoningRepair string) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("журнал хода: результат не сериализуется: %w", err)
 	}
-	return j.append(ctx, turnID, &ModelOutput{Result: raw, Usage: usage, Repairs: repairs})
+	return j.append(ctx, turnID, &ModelOutput{
+		Result:          raw,
+		Usage:           usage,
+		Repairs:         repairs,
+		Reasoning:       truncateReasoning(reasoning),
+		ReasoningRepair: truncateReasoning(reasoningRepair),
+	})
 }
 
 // WriteTurnSkipped записывает терминальный пропуск (инвариант 5).
