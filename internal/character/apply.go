@@ -49,6 +49,26 @@ type ApplyResult struct {
 	// DuplicateIntentions — предложения модели, отклонённые живым дублем
 	// (§14.1): причина дубля (какое намерение живо) видна оператору в логе.
 	DuplicateIntentions []DuplicateIntention
+	// RejectedIntentions — предложения с темой-мусором (26.2): намерение не
+	// создаётся, но ход живёт — как дубль, §14.1.
+	RejectedIntentions []RejectedIntention
+	// RaisedIntentions — задержки, поднятые runtime до пола вида (26.2).
+	RaisedIntentions []RaisedIntention
+}
+
+// RejectedIntention — отклонённое предложение намерения с мусорной темой.
+type RejectedIntention struct {
+	Kind   string
+	Topic  string
+	Reason string
+}
+
+// RaisedIntention — задержка намерения, поднятая до runtime-пола вида.
+type RaisedIntention struct {
+	Kind  string
+	Topic string
+	From  float64
+	To    float64
 }
 
 // DuplicateIntention — отклонённое живым дублем предложение намерения.
@@ -225,13 +245,30 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 
 	// --- намерения (§14.1): предложения модели + defer → reply_later (§11.2) ---
 	for _, proposal := range opts.Result.Intentions {
+		// Тема-мусор (26.2) отклоняется до создания строки: «placeholder1»,
+		// «:)» — не отложенное действие, а мусор в поле. Ход живёт, как при
+		// дубле (§14.1).
+		if reason := garbageTopicReason(proposal.Topic); reason != "" {
+			res.RejectedIntentions = append(res.RejectedIntentions, RejectedIntention{
+				Kind: proposal.Kind, Topic: proposal.Topic, Reason: reason,
+			})
+			continue
+		}
+		// Runtime-пол задержки по виду (26.2): модель путает часы с минутами,
+		// runtime поднимает до пола, а не отклоняет намерение.
+		flooredDelay, floored := floorIntentionDelay(proposal.Kind, proposal.DelayHours)
+		var raised *RaisedIntention
+		if floored {
+			raised = &RaisedIntention{Kind: proposal.Kind, Topic: proposal.Topic,
+				From: proposal.DelayHours, To: flooredDelay}
+		}
 		id, created, dup, err := createIntention(ctx, tx, intentionRow{
 			kind:          proposal.Kind,
 			chatID:        opts.ChatID,
 			scopeID:       opts.ScopeID,
 			topic:         proposal.Topic,
 			reason:        proposal.Reason,
-			delayHours:    proposal.DelayHours,
+			delayHours:    flooredDelay,
 			relatedTurnID: opts.TurnID,
 		})
 		if err != nil {
@@ -240,6 +277,9 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+			if raised != nil {
+				res.RaisedIntentions = append(res.RaisedIntentions, *raised)
+			}
 		} else if dup != nil {
 			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
 		}
@@ -249,13 +289,20 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if err != nil {
 			return ApplyResult{}, err
 		}
+		// defer модельный: тот же runtime-пол вида reply_later (26.2).
+		flooredDefer, floored := floorIntentionDelay("reply_later", *opts.Result.DeferHours)
+		var raisedDefer *RaisedIntention
+		if floored {
+			raisedDefer = &RaisedIntention{Kind: "reply_later", Topic: topic,
+				From: *opts.Result.DeferHours, To: flooredDefer}
+		}
 		id, created, dup, err := createIntention(ctx, tx, intentionRow{
 			kind:          "reply_later",
 			chatID:        opts.ChatID,
 			scopeID:       opts.ScopeID,
 			topic:         topic,
 			reason:        "decision=defer: персонаж отложил ответ (§11.2)",
-			delayHours:    *opts.Result.DeferHours,
+			delayHours:    flooredDefer,
 			relatedTurnID: opts.TurnID,
 		})
 		if err != nil {
@@ -264,6 +311,9 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+			if raisedDefer != nil {
+				res.RaisedIntentions = append(res.RaisedIntentions, *raisedDefer)
+			}
 		} else if dup != nil {
 			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
 		}

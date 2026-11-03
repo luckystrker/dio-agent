@@ -578,6 +578,17 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 		r.logf("ход %d: намерение %s %q не создано — живое намерение с тем же dedupe-ключом уже есть (статус %s, §14.1)",
 			in.TurnID, dup.Kind, dup.Topic, dup.LiveStatus)
 	}
+	// Страховки намерений (26.2): поднятая задержка и отсеянная мусорная тема
+	// тоже видны оператору — иначе «модель попросила через 5 минут, а пришло
+	// через 2 часа» не отличить от молчаливой правки.
+	for _, raised := range out.Apply.RaisedIntentions {
+		r.logf("ход %d: намерение %s %q: delay_hours %.3f поднята до %.3f ч (runtime-пол вида, 26.2)",
+			in.TurnID, raised.Kind, raised.Topic, raised.From, raised.To)
+	}
+	for _, rejected := range out.Apply.RejectedIntentions {
+		r.logf("ход %d: намерение %s %q отклонено — тема-мусор (%s, §14.1)",
+			in.TurnID, rejected.Kind, rejected.Topic, rejected.Reason)
+	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
 		len(out.Apply.IntentionIDs), len(out.Apply.OutboxIDs), out.Recovered)

@@ -336,6 +336,7 @@ func constraintsSection() string {
 	b.WriteString("- decision=answer: от 1 до 4 сообщений, каждое не длиннее 4000 символов.\n")
 	b.WriteString("- decision=react: только реакция (эмодзи), без сообщений; ignore/defer — без сообщений.\n")
 	b.WriteString("- decision=defer требует defer_hours; вернёшься к ответу позже.\n")
+	b.WriteString("- " + DelayHoursHint + ".\n")
 	b.WriteString("- mood_delta и relationship_delta — изменения (дельты), а не абсолютные значения; значимое изменение — с кратким основанием reason.\n")
 	b.WriteString("- Результаты инструментов памяти — часть контекста хода, а не отправляемый текст; не цитируй их формат.\n")
 	b.WriteString("- sticker — только метка стикера из списка в панели; неизвестная метка не отправляется.\n")

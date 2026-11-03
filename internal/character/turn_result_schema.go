@@ -85,10 +85,11 @@ func TurnResultJSONSchema() map[string]any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"kind":        map[string]any{"type": "string", "enum": []string{"reply_later", "check_in", "share", "explore"}},
-						"topic":       map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
-						"reason":      map[string]any{"type": "string", "minLength": 1, "maxLength": maxReasonLength},
-						"delay_hours": map[string]any{"type": "number", "minimum": minDelayHours, "maximum": maxDeferHours},
+						"kind":   map[string]any{"type": "string", "enum": []string{"reply_later", "check_in", "share", "explore"}},
+						"topic":  map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
+						"reason": map[string]any{"type": "string", "minLength": 1, "maxLength": maxReasonLength},
+						"delay_hours": map[string]any{"type": "number", "minimum": minDelayHours, "maximum": maxDeferHours,
+							"description": DelayHoursHint},
 					},
 					"required":             []string{"kind", "topic", "reason", "delay_hours"},
 					"additionalProperties": false,

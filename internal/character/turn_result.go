@@ -73,7 +73,8 @@ type EntityLink struct {
 }
 
 // IntentionProposal — предложение отложенного действия (§10.1 ≤2/ход, §14.1):
-// время относительное, в часах.
+// время относительно сейчас, в ЧАСАХ (0.5 = 30 минут, 3 = три часа); runtime
+// поднимает задержку до пола вида (26.2).
 type IntentionProposal struct {
 	Kind       string  `json:"kind"` // reply_later | check_in | share | explore
 	Topic      string  `json:"topic"`
