@@ -77,6 +77,9 @@ type BaseContext struct {
 	MemoryCardFitted bool
 	// MemoryCardEntries — число заметок карточки (наблюдаемость хода, 21.4).
 	MemoryCardEntries int
+	// MemoryCardIncomplete — почему карточка неполна (28.3): fts_cut | budget
+	// | stances | limit (через запятую). Пусто — релевантное влезло.
+	MemoryCardIncomplete string
 }
 
 // Assembler собирает базовый контекст из БД (§11.1). Один источник истины —
@@ -177,6 +180,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 			out.MemoryCardIncluded = true
 			out.MemoryCardFitted = card.Fits
 			out.MemoryCardEntries = card.Entries
+			out.MemoryCardIncomplete = card.Incomplete
 			memoryCard = card.Text
 		}
 	}
@@ -193,8 +197,10 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	out.Constraints = constraintsSection()
 
 	// --- коллекция стикеров (этап 25.3): краткий список для выбора метки;
-	// сбой чтения не роняет ход — стикеров в панели просто нет.
+	// сбой чтения не роняет ход — стикеров в панели просто нет. Подсказка
+	// «можно сохранить» — только если в пачке есть незнакомый стикер (28.1).
 	stickerList := ""
+	saveSticker := false
 	if a.Stickers != nil {
 		list, serr := a.Stickers.List(ctx, db, stickerPanelItems)
 		if serr != nil {
@@ -203,6 +209,13 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 			}
 		} else {
 			stickerList = RenderStickerList(list)
+		}
+		if has, herr := a.Stickers.HasUnknown(ctx, db, BatchStickers(batch)); herr != nil {
+			if a.Logger != nil {
+				a.Logger.Printf("контекст: незнакомый стикер пачки не проверен: %v", herr)
+			}
+		} else {
+			saveSticker = has
 		}
 	}
 
@@ -216,6 +229,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		Activity:     persona.ActivityAt(now, a.Timezone),
 		MemoryCard:   memoryCard,
 		Stickers:     stickerList,
+		SaveSticker:  saveSticker,
 		MultiActor:   distinctActors(batch) > 1,
 		// Подсказка «память доступна инструментами» — ровно когда они будут
 		// выданы планом хода (21.3): история урезана или карточка неполна.
@@ -339,8 +353,8 @@ func constraintsSection() string {
 	b.WriteString("- " + DelayHoursHint + ".\n")
 	b.WriteString("- mood_delta и relationship_delta — изменения (дельты), а не абсолютные значения; значимое изменение — с кратким основанием reason.\n")
 	b.WriteString("- Результаты инструментов памяти — часть контекста хода, а не отправляемый текст; не цитируй их формат.\n")
-	b.WriteString("- sticker — только метка стикера из списка в панели; неизвестная метка не отправляется.\n")
-	b.WriteString("- save_sticker сохраняет стикер, присланный в этой пачке, с твоей заметкой «когда уместен»; file_id не выдумывай.\n")
+	b.WriteString("- sticker — редкая приправа, не в каждом ответе: обычно либо стикер, либо реакция; только метка из панели, неизвестная метка не отправляется.\n")
+	b.WriteString("- save_sticker — только если во входящей пачке есть стикер, которого НЕТ в твоей коллекции; в остальных ходах поле не заполняй (runtime его отбросит).\n")
 	return strings.TrimSuffix(b.String(), "\n")
 }
 

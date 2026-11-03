@@ -137,6 +137,38 @@ func TestComposeUserText(t *testing.T) {
 	}
 }
 
+// TestBackgroundPanel — 28.4: фон получает ту же компактную панель (время и
+// «чем занят», настроение, собеседник и отношение), без пачки, истории,
+// памяти и паузы; панель идёт первой частью user-сообщения.
+func TestBackgroundPanel(t *testing.T) {
+	loc := moscow(t)
+	now := time.Date(2026, 11, 3, 14, 30, 0, 0, loc)
+	panel := BackgroundPanel(now, loc, "на работе, разгребаю задачи", "Коля",
+		"чуть оживлён", "уже неплохо знаком, он тебе симпатичен")
+	for _, want := range []string{
+		statePanelOpen,
+		"сейчас: вт 03.11 14:30, на работе",
+		"ты говоришь с: Коля",
+		"твоё состояние: чуть оживлён",
+		"отношение к собеседнику: уже неплохо знаком",
+		statePanelClose,
+	} {
+		if !strings.Contains(panel, want) {
+			t.Fatalf("в панели фона нет %q:\n%s", want, panel)
+		}
+	}
+	for _, unwanted := range []string{"с прошлого сообщения", "заметки памяти", "память доступна инструментами"} {
+		if strings.Contains(panel, unwanted) {
+			t.Fatalf("панель фона напечатала разговорную строку %q:\n%s", unwanted, panel)
+		}
+	}
+	// Панель — первая часть user-сообщения; разговорный ComposeUserText.
+	userText := ComposeUserText(panel, "Твоё отложенное намерение: check_in.")
+	if !strings.HasPrefix(userText, panel+"\n\n") {
+		t.Fatalf("панель фона не первая часть сообщения:\n%s", userText)
+	}
+}
+
 // TestRenderHistoryLine — user-реплика несёт метку и автора, assistant —
 // только метку (не провоцирует модель писать «Дио:»).
 func TestRenderHistoryLine(t *testing.T) {
