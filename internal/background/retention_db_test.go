@@ -202,3 +202,25 @@ func TestRetentionSweep(t *testing.T) {
 		t.Fatalf("чужой (не bg) поток не должен удаляться (18.6), строк %d", n)
 	}
 }
+
+// TestRetentionDeletesWholeOldStream — minor 11: поток с древней головой и
+// свежим хвостом не теряет голову поштучно. Иначе checkContiguous навсегда
+// получал ErrSequenceGap, если поток когда-нибудь перечитали.
+func TestRetentionDeletesWholeOldStream(t *testing.T) {
+	f, ctx := newFixture(t)
+
+	deadID := f.createIntention(t, ctx, KindCheckIn, "мёртвая задача с длинным потоком", -6, bgChatID)
+	if _, err := f.pool.Exec(ctx,
+		`UPDATE intentions SET status = 'completed', updated_at = now() WHERE id = $1`, deadID); err != nil {
+		t.Fatalf("намерение %d не завершено: %v", deadID, err)
+	}
+	stream := fmt.Sprintf("bg:intention:%d", deadID)
+	f.seedWalRows(t, ctx, stream, testWalAge+24*time.Hour, 1) // голова старше 30 дней
+	f.seedWalRows(t, ctx, stream, time.Hour, 1)               // хвост свежий
+
+	f.sched.Tick(ctx)
+
+	if n := f.walCount(t, ctx, stream); n != 2 {
+		t.Fatalf("поток с свежим хвостом удалён частично/целиком: строк %d, хочу 2", n)
+	}
+}

@@ -82,19 +82,27 @@ func (s *Scheduler) sweepRetention(ctx context.Context) {
 
 	// WAL-потоки bg:* без живой задачи: намерение уже не pending/running;
 	// у консолидации событие сведено ИЛИ эпизод ушёл вперёд (есть события
-	// новее — unitID сменился, этот поток уже никогда не читается).
+	// новее — unitID сменился, этот поток уже никогда не читается). Поток
+	// удаляется целиком по возрасту ПОСЛЕДНЕЙ строки (minor 11): иначе
+	// выживала голова старого потока, и checkContiguous навсегда получал
+	// ErrSequenceGap, если поток когда-нибудь перечитали.
 	wal, err := tx.Exec(ctx, `
-		DELETE FROM event_streams
-		WHERE stream_id LIKE 'bg:%'
-		  AND created_at < now() - make_interval(secs => $1)
+		DELETE FROM event_streams es
+		WHERE es.stream_id LIKE 'bg:%'
+		  AND es.stream_id IN (
+		      SELECT stream_id FROM event_streams
+		      WHERE stream_id LIKE 'bg:%'
+		      GROUP BY stream_id
+		      HAVING max(created_at) < now() - make_interval(secs => $1)
+		  )
 		  AND (
-		       (stream_id ~ '^bg:intention:[0-9]+$' AND NOT EXISTS (
+		       (es.stream_id ~ '^bg:intention:[0-9]+$' AND NOT EXISTS (
 		          SELECT 1 FROM intentions i
-		          WHERE i.id = substring(stream_id FROM '[0-9]+$')::bigint
+		          WHERE i.id = substring(es.stream_id FROM '[0-9]+$')::bigint
 		            AND i.status IN ('pending', 'running')))
-		    OR (stream_id ~ '^bg:consolidate:-?[0-9]+:[0-9]+$' AND NOT EXISTS (
+		    OR (es.stream_id ~ '^bg:consolidate:-?[0-9]+:[0-9]+$' AND NOT EXISTS (
 		          SELECT 1 FROM social_events e
-		          WHERE e.id = split_part(stream_id, ':', 4)::bigint
+		          WHERE e.id = split_part(es.stream_id, ':', 4)::bigint
 		            AND e.summarized_at IS NULL
 		            AND NOT EXISTS (
 		              SELECT 1 FROM social_events newer
