@@ -32,10 +32,13 @@ go vet ./...        # и go vet -tags db ./...
 go test ./...       # юнит-тесты, живая БД не нужна
 ```
 
-БД-тесты — отдельным прогоном против Postgres из docker-compose (вне гейта):
+БД-тесты — отдельным прогоном на приватном эфемерном PostgreSQL 17 + pgvector
+(скрипт сам поднимает кластер на свободном порту и удаляет его; вне гейта,
+`TEST_DATABASE_URL` выставлять не нужно):
 
 ```bash
-TEST_DATABASE_URL=postgres://dio:dio@localhost:5433/dio?sslmode=disable go test -tags db ./...
+scripts/test-db.sh            # все пакеты (-tags db)
+scripts/test-db.sh ./internal/app/ -run TestMainLoop -v
 ```
 
 (Тот же гейт-набор перед коммитом гоняет хук `.zcode/hooks/pre-commit-gate.mjs`.)

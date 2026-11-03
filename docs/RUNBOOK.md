@@ -408,13 +408,13 @@ system начнёт меняться между ходами и кэш преф�
 Офлайн (скриптовая модель, детерминированный гейт — гоняется в БД-тестах):
 
 ```bash
-TEST_DATABASE_URL="postgres://dio:dio@localhost:5433/dio?sslmode=disable"   go test -tags "db,eval" ./internal/app/ -run TestEvalSuiteOffline
+TEST_DB_TAGS="db,eval" scripts/test-db.sh ./internal/app/ -run TestEvalSuiteOffline
 ```
 
 Живой (реальная модель; Telegram — заглушка; отчёт — `evals/results/live.json`):
 
 ```bash
-TEST_DATABASE_URL="postgres://dio:dio@localhost:5433/dio?sslmode=disable"   MODEL_MODEL=nvidia/nemotron-3.5-super-vl:free   EVAL_MIN_PASS_RATE=0.5   go test -tags "db,eval,live" ./internal/app/ -run TestEvalSuiteLive -v -timeout 30m
+TEST_DB_TAGS="db,eval,live" MODEL_MODEL=nvidia/nemotron-3.5-super-vl:free   EVAL_MIN_PASS_RATE=0.5   scripts/test-db.sh ./internal/app/ -run TestEvalSuiteLive -v -timeout 30m
 ```
 
 Набор кейсов — `evals/behavior_suite.jsonl` (эталоны docs/BEHAVIOR_SCENARIOS.md);

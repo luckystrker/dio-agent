@@ -399,6 +399,20 @@
 - **Г:** гейты; тесты нормализации, выбора стикера, outbox sendSticker (httptest).
 - **Р:** прислал стикер — персонаж понял картинку; сам отвечает стикером; сохранил понравившийся и потом его использует.
 
+## Этап 27 — Тестовая БД и красные БД-тесты (2026-11-03)
+
+Причина: БД-тесты (`-tags db`) ходят в `TEST_DATABASE_URL`, а RUNBOOK давал
+`postgres://dio:dio@localhost:5433/dio` — на 5433 живёт БОЕВОЙ user-space
+кластер (dio-postgres.service, база `dio_go`): другой пароль, и тестам там не
+место. Прошлые треды поднимали временный кластер руками (initdb, pgvector,
+локаль C.utf8 ради `lower()` с кириллицей; `/tmp` — tmpfs 3.9G и переполнялся,
+кластер клали на диск). Пора это зафиксировать скриптом.
+
+- [x] 27.1 Скрипт `scripts/test-db.sh`: поднимает эфемерный кластер PostgreSQL 17 + `CREATE EXTENSION vector` на свободном порту в каталоге на диске (`$TEST_PG_ROOT/<pid>`, по умолчанию `$HOME/.cache/dio-test-pg`), `initdb --locale=C.utf8 --encoding=UTF8`, trust только на 127.0.0.1 (`listen_addresses=127.0.0.1` + unix-сокет в приватном каталоге), создаёт базу `dio`, экспортирует `TEST_DATABASE_URL` и запускает `go test -tags db -count=1 "$@"` (по умолчанию `./...`); trap на EXIT/INT/TERM останавливает (`pg_ctl -m immediate`) и удаляет кластер даже при Ctrl-C/падении тестов. Пути PG — переменными с дефолтами (`PG_BIN=$HOME/dio-stack/pgsql/usr/lib/postgresql/17/bin`, `PG_LIB=<каталог libpq.so.5>`, `LD_LIBRARY_PATH` выставляется); `TEST_DB_TAGS` позволяет эвалам добавить `eval`/`live`. 5433/`dio_go` не трогается никогда. `docs/RUNBOOK.md` (DSN → скрипт, включая офлайн/живой эвалы), `AGENTS.md` и `README.md` — та же замена.
+- [ ] 27.2 Пять красных БД-тестов, падавших на main до этапов 22–25, разобраны по одному (баг кода или теста) и починены без ослабления проверок и без SKIP: `internal/character` `TestAssemblerSystemStaticPanelDynamic`, `TestTurnFullFlow`; `internal/app` `TestBehaviorPolitenessToStranger`, `TestMainLoop`; `internal/background` `TestRetentionDeletesWholeOldStream`. Флейки `internal/app` под параллельной нагрузкой (`TestResilienceSigkillMidTurn`, `TestResiliencePollingDuringLLMHang`, `TestResilienceUnknownDelivery`) — причины устранены/описаны.
+- **Г:** `scripts/test-db.sh` полностью зелёный (все пакеты), два прогона подряд; gofmt/vet/юниты зелёные.
+- **Р:** человек без ручной подготовки БД запускает одну команду и получает зелёный БД-набор, не рискуя боевым кластером.
+
 ## Бэклог (не в текущие этапы)
 
 ### Волны 2/3 ревью 2026-11-01
