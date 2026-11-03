@@ -54,8 +54,14 @@ var allowedContentTypes = map[string]bool{
 // 64:ff9b::/96 (отображение IPv4 в IPv6; в него маскируются и приватные
 // адреса) — блок 18.10: оба проходили проверки netip как «публичные».
 var forbiddenPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT
+	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64
+	// minor 12: зарезервированные диапазоны, которые netip считает публичными.
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("240.0.0.0/4"),   // reserved + broadcast
+	netip.MustParsePrefix("2002::/16"),     // 6to4
+	netip.MustParsePrefix("2001::/32"),     // Teredo
 }
 
 // addrAllowed — запрет §15 по одному адресу: loopback, private, link-local
