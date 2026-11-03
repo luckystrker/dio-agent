@@ -50,6 +50,10 @@ type Singleton struct {
 	watchStop chan struct{}
 	watchDone chan struct{}
 	released  bool
+	// connMu сериализует обращения к conn: наблюдатель мог зависнуть в ping
+	// дольше Release-ожидания, и конкурентный Exec/Close по pgx.Conn
+	// недопустим (minor 8).
+	connMu sync.Mutex
 }
 
 // AcquireSingleton берёт session advisory lock на новом соединении.
@@ -113,6 +117,12 @@ func (s *Singleton) StartWatch(interval time.Duration) {
 	if ping == nil {
 		ping = s.conn.Ping
 	}
+	pingLocked := ping
+	ping = func(ctx context.Context) error {
+		s.connMu.Lock()
+		defer s.connMu.Unlock()
+		return pingLocked(ctx)
+	}
 	verify := s.verify
 	if verify == nil {
 		verify = func() bool { return dbReachable(s.dsn, interval) }
@@ -175,7 +185,9 @@ func (s *Singleton) reportLost(reason string) {
 	cb := s.lost
 	s.released = true
 	s.mu.Unlock()
+	s.connMu.Lock()
 	_ = s.conn.Close(context.Background())
+	s.connMu.Unlock()
 	if cb != nil {
 		cb(reason)
 	}
@@ -197,7 +209,9 @@ func (s *Singleton) Drop() {
 	default:
 		close(s.watchStop)
 	}
+	s.connMu.Lock()
 	_ = s.conn.Close(context.Background())
+	s.connMu.Unlock()
 }
 
 // Release снимает замок и закрывает соединение (shutdown). Повторный вызов
@@ -223,6 +237,8 @@ func (s *Singleton) Release(ctx context.Context) error {
 
 	// Разрыв соединения снимает session lock сам; явный unlock — паритет TS
 	// и страховка на случай переиспользования соединения сервером.
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 	_, _ = s.conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", SingletonLockKey)
 	return s.conn.Close(ctx)
 }
