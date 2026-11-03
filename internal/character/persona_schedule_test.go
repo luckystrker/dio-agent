@@ -183,6 +183,45 @@ func TestParsePersonaScheduleErrors(t *testing.T) {
 	}
 }
 
+// TestParsePersonaScheduleCommentsAndNumbers — HTML-комментарий в строке блока
+// не попадает в «чем занят» (его видит модель), NaN/Inf и слишком длинная
+// фраза отклоняются, повтор «тихо» — ошибка.
+func TestParsePersonaScheduleCommentsAndNumbers(t *testing.T) {
+	t.Run("комментарий в строке блока", func(t *testing.T) {
+		sched, err := parsePersonaSchedule(scheduleText(
+			"00:00–12:00 | arousal 0.3 | socialEnergy 0.3 | спит <!-- это подсказка -->",
+			"12:00–24:00 | arousal 0.6 | socialEnergy 0.7 | дела",
+		))
+		if err != nil {
+			t.Fatalf("комментарий сломал разбор: %v", err)
+		}
+		if got := (*sched)[0].Activity; got != "спит" {
+			t.Fatalf("комментарий попал в занятие: %q", got)
+		}
+	})
+
+	t.Run("многострочный комментарий внутри секции", func(t *testing.T) {
+		sched, err := parsePersonaSchedule("## Расписание\n<!--\n01:00–08:00 | arousal 1 | socialEnergy 1 | спит\n-->\n00:00–24:00 | arousal 0.3 | socialEnergy 0.3 | дела\n")
+		if err != nil || len(*sched) != 1 || (*sched)[0].Activity != "дела" || (*sched)[0].Line != 5 {
+			t.Fatalf("многострочный комментарий разобран неверно: %v %+v", err, sched)
+		}
+	})
+
+	for _, tc := range []struct{ name, line, want string }{
+		{"NaN", "00:00–24:00 | arousal NaN | socialEnergy 0.3 | спит", "arousal должен быть числом"},
+		{"Inf", "00:00–24:00 | arousal 0.3 | socialEnergy +Inf | спит", "socialEnergy должен быть числом"},
+		{"длинная фраза", "00:00–24:00 | arousal 0.3 | socialEnergy 0.3 | " + strings.Repeat("очень длинная фраза ", 20), "чем занят» длиннее"},
+		{"два тихо", "00:00–24:00 | arousal 0.3 | socialEnergy 0.3 | тихо | тихо | спит", "два «тихо»"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parsePersonaSchedule(scheduleText(tc.line))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("хочу ошибку %q, получено: %v", tc.want, err)
+			}
+		})
+	}
+}
+
 // TestParsePersonaScheduleCoverage — блоки обязаны покрывать сутки: дыра и
 // перекрытие называются с временем и строкой.
 func TestParsePersonaScheduleCoverage(t *testing.T) {
@@ -190,9 +229,11 @@ func TestParsePersonaScheduleCoverage(t *testing.T) {
 		blocks := validScheduleBlocks()
 		blocks[1] = "09:00–11:00 | arousal 0.35 | socialEnergy 0.4 | только проснулся, пьёт кофе"
 		_, err := parsePersonaSchedule(scheduleText(blocks...))
-		if err == nil || !strings.Contains(err.Error(), "секция «Расписание»") ||
+		// Дыру называем строкой блока перед ней: ошибка обычно там (забыли
+		// продлить блок), а не в следующем.
+		if err == nil || !strings.Contains(err.Error(), "строка 2") ||
 			!strings.Contains(err.Error(), "дыра в расписании 08:00–09:00") {
-			t.Fatalf("хочу ошибку про дыру 08:00–09:00, получено: %v", err)
+			t.Fatalf("хочу ошибку про дыру 08:00–09:00 со строкой 2, получено: %v", err)
 		}
 	})
 
@@ -309,7 +350,9 @@ func TestShippedPersonaSchedule(t *testing.T) {
 		t.Fatalf("config/persona.md не парсится: %v", err)
 	}
 	if src.Schedule == nil {
-		t.Fatal("в config/persona.md нет расписания дня")
+		// Секция необязательна: владелец вправе удалить её целиком (правила
+		// в шапке файла). Тогда проверять нечего — поведение без расписания.
+		t.Skip("расписание дня в config/persona.md не задано — прежнее поведение")
 	}
 	loc := moscow(t)
 	if block := src.Schedule.BlockAt(time.Date(2026, 11, 3, 3, 0, 0, 0, loc), loc); block == nil || !block.Quiet {

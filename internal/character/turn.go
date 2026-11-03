@@ -48,6 +48,14 @@ func sessionForChat(chatID int64) string {
 	return fmt.Sprintf("dio-%016x", h.Sum64())
 }
 
+// now — часы Runner: тесты подменяют, иначе системное время.
+func (r *Runner) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
+}
+
 // wantForcedTool — принуждение первого вызова памяти: только прямой ход и
 // только первая попытка. Повторы идут без forced tool_choice: thinking-режимы
 // части провайдеров с ним несовместимы, а повторная генерация уже аварийная
@@ -152,6 +160,9 @@ type Runner struct {
 	// Timezone — пояс абсолютных меток истории (AGENT_TIMEZONE); nil — пояс
 	// по умолчанию Europe/Moscow.
 	Timezone *time.Location
+	// Now — часы хода (тесты фиксируют время); nil — time.Now. Нужны цели
+	// расписания дня при применении дельт (этап 22.2), как Assembler.Now.
+	Now func() time.Time
 	// Photos — скачивание фото Telegram (vision §6.1); nil — модель видит текст.
 	Photos PhotoFetcher
 	// Typing — «печатает…» (§13.3); nil — не показывать.
@@ -503,7 +514,7 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 		Result:  result,
 		// Цель затухания — блок расписания дня (этап 22.2): дельта ложится на
 		// «сегодняшнюю» базу, а не на статичную линию персоны.
-		PersonaBaseline: r.Persona.MoodTargetAt(time.Now(), r.Timezone),
+		PersonaBaseline: r.Persona.MoodTargetAt(r.now(), r.Timezone),
 		Journal:         r.Journal,
 	})
 	if err != nil {

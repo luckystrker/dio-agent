@@ -193,14 +193,23 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 		}
 		// Тихий блок расписания (этап 22.4, §14.3): инициативу не исполняем,
 		// а переносим на конец блока; прямой ответ этим не блокируется (у него
-		// свой путь — когнитивный worker).
-		if until, deferred := s.quietDeferral(it); deferred {
-			if rerr := s.intentions.Release(ctx, it.ID, until); rerr != nil {
-				return out, rerr
+		// свой путь — когнитивный worker). Срок, истекающий внутри тишины,
+		// отменяет намерение сразу: claim его всё равно уже не возьмёт, и
+		// «отложено до 08:00» было бы неправдой.
+		if decision := s.quietDecision(it); decision.Defer || decision.Cancel {
+			if decision.Cancel {
+				reason := "срок истекает в тихие часы расписания (§14.3)"
+				_ = task.Cancel(reason)
+				_, _ = s.intentions.Cancel(ctx, it.ID, reason)
+				out.Outcome, out.Detail = "cancelled", reason
+			} else {
+				if rerr := s.intentions.Release(ctx, it.ID, decision.Until); rerr != nil {
+					return out, rerr
+				}
+				_ = task.Cancel("отложено: тихие часы расписания (§14.3)")
+				out.Outcome = "deferred"
+				out.Detail = "тихий блок расписания до " + decision.Until.Format("15:04") + " (§14.3)"
 			}
-			_ = task.Cancel("отложено: тихие часы расписания (§14.3)")
-			out.Outcome = "deferred"
-			out.Detail = "тихий блок расписания до " + until.Format("15:04") + " (§14.3)"
 			out.Latency = s.now().Sub(started)
 			return out, nil
 		}

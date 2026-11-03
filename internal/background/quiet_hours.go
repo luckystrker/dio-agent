@@ -8,12 +8,28 @@ package background
 
 import "time"
 
-// quietDeferral — момент, до которого инициатива ждёт в тихом блоке. Второе
-// значение — «сейчас тихо и это инициативный вид». Расписания нет — false
-// (прежнее поведение).
-func (s *Scheduler) quietDeferral(it Intention) (time.Time, bool) {
+// quietPlan — что делать с намерением в тихий блок: ждать до Until или
+// отменить, если срок истекает раньше конца тишины (claim такое намерение уже
+// не возьмёт — честнее сказать это сразу). Нулевое значение — тишины нет.
+type quietPlan struct {
+	Defer  bool
+	Cancel bool
+	Until  time.Time
+}
+
+// quietDecision — решение по тишине для намерения: только инициативные виды
+// (check_in/share/reply_later), только при действующем тихом блоке, только в
+// поясе персонажа (AGENT_TIMEZONE).
+func (s *Scheduler) quietDecision(it Intention) quietPlan {
 	if !isInitiativeKind(it.Kind) {
-		return time.Time{}, false
+		return quietPlan{}
 	}
-	return s.persona.QuietUntil(s.now(), s.location)
+	until, quiet := s.persona.QuietUntil(s.now(), s.location)
+	if !quiet {
+		return quietPlan{}
+	}
+	if it.ExpiresAt != nil && !until.Before(*it.ExpiresAt) {
+		return quietPlan{Cancel: true, Until: until}
+	}
+	return quietPlan{Defer: true, Until: until}
 }

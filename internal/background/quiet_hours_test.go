@@ -1,7 +1,7 @@
 // Юнит-тесты тихих часов (этап 22.4, §14.3): в тихом блоке расписания
 // инициативы (check_in/share/reply_later вне живого ответа) не исполняются, а
 // переносятся на конец блока; explore — внутреннее действие, тишиной не
-// блокируется.
+// блокируется; срок, истекающий внутри тишины, отменяет намерение сразу.
 package background
 
 import (
@@ -29,69 +29,88 @@ func quietTestScheduler(at time.Time, loc *time.Location, sched *character.Sched
 	}
 }
 
-func TestQuietDeferralInitiativeKinds(t *testing.T) {
+func moscowLoc(t *testing.T) *time.Location {
+	t.Helper()
 	loc, err := time.LoadLocation("Europe/Moscow")
 	if err != nil {
 		t.Fatalf("зона недоступна: %v", err)
 	}
+	return loc
+}
+
+func TestQuietDecisionInitiativeKinds(t *testing.T) {
+	loc := moscowLoc(t)
 	sched := quietSchedule()
 	night := time.Date(2026, 11, 3, 3, 0, 0, 0, loc)
 	s := quietTestScheduler(night, loc, &sched)
 
 	for _, kind := range []string{KindCheckIn, KindShare, KindReplyLater} {
-		until, deferred := s.quietDeferral(Intention{Kind: kind})
-		if !deferred {
-			t.Fatalf("%s ночью должна ждать конца тихого блока", kind)
+		decision := s.quietDecision(Intention{Kind: kind})
+		if !decision.Defer || decision.Cancel {
+			t.Fatalf("%s ночью должна ждать конца тихого блока: %+v", kind, decision)
 		}
-		if want := time.Date(2026, 11, 3, 8, 0, 0, 0, loc); !until.Equal(want) {
-			t.Fatalf("%s: notBefore = %v, хочу %v", kind, until, want)
+		if want := time.Date(2026, 11, 3, 8, 0, 0, 0, loc); !decision.Until.Equal(want) {
+			t.Fatalf("%s: notBefore = %v, хочу %v", kind, decision.Until, want)
 		}
 	}
 
 	// explore — внутреннее действие: тишина его не блокирует.
-	if _, deferred := s.quietDeferral(Intention{Kind: KindExplore}); deferred {
-		t.Fatal("explore не должен откладываться тихими часами")
+	if decision := s.quietDecision(Intention{Kind: KindExplore}); decision.Defer || decision.Cancel {
+		t.Fatalf("explore не должен откладываться тихими часами: %+v", decision)
 	}
 }
 
-func TestQuietDeferralOutsideQuiet(t *testing.T) {
-	loc, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		t.Fatalf("зона недоступна: %v", err)
-	}
+func TestQuietDecisionOutsideQuiet(t *testing.T) {
+	loc := moscowLoc(t)
 	sched := quietSchedule()
 	day := time.Date(2026, 11, 3, 12, 0, 0, 0, loc)
 	s := quietTestScheduler(day, loc, &sched)
-	if _, deferred := s.quietDeferral(Intention{Kind: KindCheckIn}); deferred {
-		t.Fatal("днём инициатива не откладывается")
+	if decision := s.quietDecision(Intention{Kind: KindCheckIn}); decision.Defer || decision.Cancel {
+		t.Fatalf("днём инициатива не откладывается: %+v", decision)
 	}
 }
 
-// TestQuietDeferralCrossesMidnight — тихий блок через полночь переносит
-// инициативу на следующее утро, а не на сегодняшнее 00:00 (уже прошло).
-func TestQuietDeferralCrossesMidnight(t *testing.T) {
-	loc, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		t.Fatalf("зона недоступна: %v", err)
-	}
+// TestQuietDecisionCrossesMidnight — тихий блок через полночь и следующий за
+// ним тихий блок — одна тишина: инициатива ждёт утра, а не стыка в 01:00.
+func TestQuietDecisionCrossesMidnight(t *testing.T) {
+	loc := moscowLoc(t)
 	sched := quietSchedule()
 	late := time.Date(2026, 11, 3, 23, 30, 0, 0, loc)
 	s := quietTestScheduler(late, loc, &sched)
-	until, deferred := s.quietDeferral(Intention{Kind: KindShare})
-	if !deferred {
+	decision := s.quietDecision(Intention{Kind: KindShare})
+	if !decision.Defer {
 		t.Fatal("поздно вечером инициатива ждёт конца тихого блока")
 	}
-	if want := time.Date(2026, 11, 4, 1, 0, 0, 0, loc); !until.Equal(want) {
-		t.Fatalf("notBefore = %v, хочу %v", until, want)
+	if want := time.Date(2026, 11, 4, 8, 0, 0, 0, loc); !decision.Until.Equal(want) {
+		t.Fatalf("notBefore = %v, хочу %v", decision.Until, want)
 	}
 }
 
-// TestQuietDeferralNoSchedule — без расписания прежнее поведение: инициативы
+// TestQuietDecisionExpiresInQuiet — срок истекает внутри тишины: намерение
+// отменяется сразу, а не «откладывается» в никуда (claim его не возьмёт).
+func TestQuietDecisionExpiresInQuiet(t *testing.T) {
+	loc := moscowLoc(t)
+	sched := quietSchedule()
+	night := time.Date(2026, 11, 3, 3, 0, 0, 0, loc)
+	s := quietTestScheduler(night, loc, &sched)
+	expires := time.Date(2026, 11, 3, 7, 0, 0, 0, loc)
+	decision := s.quietDecision(Intention{Kind: KindCheckIn, ExpiresAt: &expires})
+	if !decision.Cancel || decision.Defer {
+		t.Fatalf("истекающее в тишину намерение отменяется: %+v", decision)
+	}
+	// Срок после конца тишины — обычный перенос.
+	late := time.Date(2026, 11, 3, 20, 0, 0, 0, loc)
+	if got := s.quietDecision(Intention{Kind: KindCheckIn, ExpiresAt: &late}); !got.Defer {
+		t.Fatalf("срок после тишины — перенос, получено %+v", got)
+	}
+}
+
+// TestQuietDecisionNoSchedule — без расписания прежнее поведение: инициативы
 // не откладываются.
-func TestQuietDeferralNoSchedule(t *testing.T) {
+func TestQuietDecisionNoSchedule(t *testing.T) {
 	loc := time.UTC
 	s := quietTestScheduler(time.Date(2026, 11, 3, 3, 0, 0, 0, loc), loc, nil)
-	if _, deferred := s.quietDeferral(Intention{Kind: KindCheckIn}); deferred {
-		t.Fatal("без расписания тихих часов нет")
+	if decision := s.quietDecision(Intention{Kind: KindCheckIn}); decision.Defer || decision.Cancel {
+		t.Fatalf("без расписания тихих часов нет: %+v", decision)
 	}
 }

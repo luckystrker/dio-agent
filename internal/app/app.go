@@ -172,6 +172,7 @@ func (a *App) Start(ctx context.Context) error {
 		return a.stopFailed(err)
 	}
 	a.persona = persona
+	a.logSchedule(persona)
 
 	// --- память, журнал, бюджет ---
 	// Адаптеры журнала/WAL/чекпоинтов живут на runCtx, а не на пришедшем ctx:
@@ -228,6 +229,7 @@ func (a *App) Start(ctx context.Context) error {
 		Memory:          toolset,
 		MemoryPrefetch:  memoryPrefetch(a.opts.Config),
 		Timezone:        a.opts.Config.Timezone,
+		Now:             a.opts.Now,
 		Logger:          a.logger,
 	}
 	a.runner = runner
@@ -505,6 +507,28 @@ func (a *App) fatalFail(err error) {
 	}
 	a.logger.Printf("ФАТАЛЬНО: %v", err)
 	a.cancelRun()
+}
+
+// logSchedule — стартовая наблюдаемость расписания дня (этап 22): расписание
+// не версионируется в БД, поэтому другого способа проверить, что владелец
+// применил именно свой файл и в каком поясе, нет.
+func (a *App) logSchedule(persona character.Persona) {
+	if persona.Schedule == nil {
+		a.logger.Printf("расписание дня: нет (прежнее поведение)")
+		return
+	}
+	quiet := 0
+	for _, block := range *persona.Schedule {
+		if block.Quiet {
+			quiet++
+		}
+	}
+	zone := "по умолчанию"
+	if tz := a.opts.Config.Timezone; tz != nil {
+		zone = tz.String()
+	}
+	a.logger.Printf("расписание дня: блоков %d, тихих %d, пояс %s",
+		len(*persona.Schedule), quiet, zone)
 }
 
 // loadPersona — активная персона; config/persona.md при наличии синхронизируется

@@ -12,6 +12,7 @@ package character
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +35,11 @@ var scheduleRangePattern = regexp.MustCompile(`^(\d{1,2}):(\d{2})\s*[–—-]\s*
 
 // scheduleFieldPattern — «arousal 0.3» / «arousal: 0.3».
 var scheduleFieldPattern = regexp.MustCompile(`^(arousal|socialEnergy)\s*:?\s*(\S+)$`)
+
+// scheduleActivityLimit — потолок строки «чем занят»: её видит модель в панели
+// состояния, туда же её и режет sanitizePanelValue (200 рун) — лучше сказать
+// об этом при старте, чем молча обрезать в панели.
+const scheduleActivityLimit = 200
 
 // scheduleQuietToken — пометка тихого блока.
 const scheduleQuietToken = "тихо"
@@ -88,8 +94,28 @@ func (s Schedule) BlockAt(at time.Time, loc *time.Location) *ScheduleBlock {
 
 // QuietUntil — если в момент at действует тихий блок, возвращает момент, когда
 // тишина кончится (абсолютное время, уже в поясе loc). Второе значение —
-// «сейчас тихо».
+// «сейчас тихо». Подряд идущие тихие блоки (23:00–01:00 и 01:00–08:00) — одна
+// тишина: инициатива ждёт конца последнего, а не просыпается в стык.
 func (s Schedule) QuietUntil(at time.Time, loc *time.Location) (time.Time, bool) {
+	end, quiet := s.quietBlockEnd(at, loc)
+	if !quiet {
+		return time.Time{}, false
+	}
+	for i := 0; i < minutesPerDay; i++ {
+		next, more := s.quietBlockEnd(end, loc)
+		if !more || !next.After(end) {
+			break
+		}
+		end = next
+	}
+	return end, true
+}
+
+// quietBlockEnd — конец тихого блока, действующего в at. У блока через
+// полночь (23:00–01:00) конец сегодня, если at уже после полуночи (00:xx), и
+// завтра, если at ещё вечером (23:xx): иначе инициатива в 00:30 ждала бы
+// лишние сутки.
+func (s Schedule) quietBlockEnd(at time.Time, loc *time.Location) (time.Time, bool) {
 	block := s.BlockAt(at, loc)
 	if block == nil || !block.Quiet {
 		return time.Time{}, false
@@ -97,12 +123,12 @@ func (s Schedule) QuietUntil(at time.Time, loc *time.Location) (time.Time, bool)
 	zone := locationOrDefault(loc)
 	local := at.In(zone)
 	hour, minute := block.EndMinute/60, block.EndMinute%60
-	// Конец блока через полночь — на следующий день. time.Date нормализует
-	// hour=24 в 00:00 следующего дня и корректно обходит переходы пояса.
 	day := local.Day()
-	if block.Wraps() {
+	if block.Wraps() && minuteOfDay(at, loc) >= block.StartMinute {
 		day++
 	}
+	// time.Date нормализует hour=24 в 00:00 следующего дня и корректно
+	// обходит переходы пояса.
 	return time.Date(local.Year(), local.Month(), day, hour, minute, 0, 0, zone), true
 }
 
@@ -193,10 +219,16 @@ func parsePersonaSchedule(text string) (*Schedule, error) {
 		return nil, fmt.Errorf(
 			"секция «%s» пуста — нужен хотя бы один блок расписания или удалите секцию", scheduleSection)
 	}
-	if start, end, ok := firstUncovered(cover); !ok {
+	if start, end, line, ok := firstUncovered(cover); !ok {
+		where := fmt.Sprintf("секция «%s»", scheduleSection)
+		if line != 0 {
+			// Минута перед дырой покрыта блоком строки line: обычно ошибка
+			// именно там (забыли продлить блок), и человеку проще посмотреть.
+			where = fmt.Sprintf("секция «%s», строка %d", scheduleSection, line)
+		}
 		return nil, fmt.Errorf(
-			"секция «%s»: дыра в расписании %s–%s — блоки должны покрывать сутки целиком",
-			scheduleSection, formatMinute(start), formatMinute(end))
+			"%s: дыра в расписании %s–%s — блоки должны покрывать сутки целиком",
+			where, formatMinute(start), formatMinute(end))
 	}
 	return &schedule, nil
 }
@@ -231,6 +263,9 @@ func parseScheduleBlock(raw string, line int) (ScheduleBlock, error) {
 		case field == "":
 			// хвостовой разделитель — не ошибка
 		case strings.EqualFold(field, scheduleQuietToken):
+			if block.Quiet {
+				return ScheduleBlock{}, fmt.Errorf("%s: два «%s» — пометка тихого блока одна", where, scheduleQuietToken)
+			}
 			block.Quiet = true
 		default:
 			match := scheduleFieldPattern.FindStringSubmatch(field)
@@ -240,12 +275,17 @@ func parseScheduleBlock(raw string, line int) (ScheduleBlock, error) {
 						"%s: две части «чем занят» («%s» и «%s») — в блоке ровно одна строка занятия",
 						where, block.Activity, field)
 				}
+				if runes := []rune(field); len(runes) > scheduleActivityLimit {
+					return ScheduleBlock{}, fmt.Errorf(
+						"%s: «чем занят» длиннее %d символов (%d) — это одна живая фраза, а не абзац",
+						where, scheduleActivityLimit, len(runes))
+				}
 				block.Activity, hasActivity = field, true
 				continue
 			}
 			name, value := match[1], match[2]
 			parsed, perr := strconv.ParseFloat(strings.ReplaceAll(value, ",", "."), 64)
-			if perr != nil || parsed < 0 || parsed > 1 {
+			if perr != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 || parsed > 1 {
 				return ScheduleBlock{}, fmt.Errorf(
 					"%s: %s должен быть числом от 0 до 1, получено: %s", where, name, value)
 			}
@@ -308,9 +348,10 @@ func parseScheduleRange(raw, where, block string) (int, int, error) {
 	return start, end, nil
 }
 
-// firstUncovered — первый непокрытый промежуток суток [start,end) в минутах;
+// firstUncovered — первый непокрытый промежуток суток [start,end) в минутах и
+// строка блока, покрывающего минуту перед дырой (0 — перед дырой ничего нет);
 // ok=true — покрыто всё.
-func firstUncovered(cover [minutesPerDay]int) (int, int, bool) {
+func firstUncovered(cover [minutesPerDay]int) (int, int, int, bool) {
 	for m := 0; m < minutesPerDay; m++ {
 		if cover[m] != 0 {
 			continue
@@ -319,9 +360,10 @@ func firstUncovered(cover [minutesPerDay]int) (int, int, bool) {
 		for end < minutesPerDay && cover[end] == 0 {
 			end++
 		}
-		return m, end, false
+		line := cover[(m-1+minutesPerDay)%minutesPerDay]
+		return m, end, line, false
 	}
-	return 0, 0, true
+	return 0, 0, 0, true
 }
 
 // formatMinute — «07:05» (1440 — «24:00»).
@@ -330,8 +372,9 @@ func formatMinute(minute int) string {
 }
 
 // scheduleSectionLines — строки секции «Расписание» ИСХОДНОГО файла с номерами:
-// HTML-комментарии пропускаются, но нумерация не сбивается. Первое вхождение
-// заголовка выигрывает (как splitSections), секция кончается на следующем «## ».
+// HTML-комментарии вырезаются из строк, но нумерация не сбивается. Первое
+// вхождение заголовка выигрывает (как splitSections), секция кончается на
+// следующем «## ».
 func scheduleSectionLines(text string) ([]numberedLine, bool) {
 	var (
 		lines     []numberedLine
@@ -340,19 +383,8 @@ func scheduleSectionLines(text string) ([]numberedLine, bool) {
 		inComment bool
 	)
 	for i, line := range strings.Split(text, "\n") {
+		line = stripHTMLComments(&line, &inComment)
 		trimmed := strings.TrimSpace(line)
-		if inComment {
-			if strings.Contains(line, "-->") {
-				inComment = false
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "<!--") {
-			if !strings.Contains(trimmed, "-->") {
-				inComment = true
-			}
-			continue
-		}
 		if strings.HasPrefix(trimmed, "## ") {
 			header := strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
 			switch {
@@ -368,4 +400,40 @@ func scheduleSectionLines(text string) ([]numberedLine, bool) {
 		}
 	}
 	return lines, found
+}
+
+// stripHTMLComments вырезает HTML-комментарии из строки, помня незакрытый
+// комментарий между строками: подсказки редактору не должны попадать ни в
+// «чем занят», ни в панель состояния. Строка без комментариев возвращается
+// как есть; нумерация строк файла при этом не меняется.
+func stripHTMLComments(line *string, inComment *bool) string {
+	out := ""
+	rest := *line
+	for {
+		if *inComment {
+			end := strings.Index(rest, "-->")
+			if end < 0 {
+				*line = out
+				return out
+			}
+			rest = rest[end+3:]
+			*inComment = false
+			continue
+		}
+		start := strings.Index(rest, "<!--")
+		if start < 0 {
+			out += rest
+			break
+		}
+		out += rest[:start]
+		tail := rest[start+4:]
+		if end := strings.Index(tail, "-->"); end >= 0 {
+			rest = tail[end+3:]
+			continue
+		}
+		*inComment = true
+		rest = ""
+	}
+	*line = out
+	return out
 }
