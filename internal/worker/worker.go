@@ -421,9 +421,11 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 		w.logger.Printf("ход %d пропущен терминально: %s", turn.ID, out.SkipReason)
 	case out.AlreadyApplied:
 		w.logger.Printf("ход %d уже применён — повторный прогон ничего не менял", turn.ID)
-	default:
-		w.logger.Printf("ход %d выполнен: recovered=%v памяти=%d доставки=%d",
-			turn.ID, out.Recovered, len(out.Apply.MemoryIDs), len(out.Apply.OutboxIDs))
+		// Успешный ход здесь не логируется (26.1): полную строку «ход N
+		// выполнен: decision=… recovered=…» пишет character.Runner в turn.go.
+		// Своей информации у worker нет — короткая копия была вторым шумом
+		// на каждый ход. Если когда-нибудь появится путь применения без
+		// Runner, его итог должен лечь в эту же строку, а не рядом.
 	}
 }
 
