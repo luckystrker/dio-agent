@@ -16,9 +16,10 @@ func TurnResultJSONSchema() map[string]any {
 		"properties": map[string]any{
 			"decision": map[string]any{"type": "string", "enum": []string{DecisionAnswer, DecisionReact, DecisionIgnore, DecisionDefer}},
 			"messages": map[string]any{
-				"type":     "array",
-				"items":    map[string]any{"type": "string", "minLength": 1, "maxLength": maxMessageLength},
-				"maxItems": maxMessages,
+				"type":        "array",
+				"items":       map[string]any{"type": "string", "minLength": 1, "maxLength": maxMessageLength},
+				"maxItems":    maxMessages,
+				"description": "decision=answer: 1–4 сообщения; пустой массив допустим только если заполнен sticker или reaction.",
 			},
 			"notes": map[string]any{
 				"type":     "array",

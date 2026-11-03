@@ -6,7 +6,8 @@
 // интерфейса спеки здесь закрытые типы с ограничениями размеров.
 //
 // Правила результата (§11.2): ignore/defer без сообщений; react с допустимой
-// реакцией; speak/answer 1–4 сообщения; defer требует reply_later с notBefore
+// реакцией; answer 1–4 сообщения или стикер/реакция без текста; defer требует
+// reply_later с notBefore
 // (поле defer_hours — относительное время, намерение создаёт runtime).
 //
 // Пределы строк перенесены из TS (turn-result.ts, чек-лист 1.10): сообщение
@@ -387,8 +388,11 @@ func (r TurnResult) Validate() error {
 	// --- правила действия (§11.2) ---
 	switch r.Decision {
 	case DecisionAnswer:
-		if len(r.Messages) == 0 {
-			return fmt.Errorf("turnresult: answer требует от 1 до %d сообщений", maxMessages)
+		// Ответ без текста допустим, если ход всё равно что-то доставляет:
+		// стикер или реакцию (живой смоук 2026-11-03: модель ответила на гифку
+		// стикером+реакцией с пустым messages, ход целиком ушёл в скип).
+		if len(r.Messages) == 0 && r.Sticker == "" && r.Reaction == "" {
+			return fmt.Errorf("turnresult: answer требует от 1 до %d сообщений (или стикер/реакцию без текста)", maxMessages)
 		}
 	case DecisionReact:
 		if r.Reaction == "" {

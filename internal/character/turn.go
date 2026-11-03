@@ -380,7 +380,7 @@ func truncateRawOutput(text string) string {
 func repairHint(perr error) string {
 	hint := fmt.Sprintf("Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr)
 	if strings.Contains(perr.Error(), "answer требует") {
-		hint += " decision=answer требует непустой messages с текстом; если сказать нечего — decision=react с эмодзи или ignore."
+		hint += " decision=answer требует 1–4 сообщения; если текста нет — добавь sticker или reaction, иначе decision=react с эмодзи или ignore."
 	}
 	return hint
 }
@@ -513,6 +513,10 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	result, body, perr := parseReply(reply, bctx.History)
 	if perr != nil {
 		repairs = 1
+		// Первый невалидный ответ — в журнал даже при удачном repair: иначе
+		// ход выглядит здоровым, а причина лишнего вызова модели исчезает.
+		r.logf("ход %d: первый ответ не прошёл валидацию (%v) — repair; тело (%d рун): %s",
+			in.TurnID, perr, utf8.RuneCountInString(body), truncateRawOutput(body))
 		fixed, ferr := reply.Ask(ctx, repairHint(perr))
 		if ferr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr

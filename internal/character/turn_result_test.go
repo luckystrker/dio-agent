@@ -173,6 +173,25 @@ func TestWantForcedTool(t *testing.T) {
 	}
 }
 
+// TestTurnResultAnswerMediaOnly — answer без текста допустим, если доставляет
+// стикер или реакцию (2026-11-03: ответ стикером на гифку уходил в скип).
+func TestTurnResultAnswerMediaOnly(t *testing.T) {
+	cases := []string{
+		`{"decision":"answer","messages":[],"sticker":"#4"}`,
+		`{"decision":"answer","messages":[],"reaction":"🤣"}`,
+		`{"decision":"answer","messages":[],"sticker":"#4","reaction":"🤣"}`,
+	}
+	for _, raw := range cases {
+		r, err := ParseTurnResult([]byte(raw))
+		if err != nil {
+			t.Fatalf("answer без текста, но со стикером/реакцией отвергнут: %v (%s)", err, raw)
+		}
+		if len(r.Messages) != 0 || (r.Sticker == "" && r.Reaction == "") {
+			t.Fatalf("поля прочитаны неверно: %+v", r)
+		}
+	}
+}
+
 // TestTurnResultAnswerWithReaction — необязательная reaction при answer
 // допустима (§11.2: «speak содержит 1–4 сообщения; необязательная reaction
 // разрешена»); правило «только при react» из TS-реализации противоречило
