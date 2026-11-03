@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -41,6 +43,42 @@ func TestClassifySendError(t *testing.T) {
 				t.Fatalf("пауза = %v, хочу %v", got.wait, tc.wantWait)
 			}
 		})
+	}
+}
+
+// TestClassifySendErrorNeverStarted — C2: отказ до записи запроса (DNS, dial,
+// connection refused, отмена до отправки) — подтверждённый временный отказ,
+// а не unknown. Раньше такой сбой навсегда хоронил ответ и отменял хвост хода.
+func TestClassifySendErrorNeverStarted(t *testing.T) {
+	retryBase := 2 * time.Second
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"dial", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connect: network is unreachable")}},
+		{"dns", &net.DNSError{Err: "no such host", Name: "api.telegram.org"}},
+		{"connection refused", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}},
+		{"отмена до записи", &requestError{err: context.Canceled}},
+		{"отмена без трассировки", context.Canceled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifySendError(tc.err, 1, 5, retryBase)
+			if got.kind != outcomeRetryWait || got.wait != retryBase {
+				t.Fatalf("исход = %+v, хочу retry_wait с паузой %v", got, retryBase)
+			}
+		})
+	}
+
+	// После записи запроса обрыв/таймаут по-прежнему unknown (возможен дубль).
+	got := classifySendError(&requestError{err: context.DeadlineExceeded, wroteRequest: true}, 1, 5, retryBase)
+	if got.kind != outcomeUnknown {
+		t.Fatalf("таймаут после записи = %d, хочу unknown", got.kind)
+	}
+	// Лимит попыток для отказов до отправки тоже конечен.
+	got = classifySendError(&net.DNSError{Err: "no such host"}, 5, 5, retryBase)
+	if got.kind != outcomeFailed {
+		t.Fatalf("DNS на пределе попыток = %d, хочу failed", got.kind)
 	}
 }
 

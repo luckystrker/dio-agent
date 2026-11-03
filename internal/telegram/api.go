@@ -15,7 +15,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -98,6 +100,17 @@ type redactedError struct {
 
 func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.err }
+
+// requestError — ошибка транспорта без ответа Bot API с признаком, было ли
+// тело запроса записано в соединение. До записи запрос точно не отправлен —
+// это временный отказ (retry_wait), после записи исход неизвестен (unknown).
+type requestError struct {
+	err          error
+	wroteRequest bool
+}
+
+func (e *requestError) Error() string { return e.err.Error() }
+func (e *requestError) Unwrap() error { return e.err }
 
 // redact прячет токен в тексте ошибки (URL запроса вида /bot<token>/… попадает
 // в url.Error, а он — в журнал; инцидент 2026-10-31: токен лежал в journald
@@ -224,11 +237,23 @@ func (c *Client) call(ctx context.Context, method string, payload any, maxBody i
 	}
 	req.Header.Set("content-type", "application/json")
 
+	// httptrace фиксирует, ушёл ли запрос в сеть: dial/DNS/отказ соединения
+	// до записи тела — это заведомо несостоявшаяся отправка (C2), её можно
+	// повторить; обрыв после записи — unknown.
+	var wroteRequest atomic.Bool
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { wroteRequest.Store(true) },
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
 	resp, err := c.http.Do(req)
 	if err != nil {
-		// Ответа нет: исход запроса неизвестен — ошибка уходит как есть,
-		// политика доставки классифицирует её как unknown (§13.2).
-		return nil, fmt.Errorf("%s: %w", method, c.redact(err))
+		// Ответа нет: исход запроса может быть неизвестен — ошибка уходит как
+		// есть (с признаком записи), политика доставки классифицирует её.
+		return nil, fmt.Errorf("%s: %w", method, c.redact(&requestError{
+			err:          err,
+			wroteRequest: wroteRequest.Load(),
+		}))
 	}
 	defer resp.Body.Close() //nolint:errcheck // чтение тела ниже, закрытие не влияет на результат
 

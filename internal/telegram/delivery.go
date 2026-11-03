@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"runtime/debug"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -426,11 +428,21 @@ type sendOutcome struct {
 //     ограничена maxRetryAfterWait, а попытки — тем же потолком, что у 5xx (17.6);
 //   - 5xx — повтор с экспоненциальной паузой до лимита попыток, дальше failed;
 //   - прочие подтверждённые ошибки API (4xx) — постоянные: failed;
-//   - всё, что не получило ответа (timeout, обрыв соединения, отмена) —
-//     исход неизвестен: unknown, без автоповтора.
+//   - отказ до записи запроса (DNS, dial, connection refused, отмена до
+//     отправки) — подтверждённый временный отказ: retry_wait (C2);
+//   - обрыв/таймаут после записи запроса — unknown без автоповтора.
 func classifySendError(err error, attempts, maxAttempts int, retryBase time.Duration) sendOutcome {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
+		if sendNeverStarted(err) {
+			if attempts >= maxAttempts {
+				return sendOutcome{kind: outcomeFailed}
+			}
+			if attempts < 1 {
+				attempts = 1
+			}
+			return sendOutcome{kind: outcomeRetryWait, wait: retryBase * (1 << (attempts - 1))}
+		}
 		return sendOutcome{kind: outcomeUnknown}
 	}
 	if apiErr.HTTPStatus == 429 {
@@ -455,6 +467,32 @@ func classifySendError(err error, attempts, maxAttempts int, retryBase time.Dura
 		return sendOutcome{kind: outcomeRetryWait, wait: retryBase * (1 << (attempts - 1))}
 	}
 	return sendOutcome{kind: outcomeFailed}
+}
+
+// sendNeverStarted — ошибка доказывает, что запрос не был записан в сеть:
+// DNS, установление соединения, отказ в соединении, отмена до записи.
+// Только такие ошибки можно безопасно повторять: ответ пользователю заведомо
+// не ушёл (C2).
+func sendNeverStarted(err error) bool {
+	var reqErr *requestError
+	if errors.As(err, &reqErr) {
+		return !reqErr.wroteRequest
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	// Отмена без трассировки (например, тестовый транспорт): запрос не
+	// доведён до отправки — повтор безопаснее потери ответа.
+	return errors.Is(err, context.Canceled)
 }
 
 // chatHasNewPendingEvents — новые события чата ждут обработки (§13.3:
