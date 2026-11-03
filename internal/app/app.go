@@ -273,6 +273,11 @@ func (a *App) Start(ctx context.Context) error {
 
 	if api != nil {
 		a.poller = telegram.NewTelegramPoller(pool, api, a.buffers.Add, a.logger, a.opts.Poll)
+		if bot, berr := api.GetMe(ctx); berr != nil {
+			a.logger.Printf("getMe не удался: reply/mention в группах считаются по прежним правилам: %v", berr)
+		} else {
+			a.poller.SetBotIdentity(bot)
+		}
 		a.delivery = telegram.NewDeliveryLoop(pool, telegram.NewOutboxRepo(pool), api, a.logger, a.opts.Delivery)
 	} else {
 		a.logger.Printf("telegram не настроен (TELEGRAM_BOT_TOKEN/TELEGRAM_DRY_RUN): polling и доставка выключены")

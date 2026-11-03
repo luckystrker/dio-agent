@@ -303,3 +303,22 @@ func TestClientGetUpdatesLargeBatchBeyondMegabyte(t *testing.T) {
 		t.Fatalf("пачка прочитана не целиком: %d update'ов", len(got))
 	}
 }
+
+// TestClientGetMe — M8: идентичность бота читается одним вызовом getMe.
+func TestClientGetMe(t *testing.T) {
+	var gotPath string
+	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"id":900,"username":"dio_bot","is_bot":true}}`))
+	})
+	bot, err := client.GetMe(context.Background())
+	if err != nil {
+		t.Fatalf("getMe: %v", err)
+	}
+	if gotPath != "/botTESTTOKEN/getMe" {
+		t.Fatalf("путь getMe = %q", gotPath)
+	}
+	if bot.ID != 900 || bot.Username != "dio_bot" {
+		t.Fatalf("идентичность бота = %+v", bot)
+	}
+}

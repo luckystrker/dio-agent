@@ -56,12 +56,19 @@ type NormalizedEvent struct {
 	Date int64
 	// Supported=false — update не поддерживается: журнал без обработки.
 	Supported bool
+	// BotKnown — идентичность бота известна (getMe удался): только тогда
+	// ReplyToBot/MentionBot имеют смысл.
+	BotKnown   bool
+	ReplyToBot bool
+	MentionBot bool
 }
 
 // telegramEntity, telegramMessage, telegramUpdateShape — узкое представление
 // нужных полей raw update; всё остальное остаётся в raw_update (jsonb).
 type telegramEntity struct {
-	Type string `json:"type"`
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
 }
 
 type telegramUser struct {
@@ -115,6 +122,14 @@ type telegramUpdateShape struct {
 // NormalizeUpdate разбирает raw update. Ошибка — только неразборчивый
 // update (не объект или без целочисленного update_id).
 func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
+	return NormalizeUpdateWithBot(raw, BotIdentity{})
+}
+
+// NormalizeUpdateWithBot — NormalizeUpdate с идентичностью бота: reply
+// засчитывается только на сообщение бота, mention — только на его username
+// (M8). Без идентичности флаги остаются ложными, prefilter работает по
+// прежним правилам (dry-run и тесты без getMe).
+func NormalizeUpdateWithBot(raw json.RawMessage, bot BotIdentity) (NormalizedEvent, error) {
 	var shape telegramUpdateShape
 	if err := json.Unmarshal(raw, &shape); err != nil {
 		return NormalizedEvent{}, fmt.Errorf("%w: update не разобран: %v", ErrUnusableUpdate, err)
@@ -139,6 +154,7 @@ func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 	if message.Chat.Type == string(ChatPrivate) {
 		chatType = ChatPrivate
 	}
+	known := bot.ID != 0 || bot.Username != ""
 	return NormalizedEvent{
 		TelegramUpdateID: shape.UpdateID,
 		ChatID:           message.Chat.ID,
@@ -149,7 +165,35 @@ func NormalizeUpdate(raw json.RawMessage) (NormalizedEvent, error) {
 		Text:             eventText(message),
 		Date:             message.Date,
 		Supported:        true,
+		BotKnown:         known,
+		ReplyToBot:       known && isReplyToBot(message, bot),
+		MentionBot:       known && hasBotMention(message, bot),
 	}, nil
+}
+
+// isReplyToBot — reply именно на сообщение этого бота (не на любое в чате).
+func isReplyToBot(message *telegramMessage, bot BotIdentity) bool {
+	if bot.ID == 0 || message.ReplyToMessage == nil || message.ReplyToMessage.From == nil {
+		return false
+	}
+	return message.ReplyToMessage.From.ID == bot.ID
+}
+
+// hasBotMention — в сообщении есть entity mention и текст содержит
+// @username бота. Entity не даёт ложного срабатывания на простое упоминание
+// имени в тексте; сравнение регистронезависимое, как у Telegram.
+func hasBotMention(message *telegramMessage, bot BotIdentity) bool {
+	if bot.Username == "" || message.Text == nil {
+		return false
+	}
+	needle := "@" + strings.ToLower(bot.Username)
+	lower := strings.ToLower(*message.Text)
+	for _, entity := range message.Entities {
+		if entity.Type == "mention" && strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractMessage(shape *telegramUpdateShape) (*telegramMessage, bool) {

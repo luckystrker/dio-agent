@@ -122,9 +122,17 @@ func (c *Client) redact(err error) error {
 	return &redactedError{msg: strings.ReplaceAll(err.Error(), c.token, "[токен]"), err: err}
 }
 
+// BotIdentity — кто такой этот бот (getMe): нужен, чтобы в группе reply на
+// чужое сообщение и @чужой_ник не считались прямым обращением (M8).
+type BotIdentity struct {
+	ID       int64
+	Username string
+}
+
 // API — интерфейс Telegram-слоя для poller и delivery (подменяется в тестах).
 type API interface {
 	GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error)
+	GetMe(ctx context.Context) (BotIdentity, error)
 	SendMessage(ctx context.Context, chatID int64, text string) (int64, error)
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 	SetMessageReaction(ctx context.Context, chatID int64, messageID int64, emoji string) error
@@ -163,6 +171,25 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) (
 		updates = append(updates, Update{UpdateID: id.UpdateID, Raw: item})
 	}
 	return updates, nil
+}
+
+// GetMe — идентичность бота (id + username) для распознавания обращений в
+// группе (M8).
+func (c *Client) GetMe(ctx context.Context) (BotIdentity, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.actionTimeout)
+	defer cancel()
+	raw, err := c.call(ctx, "getMe", map[string]any{}, maxSmallBody)
+	if err != nil {
+		return BotIdentity{}, err
+	}
+	var result struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || result.ID == 0 {
+		return BotIdentity{}, &APIError{Method: "getMe", HTTPStatus: 200, Description: "ответ без id бота"}
+	}
+	return BotIdentity{ID: result.ID, Username: result.Username}, nil
 }
 
 // SendMessage отправляет текст и возвращает Telegram message_id.

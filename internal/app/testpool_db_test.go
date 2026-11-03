@@ -99,6 +99,10 @@ func (s *stubAPI) GetUpdates(ctx context.Context, offset int64, timeoutSec int) 
 	return out, nil
 }
 
+func (s *stubAPI) GetMe(ctx context.Context) (telegram.BotIdentity, error) {
+	return telegram.BotIdentity{}, nil
+}
+
 func (s *stubAPI) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
 	s.mu.Lock()
 	hook := s.onSendMessage

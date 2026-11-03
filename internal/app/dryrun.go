@@ -21,6 +21,10 @@ func (d *dryRunAPI) GetUpdates(ctx context.Context, offset int64, timeoutSec int
 	return nil, nil
 }
 
+func (d *dryRunAPI) GetMe(ctx context.Context) (telegram.BotIdentity, error) {
+	return telegram.BotIdentity{}, nil
+}
+
 func (d *dryRunAPI) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
 	d.logger.Printf("dry-run: sendMessage chat=%d: %s", chatID, text)
 	return 0, nil

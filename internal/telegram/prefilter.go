@@ -14,8 +14,10 @@ const (
 )
 
 // DecideIngestStatus решает судьбу события до модели (§6.3):
-// личка и reply/mention/command в группе — прямое обращение (pending);
-// пассивный шум группы и правки — журнал без обязательного LLM.
+// личка и reply/mention боту/command в группе — прямое обращение (pending);
+// пассивный шум группы и правки — журнал без обязательного LLM. Reply на
+// чужое сообщение и @чужой_ник в группе — не обращение (M8); без известной
+// идентичности бота (dry-run, старые тесты) действуют прежние правила.
 func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 	if !event.Supported {
 		return StatusJournalOnly
@@ -24,9 +26,16 @@ func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 		return StatusPending
 	}
 	switch event.Kind {
-	case KindReply, KindMention, KindCommand:
+	case KindCommand:
 		return StatusPending
-	default:
-		return StatusJournalOnly
+	case KindReply:
+		if !event.BotKnown || event.ReplyToBot {
+			return StatusPending
+		}
+	case KindMention:
+		if !event.BotKnown || event.MentionBot {
+			return StatusPending
+		}
 	}
+	return StatusJournalOnly
 }

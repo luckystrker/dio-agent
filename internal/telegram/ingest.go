@@ -37,7 +37,13 @@ type IngestResult struct {
 // в той же транзакции — следующий poll offset. Ошибка БД откатывает всё:
 // offset не двигается, пачка перепрочитается при retry.
 func IngestUpdate(ctx context.Context, pool *runtime.Pool, raw json.RawMessage) (IngestResult, error) {
-	event, err := NormalizeUpdate(raw)
+	return IngestUpdateWithBot(ctx, pool, raw, BotIdentity{})
+}
+
+// IngestUpdateWithBot — IngestUpdate с идентичностью бота: prefilter отличает
+// reply/mention боту от переписки людей в группе (M8).
+func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMessage, bot BotIdentity) (IngestResult, error) {
+	event, err := NormalizeUpdateWithBot(raw, bot)
 	if err != nil {
 		return IngestResult{}, err
 	}

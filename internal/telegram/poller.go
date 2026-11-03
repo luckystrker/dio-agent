@@ -57,6 +57,9 @@ type TelegramPoller struct {
 	onPending OnPendingEvent
 	logger    *log.Logger
 	opts      PollerOptions
+	// bot — идентичность бота (getMe): reply/mention в группе засчитываются
+	// только боту (M8). Нулевая — прежние правила.
+	bot BotIdentity
 }
 
 // NewTelegramPoller строит poller. pool — пул PostgreSQL; onPending —
@@ -73,6 +76,9 @@ func NewTelegramPoller(pool *runtime.Pool, api API, onPending OnPendingEvent, lo
 		opts:      opts.withDefaults(),
 	}
 }
+
+// SetBotIdentity задаёт идентичность бота до запуска Run.
+func (p *TelegramPoller) SetBotIdentity(bot BotIdentity) { p.bot = bot }
 
 // Run крутит long polling до отмены контекста (§5.3: polling запускается на
 // старте, останавливается при shutdown). Остановка ошибкой не считается,
@@ -122,7 +128,7 @@ func (p *TelegramPoller) Run(ctx context.Context) error {
 		// Неисправимые данные update'а повтором не лечатся — скип (16.4).
 		failed := false
 		for _, update := range updates {
-			result, err := IngestUpdate(ctx, p.pool, update.Raw)
+			result, err := IngestUpdateWithBot(ctx, p.pool, update.Raw, p.bot)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
