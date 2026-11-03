@@ -110,10 +110,10 @@ TELEGRAM_BOT_TOKEN=...
 
 # Векторизатор памяти (§10.4), OpenAI-совместимый endpoint; три переменные
 # вместе или ни одной. Не настроен — семантический поиск выключен,
-# full-text остаётся.
-# EMBEDDING_ENDPOINT=https://api.openai.com/v1
-# EMBEDDING_API_KEY=...
-# EMBEDDING_MODEL=text-embedding-3-small
+# full-text остаётся. Боевая настройка — neuraldeep, bge-m3; ключ — плейсхолдер.
+# EMBEDDING_ENDPOINT=https://api.neuraldeep.ru/v1
+# EMBEDDING_API_KEY=__PLACEHOLDER__
+# EMBEDDING_MODEL=bge-m3
 ```
 
 Валидация конфигурации строгая и происходит при старте до запуска циклов:
@@ -240,6 +240,10 @@ journalctl -u dio-agent -f     # проконтролировать старт (
   одна строка `фон: задача=… kind=… decision=… outcome=… latency_ms=…
   llm_calls=… tokens=… budget=… mood_reason=…`. Полный приватный промпт
   не логируется.
+- Память (§10.4, этап 21): `ход N: память — инструменты вкл/выкл (причина:
+  history_trimmed|card_incomplete|rollback|none), карточка: записей=… fits=…,
+  семантика: …` — видно, почему ход пошёл в память инструментами. При старте:
+  `семантика памяти: включена (модель …)` или `выключена (EMBEDDING_* не заданы)`.
 - Терминальные пропуски: `ход N пропущен терминально: …` — модель не
   настроена, дневной бюджет исчерпан, лимит попыток.
 - Очередь: глубина и возраст старейшего хода — в heartbeat; три такта
