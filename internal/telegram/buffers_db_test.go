@@ -97,6 +97,43 @@ func TestBufferRecoverStalePending(t *testing.T) {
 	}
 }
 
+// TestBufferRecoverStalePendingOlderThan — M5: периодический recovery живого
+// процесса не забирает свежие pending (они ещё в буфере) и закрывает только
+// зависшие старше порога.
+func TestBufferRecoverStalePendingOlderThan(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	old := mustIngest(t, pool, rawMessageOf(810, 42, "зависло давно"))
+	fresh := mustIngest(t, pool, rawMessageOf(811, 43, "ещё печатают"))
+	if _, err := pool.Exec(ctx,
+		`UPDATE social_events SET occurred_at = now() - interval '2 minutes' WHERE id = $1`, old.EventID); err != nil {
+		t.Fatalf("возраст события не выставлен: %v", err)
+	}
+
+	m := NewChatBufferManager(BufferDeps{Pool: pool})
+	chats, events, err := m.RecoverStalePendingOlderThan(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if chats != 1 || events != 1 {
+		t.Fatalf("recovery: чатов %d событий %d, хочу 1/1", chats, events)
+	}
+	var oldStatus, freshStatus string
+	if err := pool.QueryRow(ctx, `SELECT status FROM social_events WHERE id = $1`, old.EventID).Scan(&oldStatus); err != nil {
+		t.Fatalf("старое событие не читается: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT status FROM social_events WHERE id = $1`, fresh.EventID).Scan(&freshStatus); err != nil {
+		t.Fatalf("свежее событие не читается: %v", err)
+	}
+	if oldStatus != "buffered" {
+		t.Fatalf("зависшее событие не восстановлено: %s", oldStatus)
+	}
+	if freshStatus != "pending" {
+		t.Fatalf("свежее событие забрано раньше таймера буфера: %s", freshStatus)
+	}
+}
+
 func TestBufferFlushAllPersistsTurns(t *testing.T) {
 	// Graceful shutdown: буферы закрываются немедленно, порции не теряются (§5.3).
 	pool := newTestPool(t)

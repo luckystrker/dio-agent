@@ -35,6 +35,26 @@ func TestTransientModelError(t *testing.T) {
 	}
 }
 
+// TestWorkerRecoverPendingDue — M5: периодический recovery pending вызывается
+// не чаще RecoveryInterval и не роняет worker ошибкой.
+func TestWorkerRecoverPendingDue(t *testing.T) {
+	calls := 0
+	w := New(Deps{PendingRecovery: func(context.Context) error {
+		calls++
+		return errors.New("транзиентный сбой БД")
+	}}, Options{RecoveryInterval: time.Hour})
+
+	w.recoverPendingDue(context.Background())
+	if calls != 1 {
+		t.Fatalf("recovery не вызван: %d", calls)
+	}
+	// В пределах интервала повторно не бегает.
+	w.recoverPendingDue(context.Background())
+	if calls != 1 {
+		t.Fatalf("recovery вызван повторно раньше интервала: %d", calls)
+	}
+}
+
 // TestWorkerTransientBackoffAndLimit — M10: транзитный сбой не упирается в
 // трёхпопыточный потолок за 6 секунд и ждёт заметно дольше базовой экспоненты.
 func TestWorkerTransientBackoffAndLimit(t *testing.T) {

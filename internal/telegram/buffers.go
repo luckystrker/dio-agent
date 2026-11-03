@@ -232,10 +232,21 @@ func (m *ChatBufferManager) Wait() { m.wg.Wait() }
 // восстановить буфер»): таймеры потеряны при падении, pending-события
 // закрываются в turn немедленно при старте.
 func (m *ChatBufferManager) RecoverStalePending(ctx context.Context) (chats, events int, err error) {
+	return m.RecoverStalePendingOlderThan(ctx, 0)
+}
+
+// RecoverStalePendingOlderThan — тот же recovery только для событий старше
+// age. Периодический вызов в живом процессе (M5) обязан не трогать свежие
+// pending: они ещё лежат в буфере и закроются своим таймером. Ошибка одного
+// чата логируется и не валит остальные (старт не должен падать из-за гонки
+// RowsAffected на одном чате).
+func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, age time.Duration) (chats, events int, err error) {
 	rows, err := m.deps.Pool.Query(ctx, `
 		SELECT chat_id, array_agg(id) AS ids
-		FROM social_events WHERE status = 'pending'
-		GROUP BY chat_id`)
+		FROM social_events
+		WHERE status = 'pending'
+		  AND ($1::interval <= interval '0' OR occurred_at < now() - $1::interval)
+		GROUP BY chat_id`, age)
 	if err != nil {
 		return 0, 0, fmt.Errorf("буфер: pending-события не читаются: %w", err)
 	}
@@ -257,7 +268,8 @@ func (m *ChatBufferManager) RecoverStalePending(ctx context.Context) (chats, eve
 	}
 	for _, b := range batches {
 		if err := m.createTurn(ctx, b.chatID, b.ids); err != nil {
-			return chats, events, fmt.Errorf("буфер: recovery чата %d не удался: %w", b.chatID, err)
+			m.logger.Printf("буфер: recovery чата %d не удался, остальные чаты продолжаются: %v", b.chatID, err)
+			continue
 		}
 		chats++
 		events += len(b.ids)

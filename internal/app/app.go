@@ -27,6 +27,10 @@ const (
 	// staleSendingAfter — «sending» старше этого возраста принадлежит мёртвому
 	// процессу: recovery §12.2 переводит её в unknown (не отправлять вслепую).
 	staleSendingAfter = time.Minute
+	// stalePendingAfter — pending старше этого возраста возвращается в ход
+	// периодическим recovery живого процесса (M5): окна буферов не больше
+	// 10 секунд, минута — с запасом.
+	stalePendingAfter = time.Minute
 )
 
 // DefaultDrainLimit — граница ожидания текущего хода при shutdown (§5.3:
@@ -251,6 +255,10 @@ func (a *App) Start(ctx context.Context) error {
 		Journal:   a.journal,
 		Logger:    a.logger,
 		Cognition: cognition,
+		PendingRecovery: func(ctx context.Context) error {
+			_, _, err := a.buffers.RecoverStalePendingOlderThan(ctx, stalePendingAfter)
+			return err
+		},
 	}, a.opts.Cognitive)
 
 	bufferDeps := telegram.BufferDeps{

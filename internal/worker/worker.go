@@ -65,6 +65,9 @@ type Options struct {
 	// TransientMaxAttempts — предел попыток для транзитных отказов провайдера;
 	// 0 — DefaultTransientMaxAttempts.
 	TransientMaxAttempts int
+	// RecoveryInterval — период возврата зависших pending-событий в ходы;
+	// 0 — 30 секунд (M5).
+	RecoveryInterval time.Duration
 }
 
 func (o Options) withDefaults() Options {
@@ -83,6 +86,9 @@ func (o Options) withDefaults() Options {
 	if o.TransientMaxAttempts <= 0 {
 		o.TransientMaxAttempts = DefaultTransientMaxAttempts
 	}
+	if o.RecoveryInterval <= 0 {
+		o.RecoveryInterval = 30 * time.Second
+	}
 	return o
 }
 
@@ -99,6 +105,9 @@ type Deps struct {
 	Logger  *log.Logger
 	// Cognition — общий с фоном семафор модельных заданий (§5.2); nil — без него.
 	Cognition *runtime.CognitionLock
+	// PendingRecovery — периодический возврат pending-событий в ходы (M5):
+	// транзиентный сбой закрытия буфера не должен ждать рестарта процесса.
+	PendingRecovery func(ctx context.Context) error
 }
 
 // claimedTurn — захваченный ход.
@@ -118,7 +127,11 @@ type Worker struct {
 	logger  *log.Logger
 	opts    Options
 	// cognition — общий с фоном семафор модельных заданий (§5.2).
-	cognition *runtime.CognitionLock
+	cognition       *runtime.CognitionLock
+	pendingRecovery func(ctx context.Context) error
+	// lastPendingRecovery — когда последний раз шёл recovery pending (только
+	// горутина Run).
+	lastPendingRecovery time.Time
 
 	// notBefore — локальные паузы повтора после сбоя (turn_id → срок).
 	notBeforeMu sync.Mutex
@@ -137,16 +150,17 @@ func New(deps Deps, opts Options) *Worker {
 		logger = log.New(discardWriter{}, "", 0)
 	}
 	return &Worker{
-		pool:      deps.Pool,
-		runner:    deps.Runner,
-		journal:   deps.Journal,
-		logger:    logger,
-		opts:      opts.withDefaults(),
-		cognition: deps.Cognition,
-		notBefore: map[int64]time.Time{},
-		wake:      make(chan struct{}, 1),
-		drain:     make(chan struct{}),
-		done:      make(chan struct{}),
+		pool:            deps.Pool,
+		runner:          deps.Runner,
+		journal:         deps.Journal,
+		logger:          logger,
+		opts:            opts.withDefaults(),
+		cognition:       deps.Cognition,
+		pendingRecovery: deps.PendingRecovery,
+		notBefore:       map[int64]time.Time{},
+		wake:            make(chan struct{}, 1),
+		drain:           make(chan struct{}),
+		done:            make(chan struct{}),
 	}
 }
 
@@ -189,6 +203,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			w.logger.Printf("когнитивный worker остановлен")
 			return nil
 		}
+		w.recoverPendingDue(ctx)
 
 		turn, err := w.claimNext(ctx)
 		if err != nil {
@@ -219,6 +234,22 @@ func (w *Worker) drained() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// recoverPendingDue — периодический recovery pending-событий (M5): закрытие
+// буфера, упавшее на транзиентном сбое, больше не ждёт рестарта. Свежие
+// события не трогаются — их отбирает age-фильтр в callback.
+func (w *Worker) recoverPendingDue(ctx context.Context) {
+	if w.pendingRecovery == nil {
+		return
+	}
+	if time.Since(w.lastPendingRecovery) < w.opts.RecoveryInterval {
+		return
+	}
+	w.lastPendingRecovery = time.Now()
+	if err := w.pendingRecovery(ctx); err != nil {
+		w.logger.Printf("worker: recovery pending-событий не удался: %v", err)
 	}
 }
 
