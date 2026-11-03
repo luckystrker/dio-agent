@@ -259,6 +259,10 @@ func runEvalCases(t *testing.T, mode string, cases []evalsuite.Case,
 		r.push(c)
 		r.awaitTerminal()
 		r.collect()
+		// Кейсы независимы: гасим приложение сразу, а не держим все до конца
+		// прогона. Иначе десятки живых приложений с тактом фона 50 мс
+		// перегружают singleton-наблюдение и набор начинает падать случайно.
+		r.h.stop()
 
 		scorers, err := evalsuite.BuildScorers(c, r.out)
 		if err != nil {

@@ -2,7 +2,9 @@
 // истёкшие cooldown-ключи консолидации (runtime_state), чекпоинты терминальных
 // задач старше 7 дней (task_checkpoints), WAL-потоки bg:* без живой задачи
 // старше 30 дней (event_streams; исключение в append-only триггере — миграция
-// 000013). Это гигиена, а не модельная работа: ошибка чистки не роняет такт.
+// 000013). Задача события жизни (bg:life:<seq>, этап 24) терминальна, когда
+// расписание ушло вперёд: её чекпоинт и WAL вывозятся тем же проходом. Это
+// гигиена, а не модельная работа: ошибка чистки не роняет такт.
 package background
 
 import (
@@ -74,6 +76,10 @@ func (s *Scheduler) sweepRetention(ctx context.Context) {
 		          SELECT 1 FROM social_events e
 		          WHERE e.id = split_part(c.task_id, ':', 4)::bigint
 		            AND e.summarized_at IS NOT NULL))
+		    OR (c.task_id ~ '^bg:life:[0-9]+$' AND EXISTS (
+		          SELECT 1 FROM runtime_state rs
+		          WHERE rs.key = 'bg:life:schedule'
+		            AND substring(c.task_id FROM '[0-9]+$')::bigint < (rs.value->>'seq')::bigint))
 		  )`, checkpointRetention.Seconds())
 	if err != nil {
 		s.logError("фон: чистка чекпоинтов не выполнена: %v", err)
@@ -107,6 +113,10 @@ func (s *Scheduler) sweepRetention(ctx context.Context) {
 		            AND NOT EXISTS (
 		              SELECT 1 FROM social_events newer
 		              WHERE newer.chat_id = e.chat_id AND newer.id > e.id)))
+		    OR (es.stream_id ~ '^bg:life:[0-9]+$' AND EXISTS (
+		          SELECT 1 FROM runtime_state rs
+		          WHERE rs.key = 'bg:life:schedule'
+		            AND substring(es.stream_id FROM '[0-9]+$')::bigint < (rs.value->>'seq')::bigint))
 		  )`, walRetention.Seconds())
 	if err != nil {
 		s.logError("фон: чистка WAL-потоков не выполнена: %v", err)

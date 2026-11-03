@@ -91,7 +91,10 @@ func newFixture(t *testing.T) (*fixture, context.Context) {
 		ToolCallsLimit:  5,
 		Logger:          log.New(os.Stderr, "", 0),
 		Now:             func() time.Time { return f.now },
-	}, Options{})
+		// Старые сценарии фона считают точное число модельных вызовов, а
+		// события жизни (этап 24) в них не предмет проверки: включаются
+		// точечно в своих тестах через f.enableLifeEvents().
+	}, Options{DisableLifeEvents: true})
 	if err != nil {
 		t.Fatalf("планировщик не создан: %v", err)
 	}
@@ -109,6 +112,9 @@ func (f *fixture) withModel(t *testing.T, resp ...*events.ModelResponse) *agotes
 }
 
 func (f *fixture) setNow(at time.Time) { f.now = at }
+
+// enableLifeEvents включает генератор событий жизни для тестов этапа 24.
+func (f *fixture) enableLifeEvents() { f.sched.disableLifeEvents = false }
 
 // createIntention вставляет намерение через общий путь применения (§14.1):
 // dedupe, notBefore/expires, provenance — ровно как из хода.

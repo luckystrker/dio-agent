@@ -185,13 +185,21 @@ func (c *clock) set(at time.Time) {
 
 // harness — приложение целиком на чистой тестовой базе.
 type harness struct {
-	t      *testing.T
-	pool   *runtime.Pool
-	dsn    string
-	api    *stubAPI
-	script *agotest.TestConfig
-	clk    *clock
-	app    *App
+	t        *testing.T
+	pool     *runtime.Pool
+	dsn      string
+	api      *stubAPI
+	script   *agotest.TestConfig
+	clk      *clock
+	app      *App
+	stopOnce sync.Once
+}
+
+// stop останавливает приложение ровно один раз: прогонщик эвалов гасит
+// приложение сразу после кейса (иначе десятки приложений живут до конца теста
+// и перегружают singleton-наблюдение), а t.Cleanup — страховка.
+func (h *harness) stop() {
+	h.stopOnce.Do(func() { h.app.Stop(context.Background()) })
 }
 
 // fastWindows — короткие окна буферов (E2E не ждёт секунды).
@@ -297,7 +305,10 @@ func newHarnessDSNTuned(t *testing.T, dsn string, tune func(*Options), resp ...*
 		Poll:           telegram.PollerOptions{PollTimeout: 30 * time.Millisecond, ErrorBackoff: 20 * time.Millisecond},
 		Cognitive:      worker.Options{PollInterval: 20 * time.Millisecond, RetryBase: 30 * time.Millisecond, RetryMax: 120 * time.Millisecond},
 		Delivery:       telegram.DeliveryOptions{Interval: 20 * time.Millisecond, BubbleGap: 2 * time.Millisecond, RetryBase: 30 * time.Millisecond},
-		Background:     background.Options{MinInterval: 50 * time.Millisecond, MaxInterval: 50 * time.Millisecond, RetryBackoff: 50 * time.Millisecond},
+		// События жизни (этап 24) — не предмет старых E2E-сценариев с точными
+		// счётчиками модельных вызовов: включаются своими тестами.
+		Background: background.Options{MinInterval: 50 * time.Millisecond, MaxInterval: 50 * time.Millisecond,
+			RetryBackoff: 50 * time.Millisecond, DisableLifeEvents: true},
 	}
 	if tune != nil {
 		tune(&opts)
@@ -310,11 +321,10 @@ func newHarnessDSNTuned(t *testing.T, dsn string, tune func(*Options), resp ...*
 	if err := a.Start(context.Background()); err != nil {
 		t.Fatalf("приложение не запущено: %v", err)
 	}
-	t.Cleanup(func() {
-		a.Stop(context.Background())
-	})
+	h := &harness{t: t, pool: pool, dsn: dsn, api: api, script: script, clk: clk, app: a}
+	t.Cleanup(h.stop)
 
-	return &harness{t: t, pool: pool, dsn: dsn, api: api, script: script, clk: clk, app: a}
+	return h
 }
 
 // hardKill — имитация SIGKILL: отмена контекста, закрытие пула и обрыв

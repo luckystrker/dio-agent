@@ -37,6 +37,10 @@ type Options struct {
 	ClaimLimit       int // намерений за такт
 	ConsolidateLimit int // эпизодов за такт
 	RetryBackoff     time.Duration
+	// DisableLifeEvents — тестовая ручка: выключить генератор событий жизни
+	// (этап 24). Старые сценарии фона считают точное число модельных вызовов;
+	// события жизни в них не предмет проверки. В продакшене — false.
+	DisableLifeEvents bool
 }
 
 func (o Options) withDefaults() Options {
@@ -98,27 +102,28 @@ type Deps struct {
 // Модельные задачи исполняются последовательно в такте: один когнитивный
 // worker (§5.2) — планировщик не создаёт параллельной когниции.
 type Scheduler struct {
-	pool         *runtime.Pool
-	journal      *character.TurnJournal
-	wal          *runtime.TaskWAL
-	checkpoints  *runtime.PgCheckpointStore
-	budget       *runtime.BudgetStore
-	memory       *memory.Toolset
-	web          *web.Toolset
-	webMaxSearch int
-	webMaxFetch  int
-	persona      character.Persona
-	prompt       string
-	model        *character.ChatConfig
-	dailyLimit   int64
-	toolLimit    int
-	cognition    *runtime.CognitionLock
-	logger       *log.Logger
-	location     *time.Location
-	now          func() time.Time
-	rnd          *rand.Rand
-	intentions   *IntentionRepo
-	opts         Options
+	pool              *runtime.Pool
+	journal           *character.TurnJournal
+	wal               *runtime.TaskWAL
+	checkpoints       *runtime.PgCheckpointStore
+	budget            *runtime.BudgetStore
+	memory            *memory.Toolset
+	web               *web.Toolset
+	webMaxSearch      int
+	webMaxFetch       int
+	persona           character.Persona
+	prompt            string
+	model             *character.ChatConfig
+	dailyLimit        int64
+	toolLimit         int
+	cognition         *runtime.CognitionLock
+	logger            *log.Logger
+	location          *time.Location
+	now               func() time.Time
+	rnd               *rand.Rand
+	intentions        *IntentionRepo
+	opts              Options
+	disableLifeEvents bool
 
 	// Наблюдаемость роста очереди (§20): между тактами.
 	lastBudgetWarn time.Time // варн об исчерпании бюджета — не чаще раза в сутки
@@ -126,10 +131,14 @@ type Scheduler struct {
 	lastReserveSweep time.Time
 	// lastRetentionSweep — прошлая чистка ретенции (блок 18.6): раз в сутки.
 	lastRetentionSweep time.Time
-	mu                 sync.Mutex
-	lastPending        int
-	growthStreak       int
-	growthWarned       bool
+	// lifeCache — расписание событий жизни (этап 24): читается из runtime_state
+	// один раз и обновляется записями, а не на каждом такте (такт 15–30 с,
+	// лишний запрос к базе на каждом тике ни к чему).
+	lifeCache    *lifeSchedule
+	mu           sync.Mutex
+	lastPending  int
+	growthStreak int
+	growthWarned bool
 }
 
 // New строит планировщик.
@@ -159,27 +168,28 @@ func New(deps Deps, opts Options) (*Scheduler, error) {
 		rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 	return &Scheduler{
-		pool:         deps.Pool,
-		journal:      deps.Journal,
-		wal:          deps.WAL,
-		checkpoints:  deps.Checkpoints,
-		budget:       deps.Budget,
-		memory:       deps.Memory,
-		web:          deps.Web,
-		webMaxSearch: deps.WebMaxSearch,
-		webMaxFetch:  deps.WebMaxFetch,
-		persona:      deps.Persona,
-		prompt:       deps.PromptTemplate,
-		model:        deps.Model,
-		dailyLimit:   deps.DailyCallsLimit,
-		toolLimit:    deps.ToolCallsLimit,
-		cognition:    deps.Cognition,
-		logger:       logger,
-		location:     deps.Location,
-		now:          now,
-		rnd:          rnd,
-		intentions:   NewIntentionRepo(deps.Pool),
-		opts:         opts.withDefaults(),
+		pool:              deps.Pool,
+		journal:           deps.Journal,
+		wal:               deps.WAL,
+		checkpoints:       deps.Checkpoints,
+		budget:            deps.Budget,
+		memory:            deps.Memory,
+		web:               deps.Web,
+		webMaxSearch:      deps.WebMaxSearch,
+		webMaxFetch:       deps.WebMaxFetch,
+		persona:           deps.Persona,
+		prompt:            deps.PromptTemplate,
+		model:             deps.Model,
+		dailyLimit:        deps.DailyCallsLimit,
+		toolLimit:         deps.ToolCallsLimit,
+		cognition:         deps.Cognition,
+		logger:            logger,
+		location:          deps.Location,
+		now:               now,
+		rnd:               rnd,
+		intentions:        NewIntentionRepo(deps.Pool),
+		opts:              opts.withDefaults(),
+		disableLifeEvents: opts.DisableLifeEvents,
 	}, nil
 }
 
@@ -331,6 +341,15 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 			s.logError("консолидация эпизода чата %d (%d событий) не удалась: %v", ep.ChatID, len(ep.EventIDs), rerr)
 		}
 		s.recordConsolidation(ep, out)
+	}
+
+	// Событие жизни (этап 24): раз в 8–14 часов, вне тихих блоков и не больше
+	// двух в сутки. Ошибка не валит такт: событие — необязательная активность,
+	// а расписание и WAL позволяют продолжить позже.
+	if !s.disableLifeEvents {
+		if err := s.maybeRunLifeEvent(ctx); err != nil {
+			s.logError("событие жизни: такт не выполнен: %v", err)
+		}
 	}
 	return nil
 }
