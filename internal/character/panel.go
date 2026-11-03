@@ -102,6 +102,9 @@ type statePanelData struct {
 	// подсказка прямо в панели, что это страховка, а не основной путь.
 	MemoryTools bool
 	MultiActor  bool
+	// GroupInvolved — чат вовлечён (30.2): бот уже высказался, сейчас можно
+	// отвечать или молчать без обязательства.
+	GroupInvolved bool
 }
 
 // sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
@@ -160,6 +163,9 @@ func buildStatePanel(d statePanelData) string {
 	}
 	if d.MultiActor {
 		lines = append(lines, "в пачке несколько участников — отвечай на пачку целиком")
+	}
+	if d.GroupInvolved {
+		lines = append(lines, "ты в разговоре группы — можешь ответить, поставить реакцию или промолчать")
 	}
 	lines = append(lines, statePanelClose)
 	return strings.Join(lines, "\n")

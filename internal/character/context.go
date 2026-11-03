@@ -80,6 +80,9 @@ type BaseContext struct {
 	// MemoryCardIncomplete — почему карточка неполна (28.3): fts_cut | budget
 	// | stances | limit (через запятую). Пусто — релевантное влезло.
 	MemoryCardIncomplete string
+	// GroupInvolved — групповой чат сейчас вовлечён (30.2): модель видит, что
+	// можно ответить, поставить реакцию или промолчать.
+	GroupInvolved bool
 }
 
 // Assembler собирает базовый контекст из БД (§11.1). Один источник истины —
@@ -185,6 +188,15 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		}
 	}
 
+	// --- вовлечённость группы (30.2): строка панели, не system ---
+	if involved, ierr := telegram.GroupInvolved(ctx, db, chatID, now); ierr != nil {
+		if a.Logger != nil {
+			a.Logger.Printf("контекст: вовлечённость группы не прочитана (строка панели пропущена): %v", ierr)
+		}
+	} else {
+		out.GroupInvolved = involved
+	}
+
 	// --- пачка: тексты с плейсхолдерами для пустых ---
 	out.Batch = batchTexts(batch)
 
@@ -221,16 +233,17 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 
 	// --- панель состояния: время, пауза, кто говорит, состояние, память ---
 	panel := statePanelData{
-		Now:          now,
-		Location:     a.Timezone,
-		Actor:        out.ActorLine,
-		Mood:         out.MoodLine,
-		Relationship: out.RelationshipLine,
-		Activity:     persona.ActivityAt(now, a.Timezone),
-		MemoryCard:   memoryCard,
-		Stickers:     stickerList,
-		SaveSticker:  saveSticker,
-		MultiActor:   distinctActors(batch) > 1,
+		Now:           now,
+		Location:      a.Timezone,
+		Actor:         out.ActorLine,
+		Mood:          out.MoodLine,
+		Relationship:  out.RelationshipLine,
+		Activity:      persona.ActivityAt(now, a.Timezone),
+		MemoryCard:    memoryCard,
+		Stickers:      stickerList,
+		SaveSticker:   saveSticker,
+		MultiActor:    distinctActors(batch) > 1,
+		GroupInvolved: out.GroupInvolved,
 		// Подсказка «память доступна инструментами» — ровно когда они будут
 		// выданы планом хода (21.3): история урезана или карточка неполна.
 		MemoryTools: memoryToolsAvailable(a.Memory != nil, a.MemoryPrefetch, out.HistoryTrimmed, out.MemoryCardFitted),

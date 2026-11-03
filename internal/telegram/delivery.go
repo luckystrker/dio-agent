@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DB — минимальный интерфейс запросов к БД для проверки устаревания (§13.3);
@@ -29,6 +30,7 @@ import (
 type DB interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // staleSendingAfter — sending старше этого возраста считается зависшим:
@@ -280,6 +282,7 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			return
 		}
 		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: стикер отправлен (turn %d, поз. %d, message_id %d)",
 			row.TurnID, row.Position, messageID)
 	case "reaction":
@@ -304,6 +307,7 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			return
 		}
 		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: реакция %s поставлена (turn %d, сообщение %d)",
 			row.Reaction, row.TurnID, row.TargetMessageID)
 	default:
@@ -320,6 +324,7 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			return
 		}
 		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: отправлено (turn %d, поз. %d, message_id %d)",
 			row.TurnID, row.Position, messageID)
 	}
@@ -565,6 +570,28 @@ func (l *DeliveryLoop) waitForBubbleGap(ctx context.Context, row OutboxItem) {
 	select {
 	case <-ctx.Done():
 	case <-time.After(wait):
+	}
+}
+
+// markGroupInvolvement — бот ответил/поставил реакцию/отправил стикер в
+// группе: чат вовлечён (30.2). Пишется после подтверждённой доставки; сбой
+// записи не влияет на доставку — вовлечённость восстановится следующим
+// ответом, а сообщение уже ушло.
+func (l *DeliveryLoop) markGroupInvolvement(chatID int64) {
+	ctx, cancel := l.persistCtx()
+	defer cancel()
+	var chatType string
+	if err := l.db.QueryRow(ctx, `
+		SELECT chat_type FROM social_events WHERE chat_id = $1 ORDER BY id DESC LIMIT 1`,
+		chatID).Scan(&chatType); err != nil {
+		l.logger.Printf("delivery: тип чата %d не прочитан, вовлечённость не отмечена: %v", chatID, err)
+		return
+	}
+	if chatType != string(ChatGroup) {
+		return
+	}
+	if err := InvolveAfterBotAction(ctx, l.db, chatID, time.Now()); err != nil {
+		l.logger.Printf("delivery: вовлечённость группы %d не отмечена: %v", chatID, err)
 	}
 }
 

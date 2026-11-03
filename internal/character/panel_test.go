@@ -283,3 +283,13 @@ func TestStripCopiedAuthors(t *testing.T) {
 		t.Fatalf("без истории срезан автор: %q", got[0])
 	}
 }
+
+func TestStatePanelGroupInvolvedLine(t *testing.T) {
+	panel := buildStatePanel(statePanelData{
+		Now:           time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC),
+		GroupInvolved: true,
+	})
+	if !strings.Contains(panel, "ты в разговоре группы — можешь ответить, поставить реакцию или промолчать") {
+		t.Fatalf("в панели нет строки вовлечённости группы: %q", panel)
+	}
+}
