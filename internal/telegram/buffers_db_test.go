@@ -167,6 +167,50 @@ func TestBufferRecoverSkipsEventsStillInMemory(t *testing.T) {
 	}
 }
 
+// TestBufferRecoveryDoesNotOvertakeNewerTurn — замечание финального ревью:
+// зависшая старая порция не должна получить ход после уже существующего хода
+// более нового сообщения (иначе ответы идут навыворот).
+func TestBufferRecoveryDoesNotOvertakeNewerTurn(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	old := mustIngest(t, pool, rawMessageOf(813, 45, "старое зависшее"))
+	if _, err := pool.Exec(ctx,
+		`UPDATE social_events SET occurred_at = now() - interval '2 minutes' WHERE id = $1`, old.EventID); err != nil {
+		t.Fatalf("возраст не выставлен: %v", err)
+	}
+	// Более новое сообщение уже в ходе.
+	newer := mustIngest(t, pool, rawMessageOf(814, 45, "новое сообщение"))
+	var turnID int64
+	if err := pool.QueryRow(ctx, `INSERT INTO turns (chat_id) VALUES (45) RETURNING id`).Scan(&turnID); err != nil {
+		t.Fatalf("ход не создан: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE social_events SET turn_id = $1, status = 'buffered' WHERE id = $2`, turnID, newer.EventID); err != nil {
+		t.Fatalf("новое событие не привязано: %v", err)
+	}
+
+	m := NewChatBufferManager(BufferDeps{Pool: pool})
+	chats, events, err := m.RecoverStalePendingOlderThan(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if chats != 0 || events != 0 {
+		t.Fatalf("recovery создал внеочередной ход: чатов %d событий %d", chats, events)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM social_events WHERE id = $1`, old.EventID).Scan(&status); err != nil {
+		t.Fatalf("старое событие не читается: %v", err)
+	}
+	if status != "processed" {
+		t.Fatalf("старое событие = %s, хочу processed (без внеочередного хода)", status)
+	}
+	var turns int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM turns WHERE chat_id = 45`).Scan(&turns); err != nil || turns != 1 {
+		t.Fatalf("ходов у чата %d, хочу 1 (err=%v)", turns, err)
+	}
+}
+
 func TestBufferFlushAllPersistsTurns(t *testing.T) {
 	// Graceful shutdown: буферы закрываются немедленно, порции не теряются (§5.3).
 	pool := newTestPool(t)

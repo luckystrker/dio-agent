@@ -291,6 +291,23 @@ func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, ag
 		return 0, 0, fmt.Errorf("буфер: recovery не дочитан: %w", err)
 	}
 	for _, b := range batches {
+		superseded, serr := m.supersededByNewerTurn(ctx, b.chatID, b.ids)
+		if serr != nil {
+			m.logger.Printf("буфер: recovery чата %d: проверка более нового хода: %v", b.chatID, serr)
+			continue
+		}
+		if superseded {
+			// Пока порция висела, чат ушёл вперёд: создавать ход с более
+			// поздним turns.id нельзя — ответ на старое ушёл бы после ответа
+			// на новое. События остаются в истории (processed), но не плодят
+			// внеочередной ход.
+			if _, uerr := m.deps.Pool.Exec(ctx,
+				`UPDATE social_events SET status = 'processed' WHERE id = ANY($1::bigint[]) AND status = 'pending'`,
+				b.ids); uerr != nil {
+				m.logger.Printf("буфер: recovery чата %d: устаревшие события не закрыты: %v", b.chatID, uerr)
+			}
+			continue
+		}
 		if err := m.createTurn(ctx, b.chatID, b.ids); err != nil {
 			m.logger.Printf("буфер: recovery чата %d не удался, остальные чаты продолжаются: %v", b.chatID, err)
 			continue
@@ -299,6 +316,23 @@ func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, ag
 		events += len(b.ids)
 	}
 	return chats, events, nil
+}
+
+// supersededByNewerTurn — у чата уже есть более новое событие с ходом:
+// отложенная порция не должна получить ход позже него (инверсия порядка).
+func (m *ChatBufferManager) supersededByNewerTurn(ctx context.Context, chatID int64, ids []int64) (bool, error) {
+	var superseded bool
+	err := m.deps.Pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM social_events newer
+		  WHERE newer.chat_id = $1
+		    AND newer.turn_id IS NOT NULL
+		    AND newer.id > COALESCE((SELECT max(id) FROM social_events WHERE id = ANY($2::bigint[])), 0)
+		)`, chatID, ids).Scan(&superseded)
+	if err != nil {
+		return false, err
+	}
+	return superseded, nil
 }
 
 // createTurn — транзакционное закрытие порции (§6.2): turn с постоянным ID,
