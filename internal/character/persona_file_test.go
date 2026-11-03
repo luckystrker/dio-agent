@@ -195,3 +195,25 @@ func TestParsePersonaFileCommentOnlyLinesIgnored(t *testing.T) {
 		t.Fatalf("комментарий попал в описание: %q", src.Description)
 	}
 }
+
+func TestParsePersonaAliases(t *testing.T) {
+	text := validPersonaText() + "\n## Алиасы\nдио, дийо; dio\n"
+	src, err := ParsePersonaFile(text)
+	if err != nil {
+		t.Fatalf("алиасы не разобраны: %v", err)
+	}
+	want := []string{"дио", "дийо", "dio"}
+	if len(src.Aliases) != len(want) {
+		t.Fatalf("алиасы: %v, хочу %v", src.Aliases, want)
+	}
+	for i := range want {
+		if src.Aliases[i] != want[i] {
+			t.Fatalf("алиасы: %v, хочу %v", src.Aliases, want)
+		}
+	}
+	// Без секции — алиасов нет, имя из «Имя» действует всегда.
+	src, err = ParsePersonaFile(validPersonaText())
+	if err != nil || len(src.Aliases) != 0 {
+		t.Fatalf("без секции алиасов: %v err=%v", src.Aliases, err)
+	}
+}

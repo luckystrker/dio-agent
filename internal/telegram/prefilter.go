@@ -1,11 +1,18 @@
-// Prefilter (§6.3): дешёвые правила до модели — process или journal_only.
-// Прямой запрос не отбрасывается никогда; низкосигнальный шум группы
-// остаётся в недавней истории, но не вызывает обязательный LLM и не
-// становится durable memory автоматически. Поведение — src/telegram/prefilter.ts.
+// Prefilter (§6.3, этап 30): дешёвые правила до модели.
+//
+// В личке прямое общение — событие всегда идёт в ход. В группе на входе
+// поддержанное событие остаётся pending (буфер копит пачку своим окном), а
+// судьбу пачки решает дешёвый фильтр при её закрытии (group.go, 30.1):
+// прямое обращение, вовлечённость (30.2), имя бота или «цепляющая тема» —
+// ход; иначе journal_only. Так эмбеддинг темы не делается в ingest
+// синхронно, а бурст группы не теряет контекст до решения.
+//
+// Неподдержанные updates фиксируются journal_only: offset не застревает.
 package telegram
 
 // IngestStatus — статус записи social_events на входе (§6.1):
-// pending — событие пойдёт в буфер и ход; journal_only — только журнал.
+// pending — событие пойдёт в буфер и (возможно) ход; journal_only — только
+// журнал и недавняя история.
 type IngestStatus string
 
 const (
@@ -13,40 +20,12 @@ const (
 	StatusJournalOnly IngestStatus = "journal_only"
 )
 
-// DecideIngestStatus решает судьбу события до модели (§6.3):
-// личка и reply/mention боту/command в группе — прямое обращение (pending);
-// пассивный шум группы и правки — журнал без обязательного LLM. Reply на
-// чужое сообщение и @чужой_ник в группе — не обращение (M8); без известной
-// идентичности бота (dry-run, старые тесты) действуют прежние правила.
+// DecideIngestStatus решает судьбу события до модели (§6.3): поддержанное
+// событие становится pending и попадает в буфер; пассивный шум группы
+// отбрасывается позже, при закрытии пачки (30.1), когда видна вся порция.
 func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 	if !event.Supported {
 		return StatusJournalOnly
 	}
-	if event.ChatType == ChatPrivate {
-		// Правка не создаёт новый ход и повторный платный ответ (minor 13):
-		// текст правки в историю не попадает, пока нет отдельной обработки
-		// edit/delete (бэклог §19).
-		if event.Kind == KindEdited {
-			return StatusJournalOnly
-		}
-		return StatusPending
-	}
-	// Прямое упоминание бота — обращение независимо от типа события (фото с
-	// подписью, стикер и т.п.), а не только когда detectKind дал mention.
-	if event.BotKnown && event.MentionBot {
-		return StatusPending
-	}
-	switch event.Kind {
-	case KindCommand:
-		return StatusPending
-	case KindReply:
-		if !event.BotKnown || event.ReplyToBot || event.MentionBot {
-			return StatusPending
-		}
-	case KindMention:
-		if !event.BotKnown || event.MentionBot {
-			return StatusPending
-		}
-	}
-	return StatusJournalOnly
+	return StatusPending
 }

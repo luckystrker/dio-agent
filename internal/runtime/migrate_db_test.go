@@ -81,8 +81,8 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("первое применение миграций: %v", err)
 	}
-	if first.Applied != 16 || first.Skipped != 0 {
-		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 16/0", first.Applied, first.Skipped)
+	if first.Applied != 17 || first.Skipped != 0 {
+		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 17/0", first.Applied, first.Skipped)
 	}
 
 	// 2. Повторное применение: идемпотентно, без ошибок и без записей.
@@ -91,7 +91,7 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 		t.Fatalf("второе применение миграций (идемпотентность): %v", err)
 	}
 	if second.Applied != 0 || second.Skipped != 16 {
-		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/16", second.Applied, second.Skipped)
+		t.Errorf("второй прогон: applied=%d skipped=%d, хочу 0/17", second.Applied, second.Skipped)
 	}
 
 	// Все миграции отмечены в schema_migrations.

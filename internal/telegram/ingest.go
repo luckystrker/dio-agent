@@ -57,9 +57,31 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 
 	var eventID int64
 	inserted := true
-	// occurred_at = время сообщения (message.date), не приёма (18.1): после
-	// простоя накопленная пачка не должна выглядеть свежей для границ эпизодов
-	// и проверок «чат ушёл вперёд». Даты нет — NULL, колонка берёт now().
+	// Правка (30.4): текст события — «было → стало», исходная строка получает
+	// актуальную версию текста для истории чата.
+	text := event.Text
+	version := 0
+	if event.Kind == KindEdited {
+		// Повтор той же пачки update'ов не должен переписывать историю старой
+		// версией текста: «было/стало» и обновление исходной строки — только для
+		// новой записи.
+		var duplicate bool
+		if derr := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM social_events WHERE telegram_update_id = $1)`,
+			event.TelegramUpdateID).Scan(&duplicate); derr != nil {
+			return IngestResult{}, fmt.Errorf("ingest: дубль правки не проверен: %w", derr)
+		}
+		if !duplicate {
+			text, version, err = applyEditedMessage(ctx, tx, event)
+			if err != nil {
+				return IngestResult{}, err
+			}
+		}
+	}
+	// occurred_at = время сообщения (message.date, у правки edit_date), не
+	// приёма (18.1): после простоя накопленная пачка не должна выглядеть
+	// свежей для границ эпизодов и проверок «чат ушёл вперёд». Даты нет — NULL,
+	// колонка берёт now().
 	var occurredAt *time.Time
 	if event.Date > 0 {
 		at := time.Unix(event.Date, 0).UTC()
@@ -67,13 +89,15 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO social_events
-		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text, raw_update, status, occurred_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10::timestamptz, now()))
+		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text,
+		   raw_update, status, occurred_at, telegram_message_id, version, direct)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, coalesce($10::timestamptz, now()), $11, $12, $13)
 		ON CONFLICT (telegram_update_id) DO NOTHING
 		RETURNING id`,
 		event.TelegramUpdateID, event.ChatID, string(event.ChatType),
-		event.ActorID, event.ActorName, string(event.Kind), event.Text,
-		string(raw), string(status), occurredAt).Scan(&eventID)
+		event.ActorID, event.ActorName, string(event.Kind), text,
+		string(raw), string(status), occurredAt,
+		event.MessageID, editVersionForInsert(event.Kind, version), event.Direct).Scan(&eventID)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return IngestResult{}, fmt.Errorf("ingest: событие не записано: %w", err)

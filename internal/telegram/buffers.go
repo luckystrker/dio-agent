@@ -61,6 +61,9 @@ type PendingEvent struct {
 	ChatType ChatType
 	Kind     EventKind
 	Text     *string
+	// Direct — прямое обращение к боту (30.1): буфер переключает окно на
+	// быстрое reply/mention, даже если пачка началась с пассивного шума.
+	Direct bool
 }
 
 // StartTurnFunc — транзакционное закрытие порции: создаёт turn с постоянным
@@ -75,6 +78,9 @@ type BufferDeps struct {
 	// OnTurnReady — уведомление о созданном turn (точка подключения
 	// когнитивного worker §5.2); nil — не вызывается.
 	OnTurnReady func(turnID, chatID int64, kind string)
+	// Gate — дешёвый фильтр закрытой пачки групп (30.1/30.2); nil — каждая
+	// пачка становится ходом (прежнее поведение юнит-тестов буферов).
+	Gate BatchGate
 }
 
 // ChatBufferManager — сборка порций по чатам.
@@ -91,6 +97,8 @@ type ChatBufferManager struct {
 
 	// startTurn — реализация закрытия (по умолчанию dbStartTurn).
 	startTurn StartTurnFunc
+	// gate — фильтр пачки (BufferDeps.Gate).
+	gate BatchGate
 
 	mu      sync.Mutex
 	buffers map[int64]*bufferState
@@ -130,6 +138,7 @@ func NewChatBufferManager(deps BufferDeps) *ChatBufferManager {
 	m := &ChatBufferManager{
 		deps:         deps,
 		logger:       logger,
+		gate:         deps.Gate,
 		Windows:      DefaultWindows,
 		MaxEvents:    MaxEventsPerBatch,
 		MaxTextChars: MaxBatchTextChars,
@@ -162,6 +171,20 @@ func (m *ChatBufferManager) Add(event PendingEvent) {
 	state.eventIDs = append(state.eventIDs, event.EventID)
 	if event.Text != nil {
 		state.textChars += utf8.RuneCountInString(*event.Text)
+	}
+	// Прямое обращение в группе не должно ждать пассивного окна 3–5 с:
+	// пачка (вместе с уже накопленным шумом) закрывается быстро, как
+	// reply/mention/command (§6.2, 30.1).
+	if event.Direct && event.ChatType != ChatPrivate {
+		directWindows := m.Windows(event.ChatType, KindReply)
+		state.windows = directWindows
+		if state.idle != nil {
+			state.idle.Stop()
+		}
+		if state.max != nil {
+			state.max.Stop()
+		}
+		state.max = time.AfterFunc(directWindows.Max, func() { m.closeChat(event.ChatID) })
 	}
 
 	if len(state.eventIDs) >= m.MaxEvents || state.textChars >= m.MaxTextChars {
@@ -205,7 +228,7 @@ func (m *ChatBufferManager) closeAsync(ctx context.Context, chatID int64, ids []
 		// без повтора события ждали его и могли обогнать более новый ход.
 		var err error
 		for attempt := 1; attempt <= 3; attempt++ {
-			if err = m.createTurn(ctx, chatID, ids); err == nil {
+			if _, err = m.processBatch(ctx, chatID, ids); err == nil {
 				return
 			}
 			if attempt < 3 {
@@ -229,7 +252,7 @@ func (m *ChatBufferManager) FlushAll(ctx context.Context) {
 		m.wg.Add(1)
 		go func(chatID int64, ids []int64) {
 			defer m.wg.Done()
-			if err := m.createTurn(ctx, chatID, ids); err != nil {
+			if _, err := m.processBatch(ctx, chatID, ids); err != nil {
 				m.logger.Printf("буфер: порция чата %d не закрыта при остановке: %v", chatID, err)
 			}
 		}(chatID, ids)
@@ -308,9 +331,13 @@ func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, ag
 			}
 			continue
 		}
-		if err := m.createTurn(ctx, b.chatID, b.ids); err != nil {
+		processed, err := m.processBatch(ctx, b.chatID, b.ids)
+		if err != nil {
 			m.logger.Printf("буфер: recovery чата %d не удался, остальные чаты продолжаются: %v", b.chatID, err)
 			continue
+		}
+		if !processed {
+			continue // пачка решена как journal_only — хода нет
 		}
 		chats++
 		events += len(b.ids)
@@ -333,6 +360,49 @@ func (m *ChatBufferManager) supersededByNewerTurn(ctx context.Context, chatID in
 		return false, err
 	}
 	return superseded, nil
+}
+
+// processBatch — судьба закрытой пачки (30.1): сначала дешёвый фильтр (для
+// групп), затем транзакционное создание хода. processed=false — пачка
+// осталась в журнале и недавней истории (journal_only), хода нет. Ошибка
+// гейта/БД оставляет события pending: их подберёт recovery.
+func (m *ChatBufferManager) processBatch(ctx context.Context, chatID int64, ids []int64) (bool, error) {
+	if m.gate != nil {
+		decision, err := m.gate.DecideBatch(ctx, chatID, ids)
+		if err != nil {
+			return false, fmt.Errorf("буфер: судьба пачки чата %d не решена: %w", chatID, err)
+		}
+		if !decision.Process {
+			if err := m.markJournalOnly(ctx, chatID, ids); err != nil {
+				return false, err
+			}
+			m.logger.Printf("буфер: пачка чата %d осталась в журнале (%s, событий %d)",
+				chatID, decision.Reason, len(ids))
+			return false, nil
+		}
+		m.logger.Printf("буфер: пачка чата %d идёт в ход (%s, событий %d)",
+			chatID, decision.Reason, len(ids))
+	}
+	if err := m.createTurn(ctx, chatID, ids); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// markJournalOnly — пачка не идёт в модель: события видны в недавней истории,
+// но не создают ход и durable memory (30.1).
+func (m *ChatBufferManager) markJournalOnly(ctx context.Context, chatID int64, ids []int64) error {
+	tag, err := m.deps.Pool.Exec(ctx,
+		`UPDATE social_events SET status = 'journal_only'
+		 WHERE id = ANY($1::bigint[]) AND status = 'pending'`, ids)
+	if err != nil {
+		return fmt.Errorf("буфер: пачка чата %d не помечена journal_only: %w", chatID, err)
+	}
+	if tag.RowsAffected() != int64(len(ids)) {
+		m.logger.Printf("буфер: чат %d: journal_only помечено %d событий из %d (часть уже не pending)",
+			chatID, tag.RowsAffected(), len(ids))
+	}
+	return nil
 }
 
 // createTurn — транзакционное закрытие порции (§6.2): turn с постоянным ID,
@@ -360,12 +430,15 @@ func (m *ChatBufferManager) dbStartTurn(ctx context.Context, chatID int64, ids [
 		return 0, "", fmt.Errorf("буфер: пустая порция чата %d", chatID)
 	}
 	var chatType string
-	if err := m.deps.Pool.QueryRow(ctx,
-		`SELECT chat_type FROM social_events WHERE id = $1`, ids[0]).Scan(&chatType); err != nil {
+	var direct bool
+	if err := m.deps.Pool.QueryRow(ctx, `
+		SELECT (SELECT chat_type FROM social_events WHERE id = $1),
+		       EXISTS (SELECT 1 FROM social_events WHERE id = ANY($2::bigint[]) AND direct)`,
+		ids[0], ids).Scan(&chatType, &direct); err != nil {
 		return 0, "", fmt.Errorf("буфер: тип чата %d не читается: %w", chatID, err)
 	}
 	kind := "group"
-	if chatType == string(ChatPrivate) {
+	if chatType == string(ChatPrivate) || direct {
 		kind = "direct"
 	}
 

@@ -273,9 +273,27 @@ func (a *App) Start(ctx context.Context) error {
 		},
 	}, a.opts.Cognitive)
 
+	// Групповой гейт (этап 30.1): дешёвый фильтр закрытой пачки — имя/алиасы,
+	// вопрос ко всем, эмбеддинг пачки к интересам персоны. Кэш тем — при старте.
+	groupGate := telegram.NewGroupGate(pool, telegram.GroupGateConfig{
+		Name:     persona.Name,
+		Aliases:  persona.Aliases,
+		Topics:   append(append([]string{}, persona.Interests...), persona.Curiosity...),
+		Embedder: toolset.Embedder(),
+		Logger:   a.logger,
+		Now:      a.opts.Now,
+	})
+	groupGate.Prepare(ctx)
+	if toolset.Embedder() != nil {
+		a.logger.Printf("группы: повод по теме включён (тем %d)", len(persona.Interests)+len(persona.Curiosity))
+	} else {
+		a.logger.Printf("группы: повод по теме выключен (EMBEDDING_* не заданы) — имя и шаблоны вопросов")
+	}
+
 	bufferDeps := telegram.BufferDeps{
 		Pool:        pool,
 		Logger:      a.logger,
+		Gate:        groupGate,
 		OnTurnReady: func(turnID, chatID int64, kind string) { a.cognit.Wake() },
 	}
 	a.buffers = telegram.NewChatBufferManager(bufferDeps)
@@ -559,6 +577,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 	raw, err := os.ReadFile(personaPath)
 	var schedule *character.Schedule
 	var curiosity []string
+	var aliases []string
 	switch {
 	case err == nil:
 		parsed, perr := character.ParsePersonaFile(string(raw))
@@ -568,6 +587,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 		source = parsed
 		schedule = source.Schedule
 		curiosity = source.Curiosity
+		aliases = source.Aliases
 		if _, _, uerr := repo.EnsureFromSource(ctx, a.pool, source); uerr != nil {
 			return character.Persona{}, character.PersonaSource{}, "",
 				fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
@@ -587,6 +607,8 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 	persona.Schedule = schedule
 	// Темы любопытства — тоже из файла (этап 23.2), не версионируются.
 	persona.Curiosity = curiosity
+	// Алиасы имени для групп (этап 30.1) — тоже настройка процесса.
+	persona.Aliases = aliases
 
 	var template string
 	if raw, err := os.ReadFile(templatePath); err == nil {

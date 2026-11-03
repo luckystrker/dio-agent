@@ -213,6 +213,16 @@ func (t *Toolset) SearchTool() ForcedOnDirectQuestion {
 	return t.searchTool.(ForcedOnDirectQuestion)
 }
 
+// Embedder возвращает векторизатор инструментария (nil — семантика
+// выключена). Нужен фоновым гейтам (группы, этап 30.1), чтобы не строить
+// второй клиент EMBEDDING_*.
+func (t *Toolset) Embedder() Embedder {
+	if t == nil || t.search == nil {
+		return nil
+	}
+	return t.search.Embedder
+}
+
 // SemanticModel — имя модели векторизатора; пусто — семантика выключена
 // (EMBEDDING_* не заданы): инструменты и карточка работают полнотекстом.
 func (t *Toolset) SemanticModel() string {

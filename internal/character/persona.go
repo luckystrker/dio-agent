@@ -33,6 +33,9 @@ type Persona struct {
 	// как и расписание, не версионируются в БД: runtime выбирает из них тему
 	// фонового поиска, когда стало скучно.
 	Curiosity []string
+	// Aliases — как персонажа зовут без @ в группах (этап 30.1); настройка
+	// процесса, не версионируется в БД.
+	Aliases   []string
 	CreatedAt time.Time
 }
 
@@ -200,10 +203,10 @@ func marshalValues(values []string) string {
 }
 
 // personaMatchesSource сравнивает поля, которые версионируются в БД.
-// Расписание дня (source.Schedule) и темы любопытства (source.Curiosity) сюда
-// сознательно не входят: это настройки процесса, как каркас промпта, — правка
-// только их новую версию персоны не создаёт, но применяется перезапуском
-// (этапы 22 и 23).
+// Расписание дня (source.Schedule), темы любопытства (source.Curiosity) и
+// алиасы имени (source.Aliases) сюда сознательно не входят: это настройки
+// процесса, как каркас промпта, — правка только их новую версию персоны не
+// создаёт, но применяется перезапуском (этапы 22, 23 и 30).
 func personaMatchesSource(p Persona, source PersonaSource) bool {
 	if p.Name != source.Name || p.Description != source.Description || p.SpeechStyle != source.SpeechStyle {
 		return false

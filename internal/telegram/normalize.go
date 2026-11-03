@@ -52,9 +52,17 @@ type NormalizedEvent struct {
 	ActorName *string
 	Kind      EventKind
 	Text      *string
-	// Date — время сообщения из update (секунды Unix, message.date); 0 — даты
-	// нет, occurred_at возьмёт now() приёма (18.1).
+	// MessageID — telegram message_id: по нему правка находит исходное
+	// сообщение (§6.1, 30.4) и обновляет его текст в истории.
+	MessageID int64
+	// Date — время сообщения из update (секунды Unix, message.date); у правки —
+	// edit_date (§6.1, 30.4): событие правки не выглядит старым. 0 — даты нет,
+	// occurred_at возьмёт now() приёма (18.1).
 	Date int64
+	// Direct — событие прямо адресовано боту (§6.3): личка, reply боту, @бот
+	// или команда. По нему выбирается приоритет хода (§5.2) и решается судьба
+	// пачки группы (30.1).
+	Direct bool
 	// Supported=false — update не поддерживается: журнал без обработки.
 	Supported bool
 	// BotKnown — идентичность бота известна (getMe удался): только тогда
@@ -81,7 +89,9 @@ type telegramUser struct {
 
 type telegramMessage struct {
 	From            *telegramUser       `json:"from"`
-	Date            int64               `json:"date"` // секунды Unix (время сообщения, не приёма)
+	MessageID       int64               `json:"message_id"`
+	Date            int64               `json:"date"`      // секунды Unix (время сообщения, не приёма)
+	EditDate        int64               `json:"edit_date"` // секунды Unix (время правки, 0 — не правка)
 	Text            *string             `json:"text"`
 	Caption         *string             `json:"caption"`
 	Photo           []telegramPhotoSize `json:"photo"`
@@ -221,20 +231,52 @@ func NormalizeUpdateWithBot(raw json.RawMessage, bot BotIdentity) (NormalizedEve
 		chatType = ChatPrivate
 	}
 	known := bot.ID != 0 || bot.Username != ""
-	return NormalizedEvent{
+	kind := detectKind(message, edited)
+	date := message.Date
+	if edited && message.EditDate > 0 {
+		date = message.EditDate
+	}
+	event := NormalizedEvent{
 		TelegramUpdateID: shape.UpdateID,
 		ChatID:           message.Chat.ID,
 		ChatType:         chatType,
 		ActorID:          actorIDOf(message),
 		ActorName:        actorNameOf(message.From),
-		Kind:             detectKind(message, edited),
+		Kind:             kind,
 		Text:             eventText(message),
-		Date:             message.Date,
+		MessageID:        message.MessageID,
+		Date:             date,
 		Supported:        true,
 		BotKnown:         known,
 		ReplyToBot:       known && isReplyToBot(message, bot),
 		MentionBot:       known && hasBotMention(message, bot),
-	}, nil
+	}
+	event.Direct = IsDirectAddress(event)
+	return event, nil
+}
+
+// IsDirectAddress — событие прямо адресовано боту (§6.3): личка, упоминание
+// бота, reply боту или команда. В группе reply/mention без известной
+// идентичности бота (dry-run, старые тесты) считаются прямыми — прежнее
+// поведение prefilter; с известной идентичностью reply чужому и @чужой_ник
+// прямыми не являются (M8).
+func IsDirectAddress(event NormalizedEvent) bool {
+	if !event.Supported {
+		return false
+	}
+	if event.ChatType == ChatPrivate {
+		return true
+	}
+	if event.MentionBot || event.Kind == KindCommand {
+		return true
+	}
+	switch event.Kind {
+	case KindReply:
+		return !event.BotKnown || event.ReplyToBot
+	case KindMention:
+		return !event.BotKnown || event.MentionBot
+	}
+	return false
 }
 
 // isReplyToBot — reply именно на сообщение этого бота (не на любое в чате).

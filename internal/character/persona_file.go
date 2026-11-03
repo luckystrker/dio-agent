@@ -21,7 +21,7 @@ var (
 	// (этап 25.3). «Темы для любопытства» — сиды собственного интереса
 	// (этап 23.2): из них runtime выбирает тему фонового поиска.
 	personaKnownSections = append(append([]string{}, personaRequiredSections...),
-		"Биография", "Интересы", scheduleSection, "Стикеры", curiositySection)
+		"Биография", "Интересы", scheduleSection, "Стикеры", curiositySection, aliasesSection)
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
@@ -29,6 +29,11 @@ var commentPattern = regexp.MustCompile(`(?s)<!--.*?-->`)
 
 // curiositySection — необязательная секция тем собственного интереса (этап 23.2).
 const curiositySection = "Темы для любопытства"
+
+// aliasesSection — необязательная секция алиасов имени (этап 30.1): так бота
+// зовут в группах без @ («дио», «дийо»). Не версионируется в БД, как
+// расписание: это настройка процесса, применяется перезапуском.
+const aliasesSection = "Алиасы"
 
 // sectionHeaderPattern — строка заголовка секции «## …».
 var sectionHeaderPattern = regexp.MustCompile(`(?m)^## `)
@@ -63,6 +68,9 @@ type PersonaSource struct {
 	// Не версионируются в БД: это настройка процесса, как расписание дня;
 	// runtime выбирает из них тему фонового поиска интереса.
 	Curiosity []string
+	// Aliases — как персонажа зовут без @ в группах (этап 30.1); не
+	// версионируются в БД, как расписание.
+	Aliases []string
 }
 
 // splitSections разбирает текст на секции по заголовкам «## …». Первое
@@ -218,6 +226,12 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 			return PersonaSource{}, err
 		}
 	}
+	// алиасы необязательны (этап 30.1): строка или список, разделители — запятая,
+	// точка с запятой, вертикальная черта.
+	var aliases []string
+	if raw, ok := sections[aliasesSection]; ok {
+		aliases = parseAliasesSection(raw)
+	}
 
 	return PersonaSource{
 		Name:         name,
@@ -230,6 +244,7 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		Schedule:     schedule,
 		Stickers:     stickers,
 		Curiosity:    curiosity,
+		Aliases:      aliases,
 	}, nil
 }
 
@@ -249,6 +264,23 @@ func parseCuriositySection(raw string) ([]string, error) {
 			"persona-файл: секция «%s» пуста — нужна хотя бы одна тема строкой или удалите секцию", curiositySection)
 	}
 	return out, nil
+}
+
+// parseAliasesSection разбирает секцию «Алиасы»: одна строка или список,
+// разделители — запятая, точка с запятой, вертикальная черта. Пустая секция —
+// алиасов нет (имя из «Имя» действует всегда).
+func parseAliasesSection(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '|' || r == '\n' || r == '\r'
+	})
+	var out []string
+	for _, field := range fields {
+		field = strings.TrimSpace(dashPrefix.ReplaceAllString(strings.TrimSpace(field), ""))
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 // parseStickerSection разбирает секцию «Стикеры»: по строке на стикер,

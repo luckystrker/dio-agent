@@ -294,10 +294,11 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 // пуле захват молча не проходил.
 func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT t.id, t.chat_id, (e.chat_type = 'private') AS direct
+		SELECT t.id, t.chat_id, (e.chat_type = 'private' OR e.direct) AS direct
 		FROM turns t
 		JOIN LATERAL (
-		  SELECT chat_type FROM social_events WHERE turn_id = t.id ORDER BY id LIMIT 1
+		  SELECT min(chat_type) AS chat_type, bool_or(direct) AS direct
+		  FROM social_events WHERE turn_id = t.id
 		) e ON true
 		WHERE t.status = 'created'
 		  AND NOT EXISTS (

@@ -158,6 +158,7 @@ func (p *TelegramPoller) Run(ctx context.Context) error {
 					ChatType: result.Event.ChatType,
 					Kind:     result.Event.Kind,
 					Text:     result.Event.Text,
+					Direct:   result.Event.Direct,
 				})
 			}
 		}
