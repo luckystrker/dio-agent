@@ -267,14 +267,14 @@ func IsDirectAddress(event NormalizedEvent) bool {
 	if event.ChatType == ChatPrivate {
 		return true
 	}
-	if event.MentionBot || event.Kind == KindCommand {
+	if event.MentionBot || event.ReplyToBot || event.Kind == KindCommand {
 		return true
 	}
 	switch event.Kind {
 	case KindReply:
-		return !event.BotKnown || event.ReplyToBot
+		return !event.BotKnown // reply боту уже пойман выше
 	case KindMention:
-		return !event.BotKnown || event.MentionBot
+		return !event.BotKnown // mention бота уже пойман выше
 	}
 	return false
 }

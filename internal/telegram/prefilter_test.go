@@ -126,3 +126,18 @@ func TestDecideIngestStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestIsDirectAddressEditedReplyToBot(t *testing.T) {
+	// Правка reply-сообщения боту остаётся прямым обращением (30.4): kind у
+	// правки — edited, но reply_to_message бота никуда не делся.
+	ev := NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindEdited,
+		BotKnown: true, ReplyToBot: true}
+	if !IsDirectAddress(ev) {
+		t.Fatalf("правка reply боту не считается прямым обращением: %+v", ev)
+	}
+	// Правка обычного сообщения в группе — не обращение.
+	ev = NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindEdited, BotKnown: true}
+	if IsDirectAddress(ev) {
+		t.Fatalf("правка обычного сообщения принята за обращение: %+v", ev)
+	}
+}
