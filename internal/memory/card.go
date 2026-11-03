@@ -42,10 +42,13 @@ const (
 	// cardEntryLimit — потолок текста одной заметки: одна длинная запись не
 	// вытесняет все остальные из карточки.
 	cardEntryLimit = 300
-	// cardSemanticDistanceMax — порог семантической близости: попадания
-	// дальше него — шум, а не «релевантное, которое не влезло». Full-text
-	// попадания релевантны всегда (Distance = -1).
-	cardSemanticDistanceMax = 0.6
+	// cardSemanticDistanceMax — порог семантической близости (калибровка
+	// bge-m3 на русском, 2026-11-03): настоящие попадания 0.34–0.44,
+	// несвязанные начинаются с ~0.49. Порог 0.45 отсекает шум, не теряя
+	// реальных совпадений: с мягким 0.6 половина несвязанных записей попадала
+	// в кандидаты и вытесняла full-text. Full-text попадания релевантны всегда
+	// (Distance = -1).
+	cardSemanticDistanceMax = 0.45
 )
 
 // cardHeader — маркер данных: заметки памяти не являются инструкциями.
@@ -209,20 +212,33 @@ func (t *Toolset) relevantCardItems(ctx context.Context, audience, query string)
 }
 
 // cardRelevantItems фильтрует выдачу поиска: full-text попадания релевантны
-// всегда, семантические — только в пределах порога; лишние сверх потолка
-// отбрасываются с честным признаком среза.
+// всегда, семантические — только в пределах порога. Срез «лишних»
+// семантических попаданий — нормален: они ранжированы, лучшие уже в карточке,
+// поэтому полноту не ломает. cut=true только если за лимитом осталось
+// full-text попадание (его без инструментов уже не достать).
 func cardRelevantItems(results []ScoredItem) ([]Item, bool) {
-	items := make([]Item, 0, len(results))
+	kept := make([]ScoredItem, 0, len(results))
 	for _, r := range results {
 		if r.Distance >= 0 && r.Distance > cardSemanticDistanceMax {
 			continue
 		}
-		items = append(items, r.Item)
+		kept = append(kept, r)
 	}
-	if len(items) > cardChatItemLimit {
-		return items[:cardChatItemLimit], true
+	cut := false
+	if len(kept) > cardChatItemLimit {
+		for _, r := range kept[cardChatItemLimit:] {
+			if r.Distance < 0 {
+				cut = true
+				break
+			}
+		}
+		kept = kept[:cardChatItemLimit]
 	}
-	return items, false
+	items := make([]Item, len(kept))
+	for i, r := range kept {
+		items[i] = r.Item
+	}
+	return items, cut
 }
 
 // fallbackCardEntries — прежний отбор карточки (решение 2026-11-02): записи

@@ -60,13 +60,17 @@ func TestAssembleConversationCardFitsOnlyRelevant(t *testing.T) {
 }
 
 // TestCardRelevantItemsThreshold — отсев семантического шума по порогу:
-// full-text попадания релевантны всегда, слабые векторы отбрасываются;
-// срез по количеству честно помечается как «релевантное не влезло».
+// full-text попадания релевантны всегда, слабые векторы отбрасываются.
+// Срез лишних СЕМАНТИЧЕСКИХ попаданий — нормален (лучшие уже в карточке) и
+// полноту не ломает; cut=true только если за лимитом осталось full-text
+// попадание.
 func TestCardRelevantItemsThreshold(t *testing.T) {
 	results := []ScoredItem{
 		{Item: Item{ID: 1, Text: "full-text"}, Distance: -1},
-		{Item: Item{ID: 2, Text: "близкий вектор"}, Distance: 0.2},
-		{Item: Item{ID: 3, Text: "далёкий вектор"}, Distance: cardSemanticDistanceMax + 0.1},
+		{Item: Item{ID: 2, Text: "настоящее попадание"}, Distance: 0.40},
+		{Item: Item{ID: 3, Text: "на границе"}, Distance: 0.5},
+		{Item: Item{ID: 4, Text: "далёкий вектор"}, Distance: 0.6},
+		{Item: Item{ID: 5, Text: "совсем шум"}, Distance: cardSemanticDistanceMax + 0.1},
 	}
 	items, cut := cardRelevantItems(results)
 	if cut {
@@ -76,12 +80,25 @@ func TestCardRelevantItemsThreshold(t *testing.T) {
 		t.Fatalf("порог релевантности не применился: %+v", items)
 	}
 
-	many := make([]ScoredItem, 0, cardChatItemLimit+1)
-	for i := 1; i <= cardChatItemLimit+1; i++ {
-		many = append(many, ScoredItem{Item: Item{ID: int64(i), Text: "x"}, Distance: -1})
+	// 20 семантических попаданий в диапазоне настоящих совпадений bge-m3:
+	// в карточке 8 лучших, полнота не ломается.
+	semantic := make([]ScoredItem, 0, 20)
+	for i := 0; i < 20; i++ {
+		semantic = append(semantic, ScoredItem{
+			Item:     Item{ID: int64(100 + i), Text: "x"},
+			Distance: 0.30 + 0.14*float64(i)/19,
+		})
 	}
-	items, cut = cardRelevantItems(many)
+	items, cut = cardRelevantItems(semantic)
+	if cut || len(items) != cardChatItemLimit {
+		t.Fatalf("срез лишних семантических: items=%d cut=%v, хочу %d/false", len(items), cut, cardChatItemLimit)
+	}
+
+	// Full-text попадание вылетело за лимит — это честная неполнота.
+	mixed := append([]ScoredItem{}, semantic[:cardChatItemLimit]...)
+	mixed = append(mixed, ScoredItem{Item: Item{ID: 999, Text: "full-text в хвосте"}, Distance: -1})
+	items, cut = cardRelevantItems(mixed)
 	if !cut || len(items) != cardChatItemLimit {
-		t.Fatalf("срез релевантных попаданий: items=%d cut=%v", len(items), cut)
+		t.Fatalf("вытесненное full-text попадание: items=%d cut=%v, хочу %d/true", len(items), cut, cardChatItemLimit)
 	}
 }
