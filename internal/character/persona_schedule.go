@@ -86,6 +86,26 @@ func (s Schedule) BlockAt(at time.Time, loc *time.Location) *ScheduleBlock {
 	return nil
 }
 
+// QuietUntil — если в момент at действует тихий блок, возвращает момент, когда
+// тишина кончится (абсолютное время, уже в поясе loc). Второе значение —
+// «сейчас тихо».
+func (s Schedule) QuietUntil(at time.Time, loc *time.Location) (time.Time, bool) {
+	block := s.BlockAt(at, loc)
+	if block == nil || !block.Quiet {
+		return time.Time{}, false
+	}
+	zone := locationOrDefault(loc)
+	local := at.In(zone)
+	hour, minute := block.EndMinute/60, block.EndMinute%60
+	// Конец блока через полночь — на следующий день. time.Date нормализует
+	// hour=24 в 00:00 следующего дня и корректно обходит переходы пояса.
+	day := local.Day()
+	if block.Wraps() {
+		day++
+	}
+	return time.Date(local.Year(), local.Month(), day, hour, minute, 0, 0, zone), true
+}
+
 // MoodTargetAt — цель затухания настроения (этап 22.2): valence остаётся
 // базовой линией персоны, arousal и socialEnergy берутся из блока текущего
 // времени. Расписания нет — прежняя базовая линия.
@@ -102,6 +122,14 @@ func (p Persona) MoodTargetAt(at time.Time, loc *time.Location) Mood {
 		Arousal:      block.Arousal,
 		SocialEnergy: block.SocialEnergy,
 	}
+}
+
+// QuietUntil — тихий блок расписания персоны в момент at (§14.3, этап 22.4).
+func (p Persona) QuietUntil(at time.Time, loc *time.Location) (time.Time, bool) {
+	if p.Schedule == nil {
+		return time.Time{}, false
+	}
+	return p.Schedule.QuietUntil(at, loc)
 }
 
 // ActivityAt — «чем занят» по расписанию в момент at (пусто — расписания нет).
