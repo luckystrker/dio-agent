@@ -241,12 +241,23 @@ func (m *ChatBufferManager) RecoverStalePending(ctx context.Context) (chats, eve
 // чата логируется и не валит остальные (старт не должен падать из-за гонки
 // RowsAffected на одном чате).
 func (m *ChatBufferManager) RecoverStalePendingOlderThan(ctx context.Context, age time.Duration) (chats, events int, err error) {
+	// События, ещё лежащие в буфере памяти, не трогаем: у них жив свой таймер,
+	// а occurred_at — время сообщения Telegram, которое после простоя поллера
+	// может быть старым (minor ревью). Пустой срез — не NULL для ANY().
+	m.mu.Lock()
+	buffered := make([]int64, 0)
+	for _, state := range m.buffers {
+		buffered = append(buffered, state.eventIDs...)
+	}
+	m.mu.Unlock()
+
 	rows, err := m.deps.Pool.Query(ctx, `
 		SELECT chat_id, array_agg(id) AS ids
 		FROM social_events
 		WHERE status = 'pending'
 		  AND ($1::interval <= interval '0' OR occurred_at < now() - $1::interval)
-		GROUP BY chat_id`, age)
+		  AND NOT (id = ANY($2::bigint[]))
+		GROUP BY chat_id`, age, buffered)
 	if err != nil {
 		return 0, 0, fmt.Errorf("буфер: pending-события не читаются: %w", err)
 	}

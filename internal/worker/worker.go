@@ -360,6 +360,11 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 	batch, err := w.loadBatch(ctx, turn.ID)
 	if err != nil {
+		if ctx.Err() != nil {
+			// Отмена во время чтения пачки — не сбой хода: попытка не сгорает.
+			w.releaseAttempt(turn)
+			return
+		}
 		w.fail(ctx, turn, err)
 		return
 	}

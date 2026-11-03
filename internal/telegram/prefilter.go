@@ -35,7 +35,7 @@ func DecideIngestStatus(event NormalizedEvent) IngestStatus {
 	case KindCommand:
 		return StatusPending
 	case KindReply:
-		if !event.BotKnown || event.ReplyToBot {
+		if !event.BotKnown || event.ReplyToBot || event.MentionBot {
 			return StatusPending
 		}
 	case KindMention:

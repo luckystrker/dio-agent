@@ -1,10 +1,15 @@
 // Семафор когниции (§5.2): одновременно выполняется не более одного
 // модельного задания — прямой ход worker'а, инициатива, exploration или
 // консолидация фона. Без общего замка фон и worker думали параллельно:
-// два ApplyTurn, двойной расход бюджета и инициатива поверх свежего ответа.
+// двойной расход бюджета и инициатива поверх свежего ответа. Применение
+// результата у фона идёт после освобождения семафора, но оно транзакционно
+// и защищено CAS хода/намерения (§12.1, §14.3).
 package runtime
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
 // CognitionLock — семафор ёмкостью 1.
 type CognitionLock struct {
@@ -17,21 +22,15 @@ func NewCognitionLock() *CognitionLock {
 }
 
 // Acquire берёт семафор до отмены ctx. nil-замок — no-op (тесты и сборки без
-// общей когниции). Возвращённый release идемпотентен.
+// общей когниции). Возвращённый release идемпотентен (sync.Once).
 func (l *CognitionLock) Acquire(ctx context.Context) (release func(), ok bool) {
 	if l == nil {
 		return func() {}, true
 	}
 	select {
 	case l.ch <- struct{}{}:
-		var once bool
-		return func() {
-			if once {
-				return
-			}
-			once = true
-			<-l.ch
-		}, true
+		var once sync.Once
+		return func() { once.Do(func() { <-l.ch }) }, true
 	case <-ctx.Done():
 		return nil, false
 	}
@@ -45,14 +44,8 @@ func (l *CognitionLock) TryAcquire() (release func(), ok bool) {
 	}
 	select {
 	case l.ch <- struct{}{}:
-		var once bool
-		return func() {
-			if once {
-				return
-			}
-			once = true
-			<-l.ch
-		}, true
+		var once sync.Once
+		return func() { once.Do(func() { <-l.ch }) }, true
 	default:
 		return nil, false
 	}

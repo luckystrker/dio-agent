@@ -381,6 +381,44 @@ func TestDeliveryCanceledBeforeSendRequeues(t *testing.T) {
 	}
 }
 
+// TestDeliveryTickCancellationDuringBubbleGapRequeues — C1: остановка во время
+// паузы между пузырями возвращает строку в очередь (requeueAbandoned), а не
+// оставляет её в sending до recovery/unknown.
+func TestDeliveryTickCancellationDuringBubbleGapRequeues(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+	repo := NewOutboxRepo(pool)
+
+	id := insertOutbox(t, pool, 195, 42, 1, `{"kind":"message","text":"второй пузырь"}`)
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{BubbleGap: time.Hour})
+	// Первый пузырь уже отправлен — пауза перед вторым длинная.
+	loop.lastSent[195] = time.Now()
+
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	if err := loop.Tick(runCtx); err == nil {
+		t.Fatal("такт при отмене должен вернуть ошибку контекста")
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "retry_wait" {
+		t.Fatalf("после отмены в паузе статус %q, хочу retry_wait", status)
+	}
+	if len(stub.sentMessages()) != 0 {
+		t.Fatalf("недоставленное не должно уходить в сеть")
+	}
+}
+
 func TestDeliveryLoopReaction(t *testing.T) {
 
 	// §13.2/§11.2: реакция — установка состояния; telegram_message_id — NULL.

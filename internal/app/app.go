@@ -273,8 +273,24 @@ func (a *App) Start(ctx context.Context) error {
 
 	if api != nil {
 		a.poller = telegram.NewTelegramPoller(pool, api, a.buffers.Add, a.logger, a.opts.Poll)
-		if bot, berr := api.GetMe(ctx); berr != nil {
-			a.logger.Printf("getMe не удался: reply/mention в группах считаются по прежним правилам: %v", berr)
+		// getMe — с несколькими попытками: разовый сетевой сбой на старте не
+		// должен откатывать групповые правила до «любой reply — обращение».
+		var (
+			bot  telegram.BotIdentity
+			berr error
+		)
+		for attempt := 0; attempt < 3; attempt++ {
+			bot, berr = api.GetMe(ctx)
+			if berr == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+			}
+		}
+		if berr != nil {
+			a.logger.Printf("getMe не удался после повторов: reply/mention в группах считаются по прежним правилам: %v", berr)
 		} else {
 			a.poller.SetBotIdentity(bot)
 		}

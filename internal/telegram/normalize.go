@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf16"
 )
 
 // ErrUnusableUpdate — update неисправим на уровне данных (не разобран или
@@ -179,17 +180,25 @@ func isReplyToBot(message *telegramMessage, bot BotIdentity) bool {
 	return message.ReplyToMessage.From.ID == bot.ID
 }
 
-// hasBotMention — в сообщении есть entity mention и текст содержит
-// @username бота. Entity не даёт ложного срабатывания на простое упоминание
-// имени в тексте; сравнение регистронезависимое, как у Telegram.
+// hasBotMention — в сообщении есть entity mention, и её диапазон (offset/
+// length в единицах UTF-16) указывает ровно на @username бота. Сравнение
+// регистронезависимое, как у Telegram. Подстрока не подходит: @dio_fan не
+// должен считаться обращением к @dio (minor ревью).
 func hasBotMention(message *telegramMessage, bot BotIdentity) bool {
 	if bot.Username == "" || message.Text == nil {
 		return false
 	}
-	needle := "@" + strings.ToLower(bot.Username)
-	lower := strings.ToLower(*message.Text)
+	want := "@" + bot.Username
+	units := utf16.Encode([]rune(*message.Text))
 	for _, entity := range message.Entities {
-		if entity.Type == "mention" && strings.Contains(lower, needle) {
+		if entity.Type != "mention" {
+			continue
+		}
+		if entity.Offset < 0 || entity.Length <= 0 || entity.Offset+entity.Length > len(units) {
+			continue
+		}
+		frag := string(utf16.Decode(units[entity.Offset : entity.Offset+entity.Length]))
+		if strings.EqualFold(frag, want) {
 			return true
 		}
 	}

@@ -50,6 +50,17 @@ func TestNormalizeReplyAndMentionOnlyToBot(t *testing.T) {
 		t.Fatalf("mention бота не распознан: %+v", ev)
 	}
 
+	// Похожий, но чужой ник: @dio_fan — не @dio.
+	mentionSimilar := []byte(`{"update_id":5,"message":{"message_id":14,"chat":{"id":-5,"type":"group"},` +
+		`"from":{"id":1,"first_name":"Аня"},"text":"@dio_fan привет","entities":[{"type":"mention","offset":0,"length":8}]}}`)
+	ev, err = NormalizeUpdateWithBot(mentionSimilar, bot)
+	if err != nil {
+		t.Fatalf("похожий ник: %v", err)
+	}
+	if ev.MentionBot {
+		t.Fatalf("@dio_fan принят за @%s: %+v", bot.Username, ev)
+	}
+
 	// Без идентичности бота флаги ложные, prefilter — по прежним правилам.
 	ev, err = NormalizeUpdate(other)
 	if err != nil {
@@ -90,6 +101,8 @@ func TestDecideIngestStatus(t *testing.T) {
 			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindMention, BotKnown: true, MentionBot: false}, StatusJournalOnly},
 		{"mention бота в группе — обращение (M8)",
 			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindMention, BotKnown: true, MentionBot: true}, StatusPending},
+		{"reply человеку с mention бота — обращение (minor ревью)",
+			NormalizedEvent{Supported: true, ChatType: ChatGroup, Kind: KindReply, BotKnown: true, ReplyToBot: false, MentionBot: true}, StatusPending},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
