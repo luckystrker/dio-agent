@@ -366,7 +366,8 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 	scope := memory.ChatScope(fmt.Sprintf("%d", turn.ChatID))
 	release, ok := w.cognition.Acquire(ctx)
 	if !ok {
-		// Отмена, пока ждали семафор: ход не выполнялся.
+		// Отмена, пока ждали семафор: ход не выполнялся — попытка не сгорает.
+		w.releaseAttempt(turn)
 		return
 	}
 	defer release()
@@ -381,7 +382,11 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return // shutdown: ход остаётся в очереди, recovery подберёт (§12.2)
+			// shutdown: ход остаётся в очереди, recovery подберёт (§12.2),
+			// а попытка, сожжённая захватом, возвращается (minor 9): несколько
+			// рестартов подряд не должны перевести ход в skipped без ошибки.
+			w.releaseAttempt(turn)
+			return
 		}
 		// Исчерпание дневного бюджета (§16) — не сбой хода: в полночь пул
 		// обнуляется, ход откладывается до завтра, а не теряется (решение 16.7,
@@ -520,6 +525,18 @@ func transientModelError(err error) bool {
 		}
 	}
 	return false
+}
+
+// releaseAttempt возвращает попытку, сожжённую захватом, если ход не
+// обрабатывался (отмена при shutdown). Запись — на отдельном контексте:
+// runCtx уже отменён, а пул ещё жив до конца Stop.
+func (w *Worker) releaseAttempt(turn *claimedTurn) {
+	qctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := w.pool.Exec(qctx,
+		`UPDATE turns SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'created'`, turn.ID); err != nil {
+		w.logger.Printf("ход %d: попытка не возвращена после остановки: %v", turn.ID, err)
+	}
 }
 
 // deferTurn — отложить ход без расхода попытки: бюджет откладывается до

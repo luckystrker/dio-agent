@@ -240,6 +240,40 @@ func TestWorkerClaimWithSingleConnection(t *testing.T) {
 	}
 }
 
+// TestWorkerShutdownReturnsAttempt — minor 9: отмена посреди хода не сжигает
+// попытку: несколько рестартов подряд не переводят ход в skipped без ошибки.
+func TestWorkerShutdownReturnsAttempt(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+	turnID := seedTurn(t, pool, 4401, "private", "ход на остановке")
+
+	runner := &fakeRunner{pool: pool, blocked: make(chan struct{})}
+	w := New(Deps{Pool: pool, Runner: runner, Logger: log.New(discardWriter{}, "", 0)},
+		Options{PollInterval: 5 * time.Millisecond})
+	runCtx, cancel := context.WithCancel(ctx)
+	go func() { _ = w.Run(runCtx) }()
+
+	eventually(t, "ход взят в работу", func() bool {
+		return len(runner.called()) == 1
+	})
+	cancel()
+	select {
+	case <-w.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("worker не остановился")
+	}
+
+	var status string
+	var attempts int
+	if err := pool.QueryRow(ctx, `SELECT status, attempts FROM turns WHERE id = $1`, turnID).
+		Scan(&status, &attempts); err != nil {
+		t.Fatalf("ход не читается: %v", err)
+	}
+	if status != "created" || attempts != 0 {
+		t.Fatalf("после остановки status=%s attempts=%d, хочу created/0", status, attempts)
+	}
+}
+
 // TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;
 // исчерпание попыток — терминальный пропуск (turn_skipped, инвариант 5).
 func TestWorkerRetriesThenSkips(t *testing.T) {
