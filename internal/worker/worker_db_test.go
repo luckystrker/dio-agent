@@ -176,6 +176,39 @@ func TestWorkerPrioritizesDirect(t *testing.T) {
 	}
 }
 
+// TestWorkerKeepsChatOrderWhileHeadPaused — M2: ход на паузе повтора держит
+// очередь своего чата: более поздний ход того же чата не обгоняет его.
+func TestWorkerKeepsChatOrderWhileHeadPaused(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+
+	first := seedTurn(t, pool, 4201, "private", "ранний вопрос")
+	second := seedTurn(t, pool, 4201, "private", "поздний вопрос")
+	other := seedTurn(t, pool, 4202, "private", "другой чат")
+
+	w := New(Deps{Pool: pool}, Options{PollInterval: time.Millisecond})
+	w.notBefore[first] = time.Now().Add(time.Hour)
+
+	got, err := w.claimNext(ctx)
+	if err != nil {
+		t.Fatalf("claimNext: %v", err)
+	}
+	if got == nil || got.ID != other {
+		t.Fatalf("взят ход %v, хочу ход другого чата %d (поздний ход того же чата обгонять не должен)", got, other)
+	}
+
+	// Пауза снята — ранний ход снова голова очереди.
+	delete(w.notBefore, first)
+	got, err = w.claimNext(ctx)
+	if err != nil {
+		t.Fatalf("claimNext после паузы: %v", err)
+	}
+	if got == nil || got.ID != first {
+		t.Fatalf("после паузы взят %v, хочу ранний ход %d", got, first)
+	}
+	_ = second
+}
+
 // TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;
 // исчерпание попыток — терминальный пропуск (turn_skipped, инвариант 5).
 func TestWorkerRetriesThenSkips(t *testing.T) {

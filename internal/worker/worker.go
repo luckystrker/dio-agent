@@ -251,7 +251,10 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 // claimNext берёт следующий ход очереди: прямое обращение раньше группового
 // (приоритеты §5.2), внутри — порядок по id. Захват — CAS attempts (повторный
 // прогон того же хода после сбоя видит выросший номер попытки); ходы на
-// локальной паузе повтора пропускаются до срока.
+// локальной паузе повтора пропускаются до срока. Ход чата не берётся, пока
+// более ранний ход того же чата ещё created (M2): иначе после сбоя ответ на
+// позднее сообщение уходил раньше ответа на раннее, а события раннего хода
+// попадали в историю позднего как обработанные.
 func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	rows, err := w.pool.Query(ctx, `
 		SELECT t.id, t.chat_id, (e.chat_type = 'private') AS direct
@@ -260,6 +263,13 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 		  SELECT chat_type FROM social_events WHERE turn_id = t.id ORDER BY id LIMIT 1
 		) e ON true
 		WHERE t.status = 'created'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM turns prev
+		    WHERE prev.chat_id = t.chat_id
+		      AND prev.status = 'created'
+		      AND prev.id < t.id
+		      AND EXISTS (SELECT 1 FROM social_events pe WHERE pe.turn_id = prev.id)
+		  )
 		ORDER BY direct DESC, t.id
 		LIMIT 20`)
 	if err != nil {
