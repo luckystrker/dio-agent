@@ -28,7 +28,11 @@ type Persona struct {
 	// Schedule — расписание дня из файла персоны (этап 22). В БД не хранится
 	// (как каркас промпта): это настройка процесса, правка файла применяется
 	// перезапуском службы; nil — расписания нет (прежнее поведение).
-	Schedule  *Schedule
+	Schedule *Schedule
+	// Curiosity — темы собственного интереса из файла персоны (этап 23.2);
+	// как и расписание, не версионируются в БД: runtime выбирает из них тему
+	// фонового поиска, когда стало скучно.
+	Curiosity []string
 	CreatedAt time.Time
 }
 
@@ -196,9 +200,10 @@ func marshalValues(values []string) string {
 }
 
 // personaMatchesSource сравнивает поля, которые версионируются в БД.
-// Расписание дня (source.Schedule) сюда сознательно не входит: это настройка
-// процесса, как каркас промпта, — правка только расписания новую версию
-// персоны не создаёт, но применяется перезапуском (этап 22).
+// Расписание дня (source.Schedule) и темы любопытства (source.Curiosity) сюда
+// сознательно не входят: это настройки процесса, как каркас промпта, — правка
+// только их новую версию персоны не создаёт, но применяется перезапуском
+// (этапы 22 и 23).
 func personaMatchesSource(p Persona, source PersonaSource) bool {
 	if p.Name != source.Name || p.Description != source.Description || p.SpeechStyle != source.SpeechStyle {
 		return false

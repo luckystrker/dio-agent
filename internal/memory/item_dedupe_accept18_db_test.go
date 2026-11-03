@@ -114,9 +114,10 @@ func newPoolWithoutDedupe(t *testing.T) *runtime.Pool {
 	if err != nil {
 		t.Fatalf("миграции до 000013 не применены: %v", err)
 	}
-	// Набор без одной миграции 000014: все остальные, включая 000015 (стикеры).
-	if result.Applied != 14 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 14/0", result.Applied, result.Skipped)
+	// Набор без одной миграции 000014: все остальные, включая 000015 (стикеры)
+	// и 000016 (скука).
+	if result.Applied != 15 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 15/0", result.Applied, result.Skipped)
 	}
 	return pool
 }
@@ -206,8 +207,8 @@ func TestDedupeMigrationCollapsesExistingDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("миграция 000014 обязана применяться поверх существующих дублей: %v", err)
 	}
-	if result.Applied != 1 || result.Skipped != 14 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 1/14", result.Applied, result.Skipped)
+	if result.Applied != 1 || result.Skipped != 15 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 1/15", result.Applied, result.Skipped)
 	}
 
 	// Схлопнуто до старейшей строки; её исходная связь цела, ссылка, висевшая

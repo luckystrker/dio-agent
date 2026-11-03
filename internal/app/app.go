@@ -558,6 +558,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 	var source character.PersonaSource
 	raw, err := os.ReadFile(personaPath)
 	var schedule *character.Schedule
+	var curiosity []string
 	switch {
 	case err == nil:
 		parsed, perr := character.ParsePersonaFile(string(raw))
@@ -566,6 +567,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 		}
 		source = parsed
 		schedule = source.Schedule
+		curiosity = source.Curiosity
 		if _, _, uerr := repo.EnsureFromSource(ctx, a.pool, source); uerr != nil {
 			return character.Persona{}, character.PersonaSource{}, "",
 				fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
@@ -583,6 +585,8 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, character.Per
 	// Расписание дня — из файла (этап 22): в БД не версионируется, как каркас
 	// промпта; nil — секции нет, прежнее поведение.
 	persona.Schedule = schedule
+	// Темы любопытства — тоже из файла (этап 23.2), не версионируются.
+	persona.Curiosity = curiosity
 
 	var template string
 	if raw, err := os.ReadFile(templatePath); err == nil {

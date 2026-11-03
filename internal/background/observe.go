@@ -22,6 +22,8 @@ type QueueStats struct {
 	PendingOutbox int
 	// DueIntentions — намерения с наступившим сроком (ещё не забранные).
 	DueIntentions int
+	// Boredom — текущая шкала скуки 0..1 (этап 23.4): видна в heartbeat.
+	Boredom float64
 }
 
 // QueueStats читает снимок очереди (диагностика §20; вызовов модели нет).
@@ -48,6 +50,14 @@ func (s *Scheduler) QueueStats(ctx context.Context) (QueueStats, error) {
 		Scan(&stats.DueIntentions); err != nil {
 		return QueueStats{}, fmt.Errorf("фон: очередь намерений не читается: %w", err)
 	}
+	// Скука (этап 23.4): heartbeat показывает, насколько персонажу пусто.
+	// Сбой чтения не валит такт: скука — необязательная активность, а стоп
+	// всего фона из-за диагностической метрики недопустим.
+	if boredom, berr := s.boredomNow(ctx); berr != nil {
+		s.logWarn("heartbeat: скука не прочитана: %v", berr)
+	} else {
+		stats.Boredom = boredom
+	}
 	return stats, nil
 }
 
@@ -60,8 +70,8 @@ const growthWarnTicks = 3
 // обращений. Предупреждение — один раз на эпизод роста; сокращение очереди
 // снимает и счётчик, и пометку.
 func (s *Scheduler) observeTick(stats QueueStats) {
-	s.logDebug("heartbeat: фон жив: ходов=%d oldest=%.0fs outbox=%d due_intentions=%d",
-		stats.PendingTurns, stats.OldestTurnAgeSec, stats.PendingOutbox, stats.DueIntentions)
+	s.logDebug("heartbeat: фон жив: ходов=%d oldest=%.0fs outbox=%d due_intentions=%d boredom=%.2f",
+		stats.PendingTurns, stats.OldestTurnAgeSec, stats.PendingOutbox, stats.DueIntentions, stats.Boredom)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,6 +106,10 @@ type TaskRecord struct {
 	MoodReason  string
 	RelReason   string
 	Detail      string
+	// Origin — причина explore (этап 23.4): boredom | conversation.
+	Origin string
+	// Boredom — шкала скуки на момент задачи (этап 23.4).
+	Boredom float64
 }
 
 // recordIntention пишет одну запись §20 об исполненном намерении.
@@ -112,6 +126,8 @@ func (s *Scheduler) recordIntention(it Intention, out intentionOutcome) {
 		BudgetOp:    out.BudgetOp,
 		MoodReason:  out.MoodReason,
 		Detail:      out.Detail,
+		Origin:      out.Origin,
+		Boredom:     out.Boredom,
 	}
 	s.writeRecord(rec)
 }
@@ -132,10 +148,10 @@ func (s *Scheduler) recordConsolidation(ep Episode, out consolidationOutcome) {
 }
 
 func (s *Scheduler) writeRecord(rec TaskRecord) {
-	s.logInfo("фон: задача=%s kind=%s intention=%d chat=%d decision=%s outcome=%s latency_ms=%d llm_calls=%d tokens=%d budget=%s mood_reason=%q rel_reason=%q detail=%q",
+	s.logInfo("фон: задача=%s kind=%s intention=%d chat=%d decision=%s outcome=%s latency_ms=%d llm_calls=%d tokens=%d budget=%s mood_reason=%q rel_reason=%q origin=%q boredom=%.2f detail=%q",
 		rec.Unit, rec.Kind, rec.IntentionID, rec.ChatID, rec.Decision, rec.Outcome,
 		rec.Latency.Milliseconds(), rec.Stats.Calls, rec.Stats.Tokens, rec.BudgetOp,
-		rec.MoodReason, rec.RelReason, rec.Detail)
+		rec.MoodReason, rec.RelReason, rec.Origin, rec.Boredom, rec.Detail)
 }
 
 func (s *Scheduler) logDebug(format string, args ...any) { s.write("DEBUG ", format, args...) }

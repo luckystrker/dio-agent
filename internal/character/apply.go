@@ -69,6 +69,14 @@ type ApplyOptions struct {
 	PersonaBaseline Mood
 	// Journal — пишет deltas_applied + delivery_queued в этой же транзакции.
 	Journal *TurnJournal
+	// BoredomReset — разговорный ход сбрасывает скуку (этап 23.1) в той же
+	// транзакции применения. Фон (инициативы/explore) флаг не ставит: их
+	// находки сбрасывают шкалу отдельным событием BoredomExplore.
+	BoredomReset bool
+	// Now — время применения для производных шкал (скука): ход передаёт свои
+	// инжектированные часы, нулевое — time.Now. Без этого сброс скуки писал бы
+	// стенные часы мимо управляемых часов тестов/планировщика.
+	Now time.Time
 	// Extra — дополнительная работа ВНУТРИ транзакции применения: вызывается
 	// после CAS хода и до записи журнала (§12.1: «либо всё, либо ничего»
 	// распространяется и на связанное состояние, например CAS намерения §14.3 —
@@ -258,6 +266,21 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
 		} else if dup != nil {
 			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
+		}
+	}
+
+	// --- скука (этап 23.1): разговорный ход — сильный сброс, в этой же
+	// транзакции. Стоит после намерений, перед настроением: порядок блокировок
+	// (intentions → character_state) совпадает с путём фона (applyExplore),
+	// и первый же разговор не считает дельту от дефолтов таблицы.
+	if opts.BoredomReset {
+		now := opts.Now
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if _, err := NewBoredomRepo().ApplyEvent(ctx, tx, BoredomConversation,
+			now, nil, nil, opts.PersonaBaseline); err != nil {
+			return ApplyResult{}, fmt.Errorf("применение: сброс скуки: %w", err)
 		}
 	}
 
@@ -462,7 +485,7 @@ func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, b
 	}
 	notBefore := time.Now().Add(time.Duration(row.delayHours * float64(time.Hour)))
 	expiresAt := notBefore.Add(intentionTTLHours * time.Hour)
-	dedupe := intentionDedupeKey(row.kind, row.topic, row.chatID)
+	dedupe := IntentionDedupeKey(row.kind, row.topic, row.chatID)
 
 	var id int64
 	err = tx.QueryRow(ctx, `
@@ -489,8 +512,11 @@ func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, b
 	return 0, false, nil, fmt.Errorf("применение: намерение не создано: %w", err)
 }
 
-// intentionDedupeKey — JSON-склейка инъективна для любых строк (паритет TS).
-func intentionDedupeKey(kind, topic string, chatID int64) string {
+// IntentionDedupeKey — JSON-склейка инъективна для любых строк (паритет TS).
+// Экспортирована фону (этап 23.2): explore от скуки создаётся runtime'ом, но
+// должен совпадать по ключу с намерениями из разговора — одна тема не плодит
+// два поиска.
+func IntentionDedupeKey(kind, topic string, chatID int64) string {
 	raw, _ := json.Marshal([]string{kind, strings.TrimSpace(strings.ToLower(topic)), fmt.Sprintf("%d", chatID)})
 	return string(raw)
 }

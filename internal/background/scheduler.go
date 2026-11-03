@@ -277,6 +277,13 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		return nil
 	}
 
+	// Скука (этап 23.2): доросла выше порога, не тихий блок, живого explore
+	// нет и дневной лимит не исчерпан — runtime создаёт поиск интереса. Ошибка
+	// триггера не валит такт: скука — необязательная активность.
+	if err := s.maybeCuriousExplore(ctx); err != nil {
+		s.logError("скука: поиск интереса не запущен: %v", err)
+	}
+
 	claimed, err := s.intentions.ClaimDue(ctx, s.opts.ClaimLimit)
 	if err != nil {
 		return err

@@ -124,7 +124,12 @@ func TestIntentionGates(t *testing.T) {
 			t.Fatalf("второй пояс не вставлен: %v", err)
 		}
 		// Обе инициативы исполняются сегодня: сдвиг часов мимо 4-часовой паузы
-		// §14.3, чтобы проверялся именно дубль-гейт.
+		// §14.3, чтобы проверялся именно дубль-гейт. Сдвиг растит и скуку
+		// (этап 23), но этот тест про dedupe: убираем источники темы, чтобы
+		// runtime не создал собственный поиск интереса.
+		f.sched.persona.Interests = nil
+		f.sched.persona.SeedBio = nil
+		f.sched.persona.Curiosity = nil
 		f.setNow(f.now.Add(5 * time.Hour))
 		if err := f.sched.Tick(ctx); err != nil {
 			t.Fatalf("такт не удался: %v", err)
@@ -770,6 +775,10 @@ func TestQueueStatsAndObservability(t *testing.T) {
 	}
 	if !strings.Contains(logged, "heartbeat") {
 		t.Fatalf("heartbeat должен писаться каждым тактом, лог: %s", logged)
+	}
+	// Скука (этап 23.4): heartbeat показывает шкалу, а не только очередь.
+	if !strings.Contains(logged, "boredom=") {
+		t.Fatalf("heartbeat должен показывать скуку (этап 23.4), лог: %s", logged)
 	}
 
 	// Сокращение очереди снимает предупреждение: новый эпизод роста предупреждает

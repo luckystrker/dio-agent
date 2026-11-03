@@ -537,6 +537,9 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 		// «сегодняшнюю» базу, а не на статичную линию персоны.
 		PersonaBaseline: r.Persona.MoodTargetAt(r.now(), r.Timezone),
 		Journal:         r.Journal,
+		// Разговорный ход сбрасывает скуку (этап 23.1).
+		BoredomReset: true,
+		Now:          r.now(),
 	})
 	if err != nil {
 		if errors.Is(err, runtime.ErrHistoryConflict) {

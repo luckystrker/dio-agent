@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -67,6 +68,11 @@ type intentionOutcome struct {
 	Latency    time.Duration
 	BudgetOp   string // префикс operation_id бюджета попытки (§16)
 	MoodReason string
+	// Origin — причина explore (этап 23.4): boredom | conversation; пусто —
+	// вид намерения не имеет причины-источника.
+	Origin string
+	// Boredom — шкала скуки на момент исполнения (этап 23.4).
+	Boredom float64
 }
 
 func intentionUnitID(id int64) string { return fmt.Sprintf("bg:intention:%d", id) }
@@ -154,7 +160,12 @@ func walProposal(records []runtime.StepRecord, step string) ([]byte, bool) {
 func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOutcome, error) {
 	started := s.now()
 	unitID := intentionUnitID(it.ID)
-	out := intentionOutcome{}
+	out := intentionOutcome{Origin: intentionOrigin(it)}
+	if boredom, berr := s.boredomNow(ctx); berr == nil {
+		out.Boredom = boredom
+	} else {
+		s.logDebug("намерение %d: скука не прочитана: %v", it.ID, berr)
+	}
 	// Результат свежесостоявшейся генерации: WAL-снимок начала задачи его
 	// ещё не видит, восстановительный путь его не читает.
 	var freshResult *character.TurnResult
@@ -494,12 +505,15 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 			return true, reason, nil
 		}
 	} else if it.Kind == KindExplore {
-		// Дневной лимит exploration (§16).
-		done, err := s.intentions.ExplorationsToday(ctx)
+		// Дневной лимит exploration (§16): считаем все созданные за сутки,
+		// включая само исполняемое намерение, поэтому «больше двух» — отмена.
+		// Счёт по попыткам, а не по завершённым: упавший explore тоже расходует
+		// бюджет и не должен открывать дорогу третьему.
+		created, err := s.intentions.ExplorationsCreatedToday(ctx)
 		if err != nil {
 			return false, "", err
 		}
-		if done >= MaxExplorationsPerDay {
+		if created > MaxExplorationsPerDay {
 			return true, fmt.Sprintf("дневной лимит exploration исчерпан (%d/сутки, §16)", MaxExplorationsPerDay), nil
 		}
 	}
@@ -558,7 +572,7 @@ func (s *Scheduler) generateInitiative(ctx context.Context, it Intention, op, sc
 // включённом вебе — web_search/web_fetch с бюджетами на задачу (§15/§16);
 // никаких отправок (share-намерение отдельно проходит свежий gate).
 func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope string) (turnModelRun, error) {
-	system, err := s.stateContext(ctx, it.TargetChatID, scope, s.exploreAddendum())
+	system, err := s.stateContext(ctx, it.TargetChatID, scope, s.exploreAddendumFor(it))
 	if err != nil {
 		return turnModelRun{}, err
 	}
@@ -757,6 +771,13 @@ func (s *Scheduler) applyExplore(ctx context.Context, it Intention, result chara
 		return false, "", nil // гонку выиграл другой; транзакция откатится
 	}
 
+	// --- скука (этап 23.1): применённая находка — событие, заметно снижающее
+	// скуку; в той же транзакции, что и память/намерения.
+	if _, err := character.NewBoredomRepo().ApplyEvent(ctx, tx, character.BoredomExplore,
+		s.now(), s.persona.Schedule, s.location, s.persona.MoodTargetAt(s.now(), s.location)); err != nil {
+		return false, "", fmt.Errorf("фон: спад скуки после находки: %w", err)
+	}
+
 	ref := fmt.Sprintf("intention:%d", it.ID)
 	source := memory.SourceRef{Kind: memory.SourceRuntimeAction, Ref: ref}
 	if _, err := (memory.SourceRepo{}).EnsureSource(ctx, tx, source); err != nil {
@@ -802,6 +823,12 @@ func (s *Scheduler) applyExplore(ctx context.Context, it Intention, result chara
 		reason := it.Topic
 		if result.Reason != "" {
 			reason = result.Reason
+		}
+		// Зацепка explore («прикинь, …») не теряется: она идёт в reason
+		// share-намерения и попадает в контекст его генерации. Модель позже
+		// вправе переписать текст — share всё равно проходит политику §14.3.
+		if hook := strings.TrimSpace(strings.Join(result.Messages, " ")); hook != "" {
+			reason += "; зацепка: " + truncateRunes(hook, 400)
 		}
 		if _, created, cerr := character.CreateIntentionTx(ctx, tx, character.IntentionParams{
 			Kind:       KindShare,

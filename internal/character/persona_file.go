@@ -18,13 +18,17 @@ var (
 	personaRequiredSections = []string{"Имя", "Описание", "Манера речи", "Ценности", "Настроение (базовое)"}
 	// «Расписание» — необязательная секция ритма дня (этап 22); разбор и
 	// валидация — persona_schedule.go. «Стикеры» — стартовый набор коллекции
-	// (этап 25.3).
+	// (этап 25.3). «Темы для любопытства» — сиды собственного интереса
+	// (этап 23.2): из них runtime выбирает тему фонового поиска.
 	personaKnownSections = append(append([]string{}, personaRequiredSections...),
-		"Биография", "Интересы", scheduleSection, "Стикеры")
+		"Биография", "Интересы", scheduleSection, "Стикеры", curiositySection)
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
 var commentPattern = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// curiositySection — необязательная секция тем собственного интереса (этап 23.2).
+const curiositySection = "Темы для любопытства"
 
 // sectionHeaderPattern — строка заголовка секции «## …».
 var sectionHeaderPattern = regexp.MustCompile(`(?m)^## `)
@@ -55,6 +59,10 @@ type PersonaSource struct {
 	// «file_id | эмодзи | заметка». Пустая секция допустима — владелец
 	// заполнит file_id своими стикерами.
 	Stickers []SourceSticker
+	// Curiosity — темы для собственного любопытства (этап 23.2), по строке.
+	// Не версионируются в БД: это настройка процесса, как расписание дня;
+	// runtime выбирает из них тему фонового поиска интереса.
+	Curiosity []string
 }
 
 // splitSections разбирает текст на секции по заголовкам «## …». Первое
@@ -200,6 +208,16 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 	if err != nil {
 		return PersonaSource{}, err
 	}
+	// темы для любопытства необязательны (этап 23.2): секция есть — список
+	// тем, по строке; пустая секция — ошибка, иначе случайный сид молча
+	// окажется пустым.
+	var curiosity []string
+	if raw, ok := sections[curiositySection]; ok {
+		curiosity, err = parseCuriositySection(raw)
+		if err != nil {
+			return PersonaSource{}, err
+		}
+	}
 
 	return PersonaSource{
 		Name:         name,
@@ -211,7 +229,26 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		Interests:    interests,
 		Schedule:     schedule,
 		Stickers:     stickers,
+		Curiosity:    curiosity,
 	}, nil
+}
+
+// parseCuriositySection разбирает секцию «Темы для любопытства»: по теме на
+// строку (дефис-маркер допускается, как в «Ценностях»/«Интересах»). Секции нет
+// — nil; секция есть, но пуста — ошибка запуска.
+func parseCuriositySection(raw string) ([]string, error) {
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(dashPrefix.ReplaceAllString(strings.TrimSpace(line), ""))
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf(
+			"persona-файл: секция «%s» пуста — нужна хотя бы одна тема строкой или удалите секцию", curiositySection)
+	}
+	return out, nil
 }
 
 // parseStickerSection разбирает секцию «Стикеры»: по строке на стикер,

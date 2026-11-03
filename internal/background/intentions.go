@@ -381,16 +381,3 @@ func (r *IntentionRepo) ProactiveUsage(ctx context.Context, chatID int64) (proac
 	}
 	return usage, nil
 }
-
-// ExplorationsToday — сколько exploration завершено сегодня (§16: до 2 в сутки).
-func (r *IntentionRepo) ExplorationsToday(ctx context.Context) (int, error) {
-	var n int
-	err := r.pool.QueryRow(ctx, `
-		SELECT count(*) FROM intentions
-		WHERE kind = $1 AND status = 'completed' AND updated_at >= date_trunc('day', now())`,
-		KindExplore).Scan(&n)
-	if err != nil {
-		return 0, fmt.Errorf("намерения: дневной счётчик exploration не читается: %w", err)
-	}
-	return n, nil
-}
