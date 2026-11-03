@@ -77,7 +77,9 @@ func (m *BudgetMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.E
 	m.mu.Unlock()
 
 	operationID := fmt.Sprintf("%s:%d", m.operation, idx)
-	allowed, err := m.store.Reserve(context.Background(), operationID, attemptOf(m.operation), m.pool, 1, m.limit)
+	qctx, qcancel := context.WithTimeout(context.Background(), budgetDBTimeout)
+	allowed, err := m.store.Reserve(qctx, operationID, attemptOf(m.operation), m.pool, 1, m.limit)
+	qcancel()
 	if err != nil {
 		if errors.Is(err, runtime.ErrBudgetExhausted) {
 			m.logger.Printf("ход прерван: %v", err)
@@ -95,21 +97,38 @@ func (m *BudgetMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.E
 			// Ход отменён — модельный вызов не состоялся: резерв возвращается
 			// (§16, блок 17.3), день не выжигается храповиком. Отмена ход
 			// остаётся в очереди (§12.2), повтор получит свой attempt ID.
-			if rerr := m.store.Release(context.Background(), operationID, m.pool, 1); rerr != nil {
+			if rerr := m.releaseBudget(operationID); rerr != nil {
 				m.logger.Printf("бюджет: резерв %s не возвращён после отмены хода: %v", operationID, rerr)
 			}
 			return nil, err
 		}
 		// Вызов не завершился: стоимость неизвестна, actual не пишется нулевым (§16).
-		_ = m.store.RecordActual(context.Background(), operationID, m.pool, 0, 1, true)
+		rctx, rcancel := context.WithTimeout(context.Background(), budgetDBTimeout)
+		_ = m.store.RecordActual(rctx, operationID, m.pool, 0, 1, true)
+		rcancel()
 		return nil, err
 	}
 	tokens, cached := usageTokens(resp)
-	if err := m.store.RecordActualUsage(context.Background(), operationID, m.pool,
-		runtime.ActualUsage{Tokens: tokens, Calls: 1, CachedTokens: cached}); err != nil {
+	rctx, rcancel := context.WithTimeout(context.Background(), budgetDBTimeout)
+	err = m.store.RecordActualUsage(rctx, operationID, m.pool,
+		runtime.ActualUsage{Tokens: tokens, Calls: 1, CachedTokens: cached})
+	rcancel()
+	if err != nil {
 		m.logger.Printf("бюджет: фактический usage не записан: %v", err)
 	}
 	return resp, nil
+}
+
+// budgetDBTimeout — потолок служебной записи бюджета: middleware не получает
+// context хода, но зависший acquire не должен держать модельный вызов
+// бесконечно (minor 2).
+const budgetDBTimeout = 5 * time.Second
+
+// releaseBudget возвращает резерв с ограниченным отдельным контекстом.
+func (m *BudgetMiddleware) releaseBudget(operationID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budgetDBTimeout)
+	defer cancel()
+	return m.store.Release(ctx, operationID, m.pool, 1)
 }
 
 // usageTokens — токены ответа и кэшированное попадание префикса (решение

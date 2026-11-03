@@ -144,7 +144,9 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 			Query string `json:"query" agschema:"description=Имя или алиас: как звучит в разговоре"`
 			Scope string `aginject:"memory_scope"`
 		}) (string, error) {
-			return t.findEntities(context.Background(), args.Scope, args.Query)
+			ctx, cancel := context.WithTimeout(context.Background(), defaultToolTimeout)
+			defer cancel()
+			return t.findEntities(ctx, args.Scope, args.Query)
 		})
 	if err != nil {
 		return nil, fmt.Errorf("memory: инструмент %s: %w", ToolFindEntities, err)
@@ -156,7 +158,9 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 			EntityID string `json:"entity_id" agschema:"description=Идентификатор из memory_find_entities"`
 			Scope    string `aginject:"memory_scope"`
 		}) (string, error) {
-			return t.entityCard(context.Background(), args.Scope, args.EntityID)
+			ctx, cancel := context.WithTimeout(context.Background(), defaultToolTimeout)
+			defer cancel()
+			return t.entityCard(ctx, args.Scope, args.EntityID)
 		})
 	if err != nil {
 		return nil, fmt.Errorf("memory: инструмент %s: %w", ToolEntityCard, err)
@@ -176,7 +180,9 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 					seen, _ = v.(*SearchState)
 				}
 			}
-			return t.searchMemoryWithSeen(context.Background(), args.Scope, args.Query, args.Limit, seen)
+			ctx, cancel := context.WithTimeout(context.Background(), defaultToolTimeout)
+			defer cancel()
+			return t.searchMemoryWithSeen(ctx, args.Scope, args.Query, args.Limit, seen)
 		}, agotools.WithTimeout(defaultToolTimeout))
 	if err != nil {
 		return nil, fmt.Errorf("memory: инструмент %s: %w", ToolSearch, err)

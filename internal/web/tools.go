@@ -100,7 +100,9 @@ func (t *Toolset) Tools() ([]agotools.Tool, error) {
 		func(args struct {
 			URL string `json:"url" agschema:"description=Полный URL страницы (http/https)"`
 		}) (string, error) {
-			page, err := t.fetch.Fetch(context.Background(), args.URL)
+			ctx, cancel := context.WithTimeout(context.Background(), DefaultTimeout)
+			defer cancel()
+			page, err := t.fetch.Fetch(ctx, args.URL)
 			if err != nil {
 				return "", err
 			}
