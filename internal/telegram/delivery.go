@@ -39,6 +39,18 @@ const staleSendingAfter = time.Minute
 // затягивает доставку остального чата. Пауза выше потолка обрезается до него.
 const maxRetryAfterWait = 5 * time.Minute
 
+// persistTimeout — потолок записи исхода захваченной строки. Запись исхода
+// (sent/retry_wait/failed/unknown/возврат в очередь) не должна отменяться
+// вместе с runCtx: иначе при shutdown строка остаётся в sending и следующий
+// старт переводит её в unknown, теряя заведомо не отправленный ответ (C1).
+const persistTimeout = 5 * time.Second
+
+// persistCtx — контекст записи исхода: не наследует отмену цикла доставки,
+// но ограничен по времени.
+func (l *DeliveryLoop) persistCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), persistTimeout)
+}
+
 // DeliveryOptions — настройки delivery loop.
 type DeliveryOptions struct {
 	// Interval — период такта (по умолчанию 500 мс, паритет TS).
@@ -155,8 +167,11 @@ func (l *DeliveryLoop) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, row := range rows {
+	for i, row := range rows {
 		if ctx.Err() != nil {
+			// Остановка: к оставшимся строкам отправку не начинали —
+			// возвращаем их в очередь, не оставляя захваченными в sending (C1).
+			l.requeueAbandoned(rows[i:])
 			return ctx.Err()
 		}
 		l.deliver(ctx, row)
@@ -228,13 +243,18 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	// §13.3: пауза между bubbles одного turn (не для первого сообщения).
 	l.waitForBubbleGap(ctx, row)
 	if ctx.Err() != nil {
+		// Пауза прервана остановкой: к отправке не приступали — строка
+		// возвращается в очередь, а не остаётся в sending (C1).
+		l.requeueAbandoned([]OutboxItem{row})
 		return
 	}
 
 	switch row.Kind {
 	case "reaction":
 		if row.TargetMessageID == 0 || row.Reaction == "" {
-			if ferr := l.repo.MarkFailed(ctx, row.ID, "реакция без emoji/target_message_id"); ferr != nil {
+			qctx, cancel := l.persistCtx()
+			defer cancel()
+			if ferr := l.repo.MarkFailed(qctx, row.ID, "реакция без emoji/target_message_id"); ferr != nil {
 				l.requeueOnDBError(ctx, row, ferr.Error())
 			}
 			return
@@ -244,7 +264,10 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			return
 		}
 		// У реакции нет telegram_message_id — NULL, а не 0 (§13.1).
-		if err := l.repo.MarkSent(ctx, row.ID, nil); err != nil {
+		qctx, cancel := l.persistCtx()
+		err := l.repo.MarkSent(qctx, row.ID, nil)
+		cancel()
+		if err != nil {
 			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
@@ -257,7 +280,10 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			l.handleSendError(ctx, row, err)
 			return
 		}
-		if err := l.repo.MarkSent(ctx, row.ID, &messageID); err != nil {
+		qctx, cancel := l.persistCtx()
+		err = l.repo.MarkSent(qctx, row.ID, &messageID)
+		cancel()
+		if err != nil {
 			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
@@ -276,8 +302,10 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 func (l *DeliveryLoop) requeueOnDBError(ctx context.Context, row OutboxItem, reason string) {
 	message := "ошибка БД до отправки: " + reason
 	wait, giveUp := dbRetryBackoff(row.Attempts, l.opts.MaxAttempts, l.opts.RetryBase)
+	qctx, cancel := l.persistCtx()
+	defer cancel()
 	if giveUp {
-		if err := l.repo.MarkFailed(ctx, row.ID, message); err != nil {
+		if err := l.repo.MarkFailed(qctx, row.ID, message); err != nil {
 			l.logger.Printf("delivery: failed не записан (строка %d остаётся в sending до recovery): %v", row.ID, err)
 			return
 		}
@@ -285,12 +313,33 @@ func (l *DeliveryLoop) requeueOnDBError(ctx context.Context, row OutboxItem, rea
 			row.ID, row.TurnID, row.Position, reason)
 		return
 	}
-	if err := l.repo.RequeueFromSending(ctx, row.ID, time.Now().Add(wait), message); err != nil {
+	if err := l.repo.RequeueFromSending(qctx, row.ID, time.Now().Add(wait), message); err != nil {
 		l.logger.Printf("delivery: возврат в retry_wait не удался (строка %d остаётся в sending до recovery): %v", row.ID, err)
 		return
 	}
 	l.logger.Printf("delivery: ошибка БД до отправки — возврат в retry_wait, повтор через %v (строка %d, turn %d, поз. %d): %s",
 		wait, row.ID, row.TurnID, row.Position, reason)
+}
+
+// requeueAbandoned возвращает в очередь строки, к отправке которых не
+// приступали из-за остановки процесса (C1): без этого они остаются в sending,
+// а старт переводит их в unknown и отменяет весь остаток хода.
+func (l *DeliveryLoop) requeueAbandoned(rows []OutboxItem) {
+	if len(rows) == 0 {
+		return
+	}
+	qctx, cancel := l.persistCtx()
+	defer cancel()
+	for _, row := range rows {
+		if err := l.repo.RequeueFromSending(qctx, row.ID, time.Now(),
+			"остановка процесса до отправки: строка возвращена в очередь"); err != nil {
+			l.logger.Printf("delivery: остановка — строка %d не возвращена в очередь (остаётся в sending до recovery): %v",
+				row.ID, err)
+			continue
+		}
+		l.logger.Printf("delivery: остановка — строка %d (turn %d, поз. %d) возвращена в очередь",
+			row.ID, row.TurnID, row.Position)
+	}
 }
 
 // markUnknownAfterDBError — ошибка записи ПОСЛЕ подтверждённой отправки
@@ -299,7 +348,9 @@ func (l *DeliveryLoop) requeueOnDBError(ctx context.Context, row OutboxItem, rea
 // не прошла — строка остаётся в sending до периодического recovery (§12.2).
 func (l *DeliveryLoop) markUnknownAfterDBError(ctx context.Context, row OutboxItem, reason string) {
 	message := "отправка подтверждена, sent не записан: " + reason
-	changed, cancelled, err := l.repo.MarkUnknown(ctx, row.ID, message)
+	qctx, cancel := l.persistCtx()
+	defer cancel()
+	changed, cancelled, err := l.repo.MarkUnknown(qctx, row.ID, message)
 	if err != nil {
 		l.logger.Printf("delivery: unknown не записан (строка %d остаётся в sending до recovery): %v", row.ID, err)
 		return
@@ -328,23 +379,25 @@ func dbRetryBackoff(attempts, maxAttempts int, retryBase time.Duration) (wait ti
 func (l *DeliveryLoop) handleSendError(ctx context.Context, row OutboxItem, sendErr error) {
 	message := sendErr.Error()
 	decision := classifySendError(sendErr, row.Attempts, l.opts.MaxAttempts, l.opts.RetryBase)
+	qctx, cancel := l.persistCtx()
+	defer cancel()
 	switch decision.kind {
 	case outcomeRetryWait:
-		if err := l.repo.MarkRetryWait(ctx, row.ID, time.Now().Add(decision.wait), message); err != nil {
+		if err := l.repo.MarkRetryWait(qctx, row.ID, time.Now().Add(decision.wait), message); err != nil {
 			l.logger.Printf("delivery: retry_wait не записан: %v", err)
 			return
 		}
 		l.logger.Printf("delivery: временный отказ — повтор после %v (turn %d, поз. %d): %s",
 			decision.wait, row.TurnID, row.Position, message)
 	case outcomeFailed:
-		if err := l.repo.MarkFailed(ctx, row.ID, message); err != nil {
+		if err := l.repo.MarkFailed(qctx, row.ID, message); err != nil {
 			l.logger.Printf("delivery: failed не записан: %v", err)
 			return
 		}
 		l.logger.Printf("delivery: доставка провалилась навсегда (turn %d, поз. %d): %s",
 			row.TurnID, row.Position, message)
 	default: // outcomeUnknown
-		_, cancelled, err := l.repo.MarkUnknown(ctx, row.ID, message)
+		_, cancelled, err := l.repo.MarkUnknown(qctx, row.ID, message)
 		if err != nil {
 			l.logger.Printf("delivery: unknown не записан: %v", err)
 			return

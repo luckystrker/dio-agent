@@ -301,7 +301,47 @@ func TestDeliveryLoopStalenessKeepsFirstBubble(t *testing.T) {
 	}
 }
 
+// TestDeliveryCanceledBeforeSendRequeues — C1: остановка процесса после захвата,
+// но до отправки, не оставляет строку в sending. Исход пишется на отдельном
+// контексте (отмена цикла его не убивает), строка возвращается в очередь, а не
+// хоронится стартом в unknown вместе со всем хвостом хода.
+func TestDeliveryCanceledBeforeSendRequeues(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+	repo := NewOutboxRepo(pool)
+
+	id := insertOutbox(t, pool, 190, 42, 0, `{"kind":"message","text":"не должен потеряться"}`)
+	claimed := mustClaim(t, repo, 10)
+	if len(claimed) != 1 {
+		t.Fatalf("захвачено %d строк, хочу 1", len(claimed))
+	}
+
+	// Остановка: ctx уже отменён до попытки отправки.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{})
+	loop.deliver(canceled, claimed[0])
+
+	var status string
+	var lastError *string
+	if err := pool.QueryRow(ctx,
+		`SELECT status, last_error FROM delivery_outbox WHERE id = $1`, id).
+		Scan(&status, &lastError); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "retry_wait" {
+		t.Fatalf("после остановки до отправки строка в %q, хочу retry_wait (не sending/unknown)", status)
+	}
+	if len(stub.sentMessages()) != 0 {
+		t.Fatalf("при отменённом ctx отправки быть не должно")
+	}
+}
+
 func TestDeliveryLoopReaction(t *testing.T) {
+
 	// §13.2/§11.2: реакция — установка состояния; telegram_message_id — NULL.
 	pool := newTestPool(t)
 	ctx := context.Background()
