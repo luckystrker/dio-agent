@@ -154,3 +154,29 @@ func TestMemoryQueryFromBatch(t *testing.T) {
 		t.Fatalf("запрос %d рун превышает лимит %d", n, memoryQueryLimit)
 	}
 }
+
+// TestMemoryToolsAvailableHint — этап 21.3: подсказка панели «память доступна
+// инструментами» печатается ровно тогда, когда инструменты действительно
+// выданы (история урезана или карточка не влезла), и только в режиме
+// предзагрузки.
+func TestMemoryToolsAvailableHint(t *testing.T) {
+	cases := []struct {
+		name     string
+		hasMem   bool
+		prefetch bool
+		trimmed  bool
+		fitted   bool
+		want     bool
+	}{
+		{"целая история и карточка", true, true, false, true, false},
+		{"история урезана", true, true, true, true, true},
+		{"карточка не влезла", true, true, false, false, true},
+		{"откат предзагрузки", true, false, false, true, false},
+		{"нет инструментария", false, true, true, false, false},
+	}
+	for _, tc := range cases {
+		if got := memoryToolsAvailable(tc.hasMem, tc.prefetch, tc.trimmed, tc.fitted); got != tc.want {
+			t.Errorf("%s: memoryToolsAvailable = %v, хочу %v", tc.name, got, tc.want)
+		}
+	}
+}

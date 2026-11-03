@@ -103,6 +103,22 @@ func TestBuildStatePanel(t *testing.T) {
 	}
 }
 
+// TestBuildStatePanelMemoryToolsHint — этап 21.3: когда инструменты памяти
+// выданы, панель прямо говорит, что это страховка, а не основной путь.
+func TestBuildStatePanelMemoryToolsHint(t *testing.T) {
+	now := time.Date(2026, 11, 2, 17, 2, 0, 0, time.UTC)
+	panel := buildStatePanel(statePanelData{Now: now, MemoryTools: true})
+	if !strings.Contains(panel, "память доступна инструментами") ||
+		!strings.Contains(panel, "если ответа нет ни в истории, ни в карточке") {
+		t.Fatalf("подсказка об инструментах памяти не напечатана:\n%s", panel)
+	}
+	// Подсказки нет, когда инструменты не выданы.
+	bare := buildStatePanel(statePanelData{Now: now})
+	if strings.Contains(bare, "память доступна инструментами") {
+		t.Fatalf("подсказка без инструментов:\n%s", bare)
+	}
+}
+
 // TestComposeUserText — панель стоит ПЕРВОЙ частью финального сообщения,
 // пачка после неё; пустые части не оставляют лишних пустых строк.
 func TestComposeUserText(t *testing.T) {

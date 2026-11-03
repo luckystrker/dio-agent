@@ -195,6 +195,9 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		Relationship: out.RelationshipLine,
 		MemoryCard:   memoryCard,
 		MultiActor:   distinctActors(batch) > 1,
+		// Подсказка «память доступна инструментами» — ровно когда они будут
+		// выданы планом хода (21.3): история урезана или карточка неполна.
+		MemoryTools: memoryToolsAvailable(a.Memory != nil, a.MemoryPrefetch, out.HistoryTrimmed, out.MemoryCardFitted),
 	}
 	if n := len(out.History); n > 0 {
 		panel.LastAt = out.History[n-1].At
@@ -225,6 +228,14 @@ func memoryQuery(batch []BatchEvent) string {
 		query = string(runes[:memoryQueryLimit])
 	}
 	return query
+}
+
+// memoryToolsAvailable — будут ли инструменты памяти выданы на ходе в режиме
+// предзагрузки (этап 21.3): история урезана или карточка неполна. Та же
+// формула, что в planMemoryTools; панель состояния обязана говорить правду о
+// том, что инструменты доступны.
+func memoryToolsAvailable(hasMemory, prefetch, historyTrimmed, cardFitted bool) bool {
+	return hasMemory && prefetch && (historyTrimmed || !cardFitted)
 }
 
 // batchTexts — тексты пачки для контекста: пустой текст не теряется, а

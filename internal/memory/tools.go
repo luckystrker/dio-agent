@@ -140,7 +140,8 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 	t := &Toolset{db: db, search: searcher, items: Items{}}
 
 	find, err := agotools.NewFunctionTool(ToolFindEntities,
-		"Найти сущности памяти по имени или алиасу. Верни id найденной сущности, чтобы запросить её карточку.",
+		"Найти сущности памяти по имени или алиасу. Верни id найденной сущности, чтобы запросить её карточку. "+
+			"Нужен, только когда ответа нет ни в истории, ни в уже показанных заметках памяти.",
 		func(args struct {
 			Query string `json:"query" agschema:"description=Имя или алиас: как звучит в разговоре"`
 			Scope string `aginject:"memory_scope"`
@@ -154,7 +155,8 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 	}
 
 	card, err := agotools.NewFunctionTool(ToolEntityCard,
-		"Карточка сущности памяти: текущие отношения (stances) с основаниями и связанные записи. Сначала найди сущность через "+ToolFindEntities+".",
+		"Карточка сущности памяти: текущие отношения (stances) с основаниями и связанные записи. "+
+			"Нужна, только когда ответа нет ни в истории, ни в уже показанных заметках; сначала найди сущность через "+ToolFindEntities+".",
 		func(args struct {
 			EntityID string `json:"entity_id" agschema:"description=Идентификатор из memory_find_entities"`
 			Scope    string `aginject:"memory_scope"`
@@ -168,8 +170,9 @@ func NewToolset(db DBTX, searcher *Searcher) (*Toolset, error) {
 	}
 
 	search, err := agotools.NewFunctionTool(ToolSearch,
-		"Полнотекстовый и семантический поиск по памяти: факты, события, мнения. На прямой вопрос о памяти вызывается первым. "+
-			"Обычно хватает 1–2 поисков. Пустой результат или те же записи — значит, этого в памяти нет; не перефразируй, отвечай.",
+		"Поиск по памяти: факты, события, мнения (полнотекст + семантика). "+
+			"Вызывай только если ответа нет в истории разговора и в уже показанных заметках памяти; не проверяй память «на всякий случай». "+
+			"Обычно хватает одного поиска. Пустой результат или те же записи — значит, этого в памяти нет; не перефразируй, отвечай.",
 		func(args struct {
 			Query string `json:"query" agschema:"description=Поисковый запрос обычными словами"`
 			Limit *int   `json:"limit,omitempty" agschema:"description=Сколько записей вернуть (по умолчанию 10 максимум 50)"`
@@ -208,6 +211,15 @@ func (t *Toolset) Tools() []agotools.Tool {
 // обращении (§10.4); модуль хода использует его имя для tool_choice.
 func (t *Toolset) SearchTool() ForcedOnDirectQuestion {
 	return t.searchTool.(ForcedOnDirectQuestion)
+}
+
+// SemanticModel — имя модели векторизатора; пусто — семантика выключена
+// (EMBEDDING_* не заданы): инструменты и карточка работают полнотекстом.
+func (t *Toolset) SemanticModel() string {
+	if t == nil || t.search == nil || t.search.Embedder == nil {
+		return ""
+	}
+	return t.search.Embedder.Model()
 }
 
 // findEntities — реализация memory_find_entities: поиск сущностей по имени

@@ -563,6 +563,13 @@ func (a *App) buildMemory(ctx context.Context) (*memory.Toolset, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app: инструментарий памяти не собран: %w", err)
 	}
+	// Наблюдаемость старта (21.4): без этой строки «память не находит» и
+	// «семантика выключена» выглядят одинаково.
+	if embedder != nil {
+		a.logger.Printf("семантика памяти: включена (модель %s)", embedder.Model())
+	} else {
+		a.logger.Printf("семантика памяти: выключена (EMBEDDING_* не заданы)")
+	}
 	return toolset, nil
 }
 

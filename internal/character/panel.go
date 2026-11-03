@@ -88,7 +88,10 @@ type statePanelData struct {
 	Mood         string
 	Relationship string
 	MemoryCard   string
-	MultiActor   bool
+	// MemoryTools — инструменты памяти выданы на этом ходе (этап 21.3):
+	// подсказка прямо в панели, что это страховка, а не основной путь.
+	MemoryTools bool
+	MultiActor  bool
 }
 
 // sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
@@ -129,6 +132,9 @@ func buildStatePanel(d statePanelData) string {
 	}
 	if card := strings.TrimSpace(d.MemoryCard); card != "" {
 		lines = append(lines, card)
+	}
+	if d.MemoryTools {
+		lines = append(lines, "память доступна инструментами — обращаться только если ответа нет ни в истории, ни в карточке")
 	}
 	if d.MultiActor {
 		lines = append(lines, "в пачке несколько участников — отвечай на пачку целиком")

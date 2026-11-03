@@ -1,10 +1,13 @@
-// Юнит-тесты решения о инструментах памяти на разговорном ходе (срез 2,
-// решение 2026-11-02): целая история + влезшая карточка = один вызов модели
-// без инструментов; иначе инструменты без forced и с лимитом 3; откат
-// MODEL_MEMORY_PREFETCH=false — прежнее поведение с forced на прямом ходе.
+// Юнит-тесты решения о инструментах памяти на разговорном ходе (срезы 2–3,
+// решения 2026-11-02 и 2026-11-03): целая история + полная карточка = один
+// вызов модели без инструментов; иначе инструменты без forced и с лимитом 2;
+// откат MODEL_MEMORY_PREFETCH=false — прежнее поведение с forced на прямом ходе.
 package character
 
 import (
+	"bytes"
+	"log"
+	"strings"
 	"testing"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
@@ -62,5 +65,54 @@ func TestPlanMemoryToolsRollback(t *testing.T) {
 	plan = planMemoryTools(Input{Direct: false}, BaseContext{}, true, false, 7)
 	if plan.ForcedTool != "" {
 		t.Fatalf("непрямой ход forced: %+v", plan)
+	}
+}
+
+// TestMemoryToolsReason — этап 21.4: причина включения инструментов в лог
+// разговорного хода — history_trimmed / card_incomplete / rollback / none.
+func TestMemoryToolsReason(t *testing.T) {
+	cases := []struct {
+		name     string
+		prefetch bool
+		bctx     BaseContext
+		want     string
+	}{
+		{"откат", false, BaseContext{}, "rollback"},
+		{"история урезана", true, BaseContext{HistoryTrimmed: true, MemoryCardFitted: true}, "history_trimmed"},
+		{"карточка неполна", true, BaseContext{MemoryCardFitted: false}, "card_incomplete"},
+		{"всё на месте", true, BaseContext{MemoryCardFitted: true}, "none"},
+	}
+	for _, tc := range cases {
+		if got := memoryToolsReason(tc.prefetch, tc.bctx); got != tc.want {
+			t.Errorf("%s: memoryToolsReason = %q, хочу %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLogMemoryTurn — этап 21.4: одна строка на ход несёт инструменты/причину,
+// карточку и семантику; «модель опять сожгла лимит» отличимо от «карточка
+// неполна».
+func TestLogMemoryTurn(t *testing.T) {
+	var buf bytes.Buffer
+	r := &Runner{
+		Logger:         log.New(&buf, "", 0),
+		Memory:         &memory.Toolset{},
+		MemoryPrefetch: true,
+	}
+	r.logMemoryTurn(Input{TurnID: 42},
+		BaseContext{HistoryTrimmed: true, MemoryCardFitted: false, MemoryCardEntries: 4},
+		memoryToolPlan{Enabled: true, Limit: memoryToolsLimit})
+	line := buf.String()
+	for _, want := range []string{
+		"ход 42: память",
+		"инструменты вкл",
+		"причина: history_trimmed",
+		"записей=4",
+		"fits=false",
+		"семантика: выключена",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("в строке наблюдаемости нет %q: %s", want, line)
+		}
 	}
 }

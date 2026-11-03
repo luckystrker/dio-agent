@@ -58,9 +58,10 @@ func wantForcedTool(in Input, hasMemory bool) bool {
 }
 
 // memoryToolsLimit — эффективный потолок обращений к памяти на разговорном
-// ходе с предзагрузкой (решение 2026-11-02): карточка уже покрывает обычный
-// случай, инструменты — страховка, а не основной путь. min(ToolCallsLimit, 3).
-const memoryToolsLimit = 3
+// ходе с предзагрузкой (решения 2026-11-02 и 2026-11-03): история целиком в
+// окне модели, карточка несёт релевантное, инструменты — страховка на случай
+// «в истории и карточке ответа нет». min(ToolCallsLimit, 2).
+const memoryToolsLimit = 2
 
 // memoryToolPlan — режим инструментов памяти на разговорном ходе. Enabled —
 // выдавать инструменты; ForcedTool — принудительный первый вызов (только
@@ -74,11 +75,12 @@ type memoryToolPlan struct {
 
 // planMemoryTools решает, нужны ли инструменты памяти на этом ходе.
 //
-// Обычный режим (решение 2026-11-02): история цела и карточка собеседника
-// влезла в потолок — модель уже видит весь разговор и ключевые заметки, значит
-// ход идёт одним вызовом БЕЗ инструментов памяти. История урезана или карточка
-// не влезла — инструменты включаются, но без forced-вызова и с лимитом
-// min(ToolCallsLimit, 3): добрать недостающее, а не исследовать память заново.
+// Обычный режим (решения 2026-11-02 и 2026-11-03): история цела и в карточку
+// влезло всё релевантное — модель уже видит весь разговор и нужные заметки,
+// значит ход идёт одним вызовом БЕЗ инструментов памяти. История урезана или
+// релевантное не влезло — инструменты включаются, но без forced-вызова и с
+// лимитом min(ToolCallsLimit, 2): добрать недостающее, а не исследовать память
+// заново.
 //
 // Откат (prefetch=false): прежнее поведение — инструменты всегда, forced на
 // прямом обращении, лимит из конфигурации.
@@ -101,6 +103,21 @@ func planMemoryTools(in Input, bctx BaseContext, hasMemory, prefetch bool, confi
 		limit = configuredLimit
 	}
 	return memoryToolPlan{Enabled: true, Limit: limit}
+}
+
+// memoryToolsReason — причина включения инструментов памяти в лог хода (21.4):
+// history_trimmed / card_incomplete / rollback / none.
+func memoryToolsReason(prefetch bool, bctx BaseContext) string {
+	switch {
+	case !prefetch:
+		return "rollback"
+	case bctx.HistoryTrimmed:
+		return "history_trimmed"
+	case !bctx.MemoryCardFitted:
+		return "card_incomplete"
+	default:
+		return "none"
+	}
 }
 
 // ErrModelNotConfigured — модель не настроена: ход не выполняется и не
@@ -297,6 +314,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// получает обычный вызов и может ответить финальным TurnResult.
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
 	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
+	r.logMemoryTurn(in, bctx, plan)
 	if plan.ForcedTool != "" {
 		// Forced tool-calling на прямом обращении (§10.4): только в режиме
 		// отката (MODEL_MEMORY_PREFETCH=false). В обычном режиме память уже
@@ -482,4 +500,21 @@ func (r *Runner) logf(format string, args ...any) {
 	if r.Logger != nil {
 		r.Logger.Printf(format, args...)
 	}
+}
+
+// logMemoryTurn — одна строка наблюдаемости разговорного хода (21.4):
+// инструменты вкл/выкл и причина, объём карточки и её полнота, семантика
+// памяти. Без неё «модель опять сожгла лимит» не отличить от «память
+// предзагружена, но не влезла».
+func (r *Runner) logMemoryTurn(in Input, bctx BaseContext, plan memoryToolPlan) {
+	state := "выкл"
+	if plan.Enabled {
+		state = "вкл"
+	}
+	semantic := "выключена"
+	if model := r.Memory.SemanticModel(); model != "" {
+		semantic = "включена (" + model + ")"
+	}
+	r.logf("ход %d: память — инструменты %s (причина: %s), карточка: записей=%d fits=%v, семантика: %s",
+		in.TurnID, state, memoryToolsReason(r.MemoryPrefetch, bctx), bctx.MemoryCardEntries, bctx.MemoryCardFitted, semantic)
 }
