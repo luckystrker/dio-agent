@@ -8,6 +8,7 @@ package character
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -363,5 +364,55 @@ func TestTurnRecordsCachedTokens(t *testing.T) {
 	}
 	if got != 80 {
 		t.Fatalf("cached_tokens = %d, хочу 80", got)
+	}
+}
+
+// TestAssemblerPhotoBatchSameMemoryContext — 21.8: фото без подписи не меняет
+// сборку панели/карточки и план инструментов. query для карточки пуст (прежний
+// отбор), а не плейсхолдер «[фото]»: карточка собирается, инструменты так же
+// не нужны, как на текстовом ходе с полной историей.
+func TestAssemblerPhotoBatchSameMemoryContext(t *testing.T) {
+	f, ctx := newFixture(t)
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	f.runner.Assembler.Memory = f.runner.Memory
+	f.runner.Assembler.MemoryPrefetch = true
+	f.runner.Assembler.Now = func() time.Time { return now }
+
+	photoRaw := json.RawMessage(`{"update_id":9,"message":{"message_id":9,
+		"photo":[{"file_id":"thumb","width":90,"height":90},{"file_id":"big","width":1280,"height":720}]}}`)
+	textBatch := []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "привет"}}
+	photoBatch := []BatchEvent{{EventID: 2, ActorID: 777, ActorName: "Коля", Raw: photoRaw}}
+
+	textCtx, err := f.runner.Assembler.Assemble(ctx, f.pool, f.persona, testScopeID, testChatID, textBatch, 0)
+	if err != nil {
+		t.Fatalf("текстовый контекст не собран: %v", err)
+	}
+	photoCtx, err := f.runner.Assembler.Assemble(ctx, f.pool, f.persona, testScopeID, testChatID, photoBatch, 0)
+	if err != nil {
+		t.Fatalf("фото-контекст не собран: %v", err)
+	}
+
+	if !textCtx.MemoryCardIncluded || !photoCtx.MemoryCardIncluded {
+		t.Fatalf("карточка не собрана: текст=%v фото=%v",
+			textCtx.MemoryCardIncluded, photoCtx.MemoryCardIncluded)
+	}
+	if photoCtx.MemoryCardEntries == 0 {
+		t.Fatalf("на фото-ходе карточка пуста — откат к прежнему отбору не сработал")
+	}
+	if !strings.HasPrefix(photoCtx.StatePanel, statePanelOpen) {
+		t.Fatalf("панель фото-хода не собрана:\n%s", photoCtx.StatePanel)
+	}
+	if strings.Contains(photoCtx.StatePanel, "[фото") || strings.Contains(photoCtx.StatePanel, "фото без подписи") {
+		t.Fatalf("плейсхолдер фото попал в панель/карточку:\n%s", photoCtx.StatePanel)
+	}
+
+	textPlan := planMemoryTools(Input{}, textCtx, true, true, 5)
+	photoPlan := planMemoryTools(Input{}, photoCtx, true, true, 5)
+	if photoPlan != textPlan {
+		t.Fatalf("план инструментов на фото отличается от текстового: фото=%+v текст=%+v",
+			photoPlan, textPlan)
+	}
+	if photoPlan.Enabled {
+		t.Fatalf("фото-ход без нужды включил инструменты памяти: %+v", photoPlan)
 	}
 }

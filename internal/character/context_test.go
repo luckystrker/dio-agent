@@ -153,6 +153,20 @@ func TestMemoryQueryFromBatch(t *testing.T) {
 	if n := utf8.RuneCountInString(got); n > memoryQueryLimit {
 		t.Fatalf("запрос %d рун превышает лимит %d", n, memoryQueryLimit)
 	}
+
+	// 21.8: фото без подписи не подменяет запрос плейсхолдером — query пуст,
+	// карточка идёт прежним отбором. Подпись к фото остаётся запросом.
+	photoRaw := json.RawMessage(`{"update_id":5,"message":{"message_id":6,
+		"photo":[{"file_id":"thumb","width":90,"height":90},{"file_id":"big","width":1280,"height":720}]}}`)
+	if got := memoryQuery([]BatchEvent{{ActorID: 7, Raw: photoRaw}}); got != "" {
+		t.Fatalf("фото без подписи дало запрос %q, хочу пустую строку (прежний отбор)", got)
+	}
+	if got := memoryQuery([]BatchEvent{{ActorID: 7, Text: "смотри закат", Raw: photoRaw}}); got != "смотри закат" {
+		t.Fatalf("подпись к фото не стала запросом: %q", got)
+	}
+	if texts := batchTexts([]BatchEvent{{ActorID: 7, Raw: photoRaw}}); len(texts) != 1 || texts[0] != "[фото без подписи]" {
+		t.Fatalf("плейсхолдер пачки для модели потерян: %v", texts)
+	}
 }
 
 // TestMemoryToolsAvailableHint — этап 21.3: подсказка панели «память доступна
