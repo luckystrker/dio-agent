@@ -72,10 +72,17 @@ func (f *fixture) checkpointExists(t *testing.T, ctx context.Context, unitID str
 	return exists
 }
 
-// seedWalRows пишет строки WAL-потока напрямую со сдвигом created_at.
+// seedWalRows пишет n строк WAL-потока (seq 1..n) напрямую со сдвигом created_at.
 func (f *fixture) seedWalRows(t *testing.T, ctx context.Context, streamID string, age time.Duration, n int) {
 	t.Helper()
-	for seq := 1; seq <= n; seq++ {
+	f.seedWalRowsFrom(t, ctx, streamID, age, 1, n)
+}
+
+// seedWalRowsFrom — то же с явного seq: несколько порций одного потока (голова
+// и хвост с разным возрастом) не должны вставлять один и тот же seq дважды.
+func (f *fixture) seedWalRowsFrom(t *testing.T, ctx context.Context, streamID string, age time.Duration, seqFrom, n int) {
+	t.Helper()
+	for seq := seqFrom; seq < seqFrom+n; seq++ {
 		if _, err := f.pool.Exec(ctx, `
 			INSERT INTO event_streams (stream_id, seq, type, payload, created_at)
 			VALUES ($1, $2, 'task_step_intended', '{}', now() - make_interval(secs => $3))`,
@@ -215,8 +222,8 @@ func TestRetentionDeletesWholeOldStream(t *testing.T) {
 		t.Fatalf("намерение %d не завершено: %v", deadID, err)
 	}
 	stream := fmt.Sprintf("bg:intention:%d", deadID)
-	f.seedWalRows(t, ctx, stream, testWalAge+24*time.Hour, 1) // голова старше 30 дней
-	f.seedWalRows(t, ctx, stream, time.Hour, 1)               // хвост свежий
+	f.seedWalRowsFrom(t, ctx, stream, testWalAge+24*time.Hour, 1, 1) // голова старше 30 дней
+	f.seedWalRowsFrom(t, ctx, stream, time.Hour, 2, 1)               // хвост свежий
 
 	f.sched.Tick(ctx)
 

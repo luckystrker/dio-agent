@@ -101,6 +101,13 @@ func (s *Singleton) OnLost(lost func(reason string)) {
 	s.lost = lost
 }
 
+// singletonProbeTimeout — нижняя граница таймаута Ping соединения-замка и
+// проверки нового соединения. Таймаут развязан с интервалом наблюдения: при
+// коротком интервале (E2E-настройка 20 мс) Ping под нагрузкой/GC-паузой не
+// укладывался в тик, три «неудачи» подряд при живой БД давали ложный рестарт
+// (бэклог 2026-10-30). На проде (интервал 5 с) значение не меняет поведение.
+const singletonProbeTimeout = 5 * time.Second
+
 // StartWatch запускает фоновую проверку живости соединения (pgx не отдаёт
 // событий разрыва — периодический ping). interval <= 0 — DefaultWatchInterval.
 // Один неудачный Ping — не потеря: доклад о потере требует 3 подряд неудачи
@@ -111,6 +118,12 @@ func (s *Singleton) OnLost(lost func(reason string)) {
 func (s *Singleton) StartWatch(interval time.Duration) {
 	if interval <= 0 {
 		interval = DefaultWatchInterval
+	}
+	// Таймаут самой проверки — не тик: короткий интервал наблюдения не должен
+	// превращаться в короткий таймаут Ping (ложная потеря под нагрузкой).
+	probeTimeout := interval
+	if probeTimeout < singletonProbeTimeout {
+		probeTimeout = singletonProbeTimeout
 	}
 	// Швы тестов: без переопределения — настоящие Ping и dbReachable.
 	ping := s.ping
@@ -125,7 +138,7 @@ func (s *Singleton) StartWatch(interval time.Duration) {
 	}
 	verify := s.verify
 	if verify == nil {
-		verify = func() bool { return dbReachable(s.dsn, interval) }
+		verify = func() bool { return dbReachable(s.dsn, probeTimeout) }
 	}
 	go func() {
 		defer close(s.watchDone)
@@ -137,7 +150,7 @@ func (s *Singleton) StartWatch(interval time.Duration) {
 			case <-s.watchStop:
 				return
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), interval)
+				ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 				err := ping(ctx)
 				cancel()
 				if err == nil {

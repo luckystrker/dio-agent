@@ -346,16 +346,21 @@ func (h *harness) modelCalls() int { return len(h.script.Calls()) }
 
 // --- ожидания (poll с дедлайном — асинхронные циклы) ---------------------------
 
+// eventually — ожидание условия с дедлайном (асинхронные циклы приложения).
+// 30 с — с запасом на параллельную нагрузку пакетов в БД-прогоне: дедлайн не
+// ослабляет проверку, а не даёт ложное «условие не выполнено» на загруженной
+// машине (вместо sleep тесты ждут именно условие).
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	const deadline = 30 * time.Second
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
 		if cond() {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("условие не выполнено за 10 с: %s", what)
+	t.Fatalf("условие не выполнено за %v: %s", deadline, what)
 }
 
 // --- чтение БД -----------------------------------------------------------------

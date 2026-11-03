@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,10 +248,15 @@ func TestResilienceSigkillMidTurn(t *testing.T) {
 		t.Fatalf("модельных вызовов в B %d, хочу 2", got)
 	}
 
-	// Отпускаем зависший вызов процесса A: его продолжение падает на закрытом
-	// пуле/исчерпанном скрипте и ничего не портит (CAS хода уже у B).
+	// Отпускаем зависший вызов процесса A и ждём, пока его worker реально
+	// остановится (Done закрывается после возврата из Run): продолжение A
+	// падает на закрытом пуле и ничего не портит (CAS хода уже у B).
 	close(block.release)
-	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-hA.app.cognit.Done():
+	case <-time.After(15 * time.Second):
+		t.Fatal("worker процесса A не остановился после release")
+	}
 	if n := queryInt(hB, `SELECT count(*) FROM delivery_outbox`); n != 1 {
 		t.Fatalf("после освобождения A строк outbox %d, хочу 1 — дубль доставки", n)
 	}
@@ -311,13 +317,13 @@ func TestResilienceUnknownDelivery(t *testing.T) {
 		textResp(`{"decision":"answer","messages":["свежий ответ"],"reason":"ответ на новый ход"}`),
 	)
 
-	attempts := 0
+	attempts := atomic.Int64{}
 	h.api.onSendMessage = func(chatID int64, text string) (int64, error) {
-		attempts++
-		if attempts == 1 {
+		n := attempts.Add(1)
+		if n == 1 {
 			return 0, io.ErrUnexpectedEOF // ответ не получен: исход неизвестен
 		}
-		return int64(3000 + attempts), nil
+		return int64(3000 + n), nil
 	}
 
 	h.api.push(1, r1Chat, "private", "напиши что-нибудь")
@@ -335,17 +341,18 @@ func TestResilienceUnknownDelivery(t *testing.T) {
 		t.Fatalf("unknown без причины в last_error")
 	}
 
-	// Слепого resend нет: несколько тактов доставки — попытка всё ещё одна.
-	time.Sleep(200 * time.Millisecond)
-	if attempts != 1 {
-		t.Fatalf("sendMessage вызван %d раз, хочу 1 — unknown повторили вслепую", attempts)
-	}
-
-	// Свежая доставка (новый ход) работает: unknown не блокирует будущее.
+	// Слепого resend нет и свежая доставка работает — одним условием, без
+	// пауз: ждём, пока новый ход действительно доставлен (строка sent). Такт
+	// доставки берёт строки в порядке (чат, ход, позиция): если бы unknown
+	// переотправлялся, он был бы захвачен в том же такте раньше свежей строки,
+	// и итоговый счётчик попыток был бы больше двух.
 	h.api.push(2, r1Chat, "private", "и ещё раз напиши")
 	eventually(t, "свежая доставка прошла", func() bool {
-		return attempts == 2
+		return queryInt(h, `SELECT count(*) FROM delivery_outbox WHERE turn_id <> $1 AND status = 'sent'`, turnID) == 1
 	})
+	if got := attempts.Load(); got != 2 {
+		t.Fatalf("sendMessage вызван %d раз, хочу 2 (unknown не повторяют, свежая доставка — один раз)", got)
+	}
 }
 
 // TestResilienceSingletonConnectionLost — §5.1/§21.1 «потеря singleton

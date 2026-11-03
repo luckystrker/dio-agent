@@ -99,9 +99,10 @@ func TestBehaviorPolitenessToStranger(t *testing.T) {
 	}
 
 	// Карточка незнакомца и отношения — с нуля (§7.3): familiarity выросла на
-	// шаг значимого хода, affinity/trust при стартовых значениях.
+	// шаг значимого хода, affinity/trust при стартовых значениях. Ключ актора
+	// M7 — user:<id>, «Незнакомец» остаётся отображаемым именем-алиасом.
 	entityID := queryInt(h, `
-		SELECT id FROM entities WHERE canonical_name = 'Незнакомец' AND scope_id = 'chat:200803'`)
+		SELECT id FROM entities WHERE canonical_name = 'user:555' AND scope_id = 'chat:200803'`)
 	if entityID == 0 {
 		t.Fatalf("сущность незнакомца не создана")
 	}

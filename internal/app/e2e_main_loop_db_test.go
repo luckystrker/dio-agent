@@ -114,10 +114,11 @@ func (h *harness) memoryProvenanceRef(kind, textLike string) string {
 func (h *harness) familiarity() float64 {
 	h.t.Helper()
 	var v float64
+	// Ключ актора M7 — user:<id>; «Коля» живёт алиасом.
 	if err := h.pool.QueryRow(context.Background(), `
 		SELECT r.familiarity::float8 FROM relationships r
 		JOIN entities e ON e.id = r.person_entity_id
-		WHERE e.canonical_name = 'Коля' AND r.scope_id = $1`, mlScope).Scan(&v); err != nil {
+		WHERE e.canonical_name = 'user:777' AND r.scope_id = $1`, mlScope).Scan(&v); err != nil {
 		h.t.Fatalf("familiarity не читается: %v", err)
 	}
 	return v

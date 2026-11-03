@@ -249,3 +249,39 @@ func TestSingletonNoFalseLossWhenHealthy(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// TestSingletonSlowPingIsNotLoss — таймаут Ping развязан с интервалом
+// наблюдения: короткий интервал (как в E2E, 10–20 мс) не делает Ping короче
+// самого интервала. Медленный, но успешный Ping (дольше тика, в пределах
+// singletonProbeTimeout) — не потеря; иначе три тика «не уложился» с живой БД
+// давали ложный fatal и останавливали процесс (флейк E2E под нагрузкой).
+func TestSingletonSlowPingIsNotLoss(t *testing.T) {
+	dsn := singletonTestDSN(t)
+	ctx := context.Background()
+
+	single, err := AcquireSingleton(ctx, dsn)
+	if err != nil {
+		t.Fatalf("замок не взят: %v", err)
+	}
+	lost := make(chan string, 1)
+	single.OnLost(func(reason string) { lost <- reason })
+	single.ping = func(ctx context.Context) error {
+		select {
+		case <-time.After(100 * time.Millisecond):
+			return nil // медленно, но соединение живо
+		case <-ctx.Done():
+			return ctx.Err() // короткий таймаут сделал бы из этого «неудачу»
+		}
+	}
+	single.verify = func() bool { return true }
+	single.StartWatch(10 * time.Millisecond)
+	t.Cleanup(func() { _ = single.Release(ctx) })
+
+	// 400 мс = много тиков по 10 мс; при таймауте, равном интервалу, ложная
+	// потеря была бы доложена на третьем тике (~30 мс).
+	select {
+	case reason := <-lost:
+		t.Fatalf("медленный успешный Ping принят за потерю замка: %s", reason)
+	case <-time.After(400 * time.Millisecond):
+	}
+}

@@ -230,10 +230,11 @@ func TestTurnFullFlow(t *testing.T) {
 	}
 
 	// --- отношения: familiarity + лимит affinity/trust (§7.3) ---
+	// Актор M7: canonical_name = user:<id>, «Коля» — отображаемое имя-алиас.
 	var fam, aff, trust float64
 	if err := f.runner.Pool.QueryRow(ctx, `
 		SELECT familiarity, affinity, trust FROM relationships
-		WHERE person_entity_id = (SELECT id FROM entities WHERE canonical_name = 'Коля') AND scope_id = $1`,
+		WHERE person_entity_id = (SELECT id FROM entities WHERE canonical_name = 'user:777') AND scope_id = $1`,
 		testScopeID).Scan(&fam, &aff, &trust); err != nil {
 		t.Fatalf("отношения не читаются: %v", err)
 	}

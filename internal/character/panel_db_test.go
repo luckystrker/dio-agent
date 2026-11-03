@@ -108,14 +108,15 @@ func TestAssemblerSystemStaticPanelDynamic(t *testing.T) {
 	}
 }
 
-// memoryEntityResolver — поиск актора теста по имени (сущность создана сборкой).
+// memoryEntityResolver — поиск актора теста по каноническому ключу (M7:
+// canonical_name = user:<id>, отображаемое имя «Коля» — алиас).
 type memoryEntityResolver struct{ f *fixture }
 
 func (r memoryEntityResolver) resolve(t *testing.T, ctx context.Context) (int64, error) {
 	t.Helper()
 	var id int64
 	err := r.f.pool.QueryRow(ctx,
-		`SELECT id FROM entities WHERE scope_id = $1 AND lower(canonical_name) = 'коля'`, testScopeID).Scan(&id)
+		`SELECT id FROM entities WHERE scope_id = $1 AND canonical_name = 'user:777'`, testScopeID).Scan(&id)
 	return id, err
 }
 
