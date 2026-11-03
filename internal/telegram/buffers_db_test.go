@@ -134,6 +134,39 @@ func TestBufferRecoverStalePendingOlderThan(t *testing.T) {
 	}
 }
 
+// TestBufferRecoverSkipsEventsStillInMemory — замечание ревью: свежая порция
+// в памяти не должна расщепляться периодическим recovery, даже если
+// occurred_at старого сообщения (после простоя поллера) прошёл порог.
+func TestBufferRecoverSkipsEventsStillInMemory(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	res := mustIngest(t, pool, rawMessageOf(812, 44, "ещё в буфере"))
+	if _, err := pool.Exec(ctx,
+		`UPDATE social_events SET occurred_at = now() - interval '2 minutes' WHERE id = $1`, res.EventID); err != nil {
+		t.Fatalf("возраст события не выставлен: %v", err)
+	}
+
+	m := NewChatBufferManager(BufferDeps{Pool: pool})
+	m.Windows = func(ChatType, EventKind) Windows { return Windows{Idle: time.Hour, Max: time.Hour} }
+	m.Add(PendingEvent{EventID: res.EventID, ChatID: 44, ChatType: ChatPrivate, Kind: KindMessage})
+	defer m.FlushAll(ctx)
+
+	chats, events, err := m.RecoverStalePendingOlderThan(ctx, time.Minute)
+	if err != nil {
+		t.Fatalf("recovery: %v", err)
+	}
+	if chats != 0 || events != 0 {
+		t.Fatalf("recovery забрал событие из памяти буфера: чатов %d событий %d", chats, events)
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM social_events WHERE id = $1`, res.EventID).Scan(&status); err != nil {
+		t.Fatalf("событие не читается: %v", err)
+	}
+	if status != "pending" {
+		t.Fatalf("событие в памяти буфера закрыто recovery: %s", status)
+	}
+}
+
 func TestBufferFlushAllPersistsTurns(t *testing.T) {
 	// Graceful shutdown: буферы закрываются немедленно, порции не теряются (§5.3).
 	pool := newTestPool(t)

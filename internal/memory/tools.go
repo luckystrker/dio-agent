@@ -223,7 +223,11 @@ func (t *Toolset) findEntities(ctx context.Context, audience, query string) (str
 	out := make([]entityJSON, 0, len(found))
 	for _, e := range found {
 		name := e.CanonicalName
-		if display, derr := t.entities.DisplayName(ctx, t.db, e); derr == nil && strings.TrimSpace(display) != "" {
+		display, derr := t.entities.DisplayName(ctx, t.db, e)
+		if derr != nil {
+			return "", fmt.Errorf("memory_find_entities: отображаемое имя: %w", derr)
+		}
+		if strings.TrimSpace(display) != "" {
 			name = display
 		}
 		out = append(out, entityJSON{ID: strconv.FormatInt(e.ID, 10), Kind: e.Kind, Name: name, Scope: e.ScopeID})
@@ -328,7 +332,11 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 	stanceJSONs, memoryJSONs = trimCardToBudget(stanceJSONs, memoryJSONs, cardRunesBudget)
 
 	displayName := entity.CanonicalName
-	if display, derr := t.entities.DisplayName(ctx, t.db, entity); derr == nil && strings.TrimSpace(display) != "" {
+	display, derr := t.entities.DisplayName(ctx, t.db, entity)
+	if derr != nil {
+		return "", fmt.Errorf("memory_entity_card: отображаемое имя: %w", derr)
+	}
+	if strings.TrimSpace(display) != "" {
 		displayName = display
 	}
 	return marshalJSON(cardResultJSON{

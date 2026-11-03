@@ -38,6 +38,36 @@ func TestEnsurePersonAdoptsLegacyEntity(t *testing.T) {
 	}
 }
 
+// TestEnsurePersonDoesNotStealWhenCanonicalExists — замечание повторного
+// ревью: у актора уже есть user:<id>, поэтому одноимённая легаси-запись
+// (созданная инструментом памяти) не должна подменять его историю.
+func TestEnsurePersonDoesNotStealWhenCanonicalExists(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := EntityRepo{}
+	scope := "chat:88"
+
+	canonical, err := repo.EnsurePerson(ctx, pool, 3001, "Петя", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson(3001): %v", err)
+	}
+	legacy, err := repo.FindOrCreate(ctx, pool, EntityPerson, "Коля", scope)
+	if err != nil {
+		t.Fatalf("легаси-Коля: %v", err)
+	}
+	afterRename, err := repo.EnsurePerson(ctx, pool, 3001, "Коля", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson после смены имени: %v", err)
+	}
+	if afterRename.ID != canonical.ID {
+		t.Fatalf("усыновлена чужая сущность %d вместо своей %d", afterRename.ID, canonical.ID)
+	}
+	if afterRename.ID == legacy.ID {
+		t.Fatal("актор подменён легаси-сущностью одноимённого человека")
+	}
+}
+
+// TestEnsurePersonDistinctActorsSameName — два «Саши» в одном чате — разные
 // сущности: доверие, симпатия и карточка памяти не смешиваются.
 func TestEnsurePersonDistinctActorsSameName(t *testing.T) {
 	pool := newTestPool(t)
@@ -67,6 +97,15 @@ func TestEnsurePersonDistinctActorsSameName(t *testing.T) {
 	}
 	if renamed.ID != first.ID {
 		t.Fatalf("смена имени создала новую сущность: %d вместо %d", renamed.ID, first.ID)
+	}
+
+	// Отображаемое имя для панели/карточки — последний алиас, не user:<id>.
+	display, err := repo.DisplayName(ctx, pool, first)
+	if err != nil {
+		t.Fatalf("DisplayName: %v", err)
+	}
+	if display != "Александр" {
+		t.Fatalf("DisplayName = %q, хочу Александр", display)
 	}
 
 	// Старое и новое имя сохранены алиасами той же сущности.

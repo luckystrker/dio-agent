@@ -124,13 +124,28 @@ func PersonEntityName(actorID int64) string {
 // отображаемое имя алиасом.
 func (EntityRepo) EnsurePerson(ctx context.Context, db DBTX, actorID int64, displayName, scopeID string) (Entity, error) {
 	display := strings.TrimSpace(displayName)
+	// У актора уже есть каноническая сущность — не усыновляем чужую легаси-
+	// запись с тем же отображаемым именем (замечание ревью): иначе смена имени
+	// на «Колю» подменяла бы историю собеседника чужой карточкой.
+	if existing, ok, err := (EntityRepo{}).findPersonByKey(ctx, db, PersonEntityName(actorID), scopeID); err != nil {
+		return Entity{}, err
+	} else if ok {
+		if display != "" {
+			if err := (EntityRepo{}).AddAlias(ctx, db, existing.ID, display); err != nil {
+				return Entity{}, err
+			}
+		}
+		return existing, nil
+	}
 	if display != "" {
 		if legacy, ok, err := (EntityRepo{}).adoptLegacyPerson(ctx, db, actorID, display, scopeID); err != nil {
 			return Entity{}, err
 		} else if ok {
 			// Старые отношения и карточка остаются на месте; отображаемое имя
 			// уже каноническое — алиас добавляем для единообразия.
-			_ = (EntityRepo{}).AddAlias(ctx, db, legacy.ID, display)
+			if err := (EntityRepo{}).AddAlias(ctx, db, legacy.ID, display); err != nil {
+				return Entity{}, err
+			}
 			return legacy, nil
 		}
 	}
@@ -144,6 +159,26 @@ func (EntityRepo) EnsurePerson(ctx context.Context, db DBTX, actorID int64, disp
 		}
 	}
 	return e, nil
+}
+
+// findPersonByKey — поиск уже существующей person-сущности по точному ключу
+// (canonical_name) без создания. Нужен, чтобы отличить «актора ещё нет» от
+// «у актора уже есть своя карточка».
+func (EntityRepo) findPersonByKey(ctx context.Context, db DBTX, key, scopeID string) (Entity, bool, error) {
+	var e Entity
+	err := db.QueryRow(ctx,
+		`SELECT id, kind, canonical_name, scope_id FROM entities e
+		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.name_key = `+entityKeySQL("$3")+`
+		 LIMIT 1`,
+		EntityPerson, scopeID, norm.NFC.String(strings.TrimSpace(key))).
+		Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
+	if isNoRows(err) {
+		return Entity{}, false, nil
+	}
+	if err != nil {
+		return Entity{}, false, fmt.Errorf("entities: сущность актора не читается: %w", err)
+	}
+	return e, true, nil
 }
 
 // FindOrCreate находит сущность по нормализованному имени или алиасу в скоупе
@@ -174,6 +209,7 @@ func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID
 		    OR e.id IN (
 		      SELECT a.entity_id FROM entity_aliases a
 		      WHERE a.scope_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`))
+		 ORDER BY (e.name_key = `+entityKeySQL("$2")+`) DESC, e.id
 		 LIMIT 1`,
 		scopeID, canonical, kind).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
 	if err == nil {

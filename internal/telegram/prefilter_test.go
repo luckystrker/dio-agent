@@ -61,6 +61,18 @@ func TestNormalizeReplyAndMentionOnlyToBot(t *testing.T) {
 		t.Fatalf("@dio_fan принят за @%s: %+v", bot.Username, ev)
 	}
 
+	// Фото с подписью: упоминание лежит в caption_entities, не в entities.
+	photoMention := []byte(`{"update_id":6,"message":{"message_id":15,"chat":{"id":-5,"type":"group"},` +
+		`"from":{"id":1,"first_name":"Аня"},"photo":[{"file_id":"f"}],"caption":"@dio_bot смотри",` +
+		`"caption_entities":[{"type":"mention","offset":0,"length":8}]}}`)
+	ev, err = NormalizeUpdateWithBot(photoMention, bot)
+	if err != nil {
+		t.Fatalf("фото с mention бота: %v", err)
+	}
+	if !ev.MentionBot {
+		t.Fatalf("mention в подписи к фото не распознан: %+v", ev)
+	}
+
 	// Без идентичности бота флаги ложные, prefilter — по прежним правилам.
 	ev, err = NormalizeUpdate(other)
 	if err != nil {

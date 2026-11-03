@@ -80,15 +80,16 @@ type telegramUser struct {
 }
 
 type telegramMessage struct {
-	From           *telegramUser       `json:"from"`
-	Date           int64               `json:"date"` // секунды Unix (время сообщения, не приёма)
-	Text           *string             `json:"text"`
-	Caption        *string             `json:"caption"`
-	Photo          []telegramPhotoSize `json:"photo"`
-	Sticker        *telegramSticker    `json:"sticker"`
-	Entities       []telegramEntity    `json:"entities"`
-	ReplyToMessage *telegramMessage    `json:"reply_to_message"`
-	Chat           *telegramChat       `json:"chat"`
+	From            *telegramUser       `json:"from"`
+	Date            int64               `json:"date"` // секунды Unix (время сообщения, не приёма)
+	Text            *string             `json:"text"`
+	Caption         *string             `json:"caption"`
+	Photo           []telegramPhotoSize `json:"photo"`
+	Sticker         *telegramSticker    `json:"sticker"`
+	Entities        []telegramEntity    `json:"entities"`
+	CaptionEntities []telegramEntity    `json:"caption_entities"`
+	ReplyToMessage  *telegramMessage    `json:"reply_to_message"`
+	Chat            *telegramChat       `json:"chat"`
 }
 
 // telegramSticker — минимальный хвост стикера: эмодзи как текст события
@@ -185,12 +186,20 @@ func isReplyToBot(message *telegramMessage, bot BotIdentity) bool {
 // регистронезависимое, как у Telegram. Подстрока не подходит: @dio_fan не
 // должен считаться обращением к @dio (minor ревью).
 func hasBotMention(message *telegramMessage, bot BotIdentity) bool {
-	if bot.Username == "" || message.Text == nil {
+	if bot.Username == "" {
 		return false
 	}
+	text := messageText(message)
+	if text == nil {
+		return false
+	}
+	entities := message.Entities
+	if message.Text == nil && message.Caption != nil {
+		entities = message.CaptionEntities
+	}
 	want := "@" + bot.Username
-	units := utf16.Encode([]rune(*message.Text))
-	for _, entity := range message.Entities {
+	units := utf16.Encode([]rune(*text))
+	for _, entity := range entities {
 		if entity.Type != "mention" {
 			continue
 		}

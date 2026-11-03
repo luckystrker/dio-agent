@@ -178,6 +178,12 @@ func (l *DeliveryLoop) Tick(ctx context.Context) error {
 		}
 		l.deliver(ctx, row)
 	}
+	if ctx.Err() != nil {
+		// Отмена пришла на последней строке пачки: строки уже возвращены
+		// requeueAbandoned, но такт обязан это показать, а не сделать вид,
+		// что всё в порядке (C1, замечание ревью).
+		return ctx.Err()
+	}
 	l.pruneLastSent()
 	return nil
 }

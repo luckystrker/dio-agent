@@ -90,7 +90,11 @@ func (t *Toolset) ConversationCard(ctx context.Context, audience string, entity 
 	seen := make(map[int64]struct{}, len(actorItems)+len(chatItems))
 	var entries []string
 	displayName := entity.CanonicalName
-	if name, nerr := (EntityRepo{}).DisplayName(ctx, t.db, entity); nerr == nil && strings.TrimSpace(name) != "" {
+	name, nerr := (EntityRepo{}).DisplayName(ctx, t.db, entity)
+	if nerr != nil {
+		return ConversationCard{}, fmt.Errorf("карточка: отображаемое имя: %w", nerr)
+	}
+	if strings.TrimSpace(name) != "" {
 		displayName = name
 	}
 
