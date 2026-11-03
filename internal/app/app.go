@@ -13,6 +13,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/background"
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/metrics"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -108,6 +109,7 @@ type App struct {
 	sched       *background.Scheduler
 	delivery    *telegram.DeliveryLoop
 	poller      *telegram.TelegramPoller
+	metricsSrv  *metrics.Server // HTTP-метрики §20 (этап 31); nil — выключены
 
 	runCtx       context.Context // весь процесс: потеря singleton/фатальная ошибка отменяют
 	cancelRun    context.CancelFunc
@@ -183,8 +185,35 @@ func (a *App) Start(ctx context.Context) error {
 		a.logger.Printf("стикеры: коллекция персоны — %d", n)
 	}
 
-	// --- память, журнал, бюджет ---
-	// Адаптеры журнала/WAL/чекпоинтов живут на runCtx, а не на пришедшем ctx:
+	// --- HTTP-метрики §20 (этап 31): только 127.0.0.1, порт из METRICS_PORT.
+	// Порт занят — явный сбой запуска: оператор должен видеть, что метрик нет.
+	if a.opts.Config.MetricsPort > 0 {
+		srv, merr := metrics.New(metrics.Config{
+			Port:   a.opts.Config.MetricsPort,
+			Logger: a.logger,
+			DB:     pool,
+			Source: metrics.NewPgSource(pool, metrics.SourceOptions{
+				Baseline: func(now time.Time) character.Mood {
+					return persona.MoodTargetAt(now, a.opts.Config.Timezone)
+				},
+				Schedule:               persona.Schedule,
+				Timezone:               a.opts.Config.Timezone,
+				Now:                    a.opts.Now,
+				ConversationCallsLimit: dailyCallsLimit(a.opts.Config),
+				BackgroundCallsLimit:   backgroundCallsLimit(a.opts.Config),
+			}),
+		})
+		if merr != nil {
+			return a.stopFailed(fmt.Errorf("app: метрики не собраны: %w", merr))
+		}
+		if merr := srv.Start(); merr != nil {
+			return a.stopFailed(fmt.Errorf("app: %w", merr))
+		}
+		a.metricsSrv = srv
+		a.logger.Printf("метрики: http://%s (/metrics, /stats, /healthz)", srv.Addr())
+	}
+
+	// --- память, журнал, бюджет ---	// Адаптеры журнала/WAL/чекпоинтов живут на runCtx, а не на пришедшем ctx:
 	// сигнал (SIGTERM) отменяет внешний контекст ДО graceful drain (§5.3), и
 	// записи дренажа — model_output сгенерированного ответа, WAL, чекпоинты —
 	// падали весь остаток хода. runCtx отменяется в Stop уже ПОСЛЕ дренажа.
@@ -402,6 +431,16 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}()
 
+	// Метрики — вспомогательный контур: сбой обслуживания только логируется
+	// (внутри Server.Run), персонаж продолжает работу.
+	if a.metricsSrv != nil {
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			a.metricsSrv.Run(a.runCtx)
+		}()
+	}
+
 	a.logger.Printf("приложение запущено: модель=%s telegram=%v",
 		map[bool]string{true: "настроена", false: "не настроена"}[model != nil], a.poller != nil)
 	return nil
@@ -480,6 +519,9 @@ func (a *App) Stop(ctx context.Context) {
 	}
 
 	// 5. Соединения.
+	if a.metricsSrv != nil {
+		_ = a.metricsSrv.Shutdown()
+	}
 	if a.pool != nil {
 		a.pool.Close()
 	}
@@ -493,6 +535,9 @@ func (a *App) Stop(ctx context.Context) {
 func (a *App) stopFailed(err error) error {
 	if a.cancelRun != nil {
 		a.cancelRun()
+	}
+	if a.metricsSrv != nil {
+		_ = a.metricsSrv.Shutdown()
 	}
 	if a.single != nil {
 		_ = a.single.Release(context.Background())

@@ -27,6 +27,9 @@ const (
 	EventTypeDeltasApplied  = "deltas_applied"
 	EventTypeDeliveryQueued = "delivery_queued"
 	EventTypeTurnSkipped    = "turn_skipped"
+	// EventTypeTurnPlan — план инструментов памяти разговорного хода (этап
+	// 31.2): метрики считают причины включения по журналу, а не по логам.
+	EventTypeTurnPlan = "turn_plan"
 )
 
 // TurnStarted — начало хода: пачка или цель фоновой задачи, модель/бюджет.
@@ -151,6 +154,23 @@ func (TurnSkipped) EventType() string    { return EventTypeTurnSkipped }
 func (TurnSkipped) Transient() bool      { return false }
 func (TurnSkipped) Conversational() bool { return false }
 
+// TurnPlan — решение харнесса о выдаче инструментов памяти на разговорном
+// ходе (этап 31.2, §20). Записывается один раз после сборки контекста:
+// журнал — источник для метрик «доля ходов с инструментами» и причин
+// (none/history_trimmed/card_incomplete/rollback), а не разбор строк лога.
+type TurnPlan struct {
+	events.Base
+	TurnID      int64  `json:"turn_id"`
+	Enabled     bool   `json:"enabled"`
+	Reason      string `json:"reason"`
+	CardEntries int    `json:"card_entries"`
+	CardFitted  bool   `json:"card_fitted"`
+}
+
+func (TurnPlan) EventType() string    { return EventTypeTurnPlan }
+func (TurnPlan) Transient() bool      { return false }
+func (TurnPlan) Conversational() bool { return false }
+
 // init регистрирует события в реестре ago — декодирование при чтении журнала.
 func init() {
 	events.RegisterEvent(TurnStarted{})
@@ -160,4 +180,5 @@ func init() {
 	events.RegisterEvent(DeltasApplied{})
 	events.RegisterEvent(DeliveryQueued{})
 	events.RegisterEvent(TurnSkipped{})
+	events.RegisterEvent(TurnPlan{})
 }

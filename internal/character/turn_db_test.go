@@ -170,7 +170,7 @@ func TestTurnFullFlow(t *testing.T) {
 
 	// --- события хода §12.1: полный набор и порядок ключевых типов ---
 	types := f.eventTypes(t, ctx, turnID)
-	want := []string{EventTypeTurnStarted, EventTypeToolCall, EventTypeToolResult,
+	want := []string{EventTypeTurnStarted, EventTypeTurnPlan, EventTypeToolCall, EventTypeToolResult,
 		EventTypeModelOutput, EventTypeDeltasApplied, EventTypeDeliveryQueued}
 	if len(types) != len(want) {
 		t.Fatalf("события хода: %v, хочу %v", types, want)
@@ -616,10 +616,11 @@ func TestTurnBudgetExhausted(t *testing.T) {
 	if !errors.Is(err, runtime.ErrBudgetExhausted) {
 		t.Fatalf("хочу ErrBudgetExhausted, получено: %v", err)
 	}
-	// turn_started есть, model_output нет — ход ждёт повторной попытки (§12.2).
+	// turn_started и план инструментов есть, model_output нет — ход ждёт
+	// повторной попытки (§12.2).
 	types := f.eventTypes(t, ctx, second)
-	if len(types) != 1 || types[0] != EventTypeTurnStarted {
-		t.Fatalf("события хода при исчерпании бюджета: %v, хочу только turn_started", types)
+	if len(types) != 2 || types[0] != EventTypeTurnStarted || types[1] != EventTypeTurnPlan {
+		t.Fatalf("события хода при исчерпании бюджета: %v, хочу turn_started+turn_plan", types)
 	}
 }
 

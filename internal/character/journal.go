@@ -99,6 +99,8 @@ func stamped(ev events.Event) events.Event {
 		stampBase(&e.Base)
 	case *TurnSkipped:
 		stampBase(&e.Base)
+	case *TurnPlan:
+		stampBase(&e.Base)
 	}
 	return ev
 }
@@ -145,6 +147,13 @@ func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result
 // WriteTurnSkipped записывает терминальный пропуск (инвариант 5).
 func (j *TurnJournal) WriteTurnSkipped(ctx context.Context, turnID int64, phase, reason string) error {
 	return j.appendOnce(ctx, turnID, &TurnSkipped{TurnID: turnID, Phase: phase, Reason: reason})
+}
+
+// WriteTurnPlan записывает план инструментов памяти хода (этап 31.2) —
+// однократно: повторный прогон того же хода не плодит события, а метрики не
+// считают его дважды.
+func (j *TurnJournal) WriteTurnPlan(ctx context.Context, turnID int64, plan *TurnPlan) error {
+	return j.appendOnce(ctx, turnID, plan)
 }
 
 // WriteApplyTx пишет deltas_applied + delivery_queued ВНУТРИ транзакции

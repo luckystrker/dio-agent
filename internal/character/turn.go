@@ -385,6 +385,18 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
 	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
 	r.logMemoryTurn(in, bctx, plan)
+	// План инструментов памяти — durable событие журнала (этап 31.2):
+	// метрики §20 читают причины из базы, а не парсят логи. Сбой записи не
+	// роняет ход — журнал наблюдаемости, как у tool_call/tool_result.
+	if err := r.Journal.WriteTurnPlan(ctx, in.TurnID, &TurnPlan{
+		TurnID:      in.TurnID,
+		Enabled:     plan.Enabled,
+		Reason:      memoryToolsReason(r.MemoryPrefetch, bctx),
+		CardEntries: bctx.MemoryCardEntries,
+		CardFitted:  bctx.MemoryCardFitted,
+	}); err != nil {
+		r.logf("ход %d: turn_plan не записан: %v", in.TurnID, err)
+	}
 	if plan.ForcedTool != "" {
 		// Forced tool-calling на прямом обращении (§10.4): только в режиме
 		// отката (MODEL_MEMORY_PREFETCH=false). В обычном режиме память уже
