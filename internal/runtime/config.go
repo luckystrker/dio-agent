@@ -349,7 +349,11 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	if err != nil {
 		return nil, err
 	}
-	maxRetries, err := positiveInt(env, "MODEL_MAX_RETRIES", 1)
+	// Ретраи провайдера внутри одного модельного вызова оплачиваются, но
+	// резервируется один вызов (§16) — по умолчанию выключены (0), повтор
+	// делает worker с длинным backoff (M10). Ненулевое значение оператор
+	// ставит сознательно.
+	maxRetries, err := nonNegativeInt(env, "MODEL_MAX_RETRIES", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -447,6 +451,20 @@ func positiveInt(env Getenv, name string, def int) (int, error) {
 	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || parsed <= 0 {
 		return 0, fmt.Errorf("%s=\"%s\" должно быть целым положительным числом", name, raw)
+	}
+	return parsed, nil
+}
+
+// nonNegativeInt — целое >= 0; в отличие от positiveInt допускает 0
+// (MODEL_MAX_RETRIES=0 — ретраи провайдера выключены).
+func nonNegativeInt(env Getenv, name string, def int) (int, error) {
+	raw, ok := env(name)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def, nil
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("%s=\"%s\" должно быть целым неотрицательным числом", name, raw)
 	}
 	return parsed, nil
 }

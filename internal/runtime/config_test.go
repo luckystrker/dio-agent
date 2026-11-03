@@ -183,7 +183,7 @@ func TestLoadConfigModel(t *testing.T) {
 		if m.TimeoutMs != 2500 || m.HistoryMessages != 500 {
 			t.Errorf("числовые значения не применились: %+v", m)
 		}
-		if m.MaxRetries != 1 || m.MaxOutputTokens != 1000 || m.DailyCallsLimit != 100 || m.HistoryMaxChars != 200_000 {
+		if m.MaxRetries != 0 || m.MaxOutputTokens != 1000 || m.DailyCallsLimit != 100 || m.HistoryMaxChars != 200_000 {
 			t.Errorf("умолчания не совпали: %+v", m)
 		}
 	})
@@ -198,7 +198,7 @@ func TestLoadConfigModel(t *testing.T) {
 	t.Run("невалидные числа — ошибка с именем переменной", func(t *testing.T) {
 		for name, value := range map[string]string{
 			"MODEL_TIMEOUT_MS":        "abc",
-			"MODEL_MAX_RETRIES":       "0",
+			"MODEL_MAX_RETRIES":       "-1",
 			"MODEL_MAX_OUTPUT_TOKENS": "-5",
 			"MODEL_DAILY_CALLS_LIMIT": "1.5",
 		} {
@@ -247,8 +247,23 @@ func TestLoadConfigModel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("неожиданная ошибка: %v", err)
 		}
-		if cfg.Model.MaxRetries != 1 {
-			t.Errorf("пустое значение должно давать умолчание, получено %d", cfg.Model.MaxRetries)
+		if cfg.Model.MaxRetries != 0 {
+			t.Errorf("пустое значение должно давать умолчание 0, получено %d", cfg.Model.MaxRetries)
+		}
+	})
+
+	t.Run("MODEL_MAX_RETRIES=0 — ретраи провайдера выключены", func(t *testing.T) {
+		env := map[string]string{}
+		for k, v := range full {
+			env[k] = v
+		}
+		env["MODEL_MAX_RETRIES"] = "0"
+		cfg, err := LoadConfig(envOf(env))
+		if err != nil {
+			t.Fatalf("0 должен быть допустим: %v", err)
+		}
+		if cfg.Model.MaxRetries != 0 {
+			t.Errorf("MaxRetries = %d, хочу 0", cfg.Model.MaxRetries)
 		}
 	})
 }
