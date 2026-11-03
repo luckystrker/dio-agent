@@ -32,7 +32,9 @@ const (
 
 func clamp(v, min, max float64) float64 { return math.Min(max, math.Max(min, v)) }
 
-// DecayMood — затухание к базовой линии: current = baseline + (stored-baseline)·e^(−λt).
+// DecayMood — затухание к цели: current = target + (stored-target)·e^(−λt).
+// Цель — базовая линия персоны или блок расписания дня (этап 22): параметр
+// по-прежнему называется baseline, но вызывающие передают MoodTargetAt.
 func DecayMood(stored, baseline Mood, elapsed time.Duration, lambdaPerHour float64) Mood {
 	factor := math.Exp(-lambdaPerHour * elapsed.Hours())
 	return Mood{
@@ -120,7 +122,8 @@ type MoodRepo struct{}
 // NewMoodRepo создаёт репозиторий (без состояния — методы принимают DBTX).
 func NewMoodRepo() *MoodRepo { return &MoodRepo{} }
 
-// ReadDecayed читает настроение с затуханием от времени последнего обновления
+// ReadDecayed читает настроение с затуханием к цели (baseline — базовая линия
+// персоны или блок расписания дня, этап 22) от времени последнего обновления
 // и фиксирует затухнувшее значение в хранилище — но не вслепую (17.11):
 // запись только когда затухание реально изменило значения (больше порога
 // moodDecayWriteEps) и строку с момента чтения никто не трогал (CAS по

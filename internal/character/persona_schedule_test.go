@@ -95,6 +95,36 @@ func TestParsePersonaScheduleTolerantBits(t *testing.T) {
 	}
 }
 
+// TestParsePersonaScheduleDuplicateSection — вторая секция «Расписание» —
+// ошибка: общий парсер молча берёт первое вхождение, а для расписания это
+// означает тихую потерю половины суток.
+func TestParsePersonaScheduleDuplicateSection(t *testing.T) {
+	text := scheduleText("00:00–24:00 | arousal 0.5 | socialEnergy 0.5 | дела") +
+		scheduleText("00:00–24:00 | arousal 0.1 | socialEnergy 0.1 | тихо | спит")
+	_, err := parsePersonaSchedule(text)
+	if err == nil || !strings.Contains(err.Error(), "второй раз") ||
+		!strings.Contains(err.Error(), "строка 3") {
+		t.Fatalf("хочу ошибку про вторую секцию со строкой 3, получено: %v", err)
+	}
+}
+
+// TestQuietUntilWholeDayQuiet — «тихо круглосуточно» (ошибка владельца) не
+// отодвигает инициативу на годы: склейка ограничена сутками.
+func TestQuietUntilWholeDayQuiet(t *testing.T) {
+	loc := moscow(t)
+	sched := Schedule{{StartMinute: 0, EndMinute: minutesPerDay, Quiet: true, Activity: "тихо"}}
+	persona := Persona{Schedule: &sched}
+	at := time.Date(2026, 11, 3, 3, 0, 0, 0, loc)
+	until, quiet := persona.QuietUntil(at, loc)
+	if !quiet {
+		t.Fatal("круглосуточная тишина должна откладывать инициативу")
+	}
+	if until.After(at.Add(24*time.Hour)) || !until.After(at) {
+		t.Fatalf("конец круглосуточной тишины = %v (at %v): хочу в пределах суток", until, at)
+	}
+}
+
+// TestParsePersonaScheduleNoSection — без секции расписания нет.
 func TestParsePersonaScheduleNoSection(t *testing.T) {
 	sched, err := parsePersonaSchedule("## Имя\nDio\n")
 	if err != nil || sched != nil {
@@ -350,9 +380,10 @@ func TestShippedPersonaSchedule(t *testing.T) {
 		t.Fatalf("config/persona.md не парсится: %v", err)
 	}
 	if src.Schedule == nil {
-		// Секция необязательна: владелец вправе удалить её целиком (правила
-		// в шапке файла). Тогда проверять нечего — поведение без расписания.
-		t.Skip("расписание дня в config/persona.md не задано — прежнее поведение")
+		// Черновик этапа 22 сдан с расписанием (как shipped-шаблон промпта,
+		// чьё содержимое тоже проверяется тестом). Удалили секцию осознанно —
+		// обновите и этот тест вместе с файлом.
+		t.Fatal("в config/persona.md нет расписания дня")
 	}
 	loc := moscow(t)
 	if block := src.Schedule.BlockAt(time.Date(2026, 11, 3, 3, 0, 0, 0, loc), loc); block == nil || !block.Quiet {

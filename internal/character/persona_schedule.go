@@ -101,9 +101,12 @@ func (s Schedule) QuietUntil(at time.Time, loc *time.Location) (time.Time, bool)
 	if !quiet {
 		return time.Time{}, false
 	}
+	// Склейка ограничена сутками: расписание, тихое круглосуточно (ошибка
+	// владельца), не должно отодвигать инициативу на годы вперёд.
+	deadline := at.Add(24 * time.Hour)
 	for i := 0; i < minutesPerDay; i++ {
 		next, more := s.quietBlockEnd(end, loc)
-		if !more || !next.After(end) {
+		if !more || !next.After(end) || next.After(deadline) {
 			break
 		}
 		end = next
@@ -187,7 +190,10 @@ type numberedLine struct {
 // nil/nil — секции нет (прежнее поведение). Ошибка называет секцию, строку и
 // что именно не так.
 func parsePersonaSchedule(text string) (*Schedule, error) {
-	lines, found := scheduleSectionLines(text)
+	lines, found, err := scheduleSectionLines(text)
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, nil
 	}
@@ -372,10 +378,11 @@ func formatMinute(minute int) string {
 }
 
 // scheduleSectionLines — строки секции «Расписание» ИСХОДНОГО файла с номерами:
-// HTML-комментарии вырезаются из строк, но нумерация не сбивается. Первое
-// вхождение заголовка выигрывает (как splitSections), секция кончается на
-// следующем «## ».
-func scheduleSectionLines(text string) ([]numberedLine, bool) {
+// HTML-комментарии вырезаются из строк, но нумерация не сбивается; секция
+// кончается на следующем «## ». Вторая секция «Расписание» — ошибка: общий
+// парсер молча берёт первое вхождение, а для расписания молча потерять
+// половину суток нельзя (покрытие может сойтись и не заметить потери).
+func scheduleSectionLines(text string) ([]numberedLine, bool, error) {
 	var (
 		lines     []numberedLine
 		inSection bool
@@ -384,14 +391,20 @@ func scheduleSectionLines(text string) ([]numberedLine, bool) {
 	)
 	for i, line := range strings.Split(text, "\n") {
 		line = stripHTMLComments(&line, &inComment)
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
-			header := strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
+		// Заголовок — строго с начала строки, как у splitSections: иначе
+		// «  ## Расписание» было бы секцией для одного парсера и текстом для
+		// другого.
+		if strings.HasPrefix(line, "## ") {
+			header := strings.TrimSpace(strings.TrimPrefix(line, "## "))
 			switch {
 			case header == scheduleSection && !found:
 				inSection, found = true, true
+			case header == scheduleSection:
+				return nil, false, fmt.Errorf(
+					"секция «%s», строка %d: секция встречается второй раз — расписание задаётся одной секцией",
+					scheduleSection, i+1)
 			case inSection:
-				return lines, true
+				return lines, true, nil
 			}
 			continue
 		}
@@ -399,7 +412,7 @@ func scheduleSectionLines(text string) ([]numberedLine, bool) {
 			lines = append(lines, numberedLine{number: i + 1, text: line})
 		}
 	}
-	return lines, found
+	return lines, found, nil
 }
 
 // stripHTMLComments вырезает HTML-комментарии из строки, помня незакрытый

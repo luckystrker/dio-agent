@@ -58,7 +58,8 @@ type ApplyOptions struct {
 	ChatID  int64
 	ScopeID string
 	Result  TurnResult
-	// PersonaBaseline — базовая линия настроения для затухания (§7.2).
+	// PersonaBaseline — цель затухания настроения (§7.2): базовая линия
+	// персоны или блок расписания дня на момент применения (этап 22).
 	PersonaBaseline Mood
 	// Journal — пишет deltas_applied + delivery_queued в этой же транзакции.
 	Journal *TurnJournal
