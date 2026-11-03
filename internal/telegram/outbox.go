@@ -44,7 +44,7 @@ type OutboxItem struct {
 	Kind     string // message | reaction | sticker
 	Text     string
 	Reaction string
-	// FileID — file_id стикера (kind=sticker); 0 — не задан.
+	// FileID — file_id стикера (kind=sticker); пусто — не задан.
 	FileID string
 	// TargetMessageID — цель реакции; 0 — не задана.
 	TargetMessageID int64

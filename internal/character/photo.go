@@ -12,7 +12,8 @@ import (
 	"github.com/luckystrker/dio-agent/internal/telegram"
 )
 
-// Photo — скачанное фото одного события пачки.
+// Photo — скачанная картинка одного события пачки: фото, статичный стикер или
+// превью анимированного стикера/гифки (этап 25; уходит в Ask как BinaryInput).
 type Photo struct {
 	FileID string
 	Data   []byte
