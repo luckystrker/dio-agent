@@ -265,6 +265,47 @@ func TestDeliveryLoopStalenessCancelsBubbles(t *testing.T) {
 	}
 }
 
+// TestDeliveryLoopStalenessSeesBufferedNextTurn — M3: к моменту доставки
+// новые сообщения обычно уже buffered в следующем ходе. Старая проверка
+// (`pending AND turn_id IS NULL`) их не видела, и хвостовые пузыри уходили.
+func TestDeliveryLoopStalenessSeesBufferedNextTurn(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+	repo := NewOutboxRepo(pool)
+
+	var nextTurn int64
+	if err := pool.QueryRow(ctx, `INSERT INTO turns (chat_id) VALUES (42) RETURNING id`).Scan(&nextTurn); err != nil {
+		t.Fatalf("следующий ход не создан: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO social_events (telegram_update_id, chat_id, chat_type, kind, text, raw_update, status, turn_id)
+		VALUES (9201, 42, 'private', 'message', 'новое сообщение', '{}', 'buffered', $1)`, nextTurn); err != nil {
+		t.Fatalf("buffered-событие следующего хода не вставлено: %v", err)
+	}
+	insertOutboxSent(t, pool, 142, 42, 0, `{"kind":"message","text":"прямой ответ"}`)
+	insertOutbox(t, pool, 142, 42, 1, `{"kind":"message","text":"уже неуместно"}`)
+
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM delivery_outbox WHERE turn_id = 142 AND position = 1`).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("хвостовой пузырь при buffered-событии следующего хода: %s, хочу cancelled", status)
+	}
+	if len(stub.sentMessages()) != 0 {
+		t.Fatalf("устаревшее не должно было уйти в сеть")
+	}
+}
+
 // TestDeliveryLoopStalenessKeepsFirstBubble — первый пузырь (позиция 0) —
 // прямой ответ, ради которого ход состоялся: уходит всегда, даже если чат
 // ушёл вперёд (портировано из TS-линии c0a986d, 2026-10-31).

@@ -224,7 +224,7 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 	// прямой ответ, ради которого ход состоялся: уходит всегда, даже если
 	// следом пришло новое — ответить позже лучше, чем не ответить вовсе
 	// (портировано из TS-линии c0a986d, 2026-10-31).
-	stale, err := l.chatHasNewPendingEvents(ctx, row.ChatID)
+	stale, err := l.chatHasNewPendingEvents(ctx, row.ChatID, row.TurnID)
 	if err != nil {
 		l.requeueOnDBError(ctx, row, err.Error())
 		return
@@ -496,14 +496,20 @@ func sendNeverStarted(err error) bool {
 }
 
 // chatHasNewPendingEvents — новые события чата ждут обработки (§13.3:
-// устаревание перед отправкой).
-func (l *DeliveryLoop) chatHasNewPendingEvents(ctx context.Context, chatID int64) (bool, error) {
+// устаревание перед отправкой). Учитываются и pending (ещё в буфере), и
+// buffered в более позднем ходе: к моменту доставки новые сообщения обычно уже
+// принадлежат следующему ходу, старая проверка `turn_id IS NULL` их не видела
+// и хвостовые пузыри уходили (M3).
+func (l *DeliveryLoop) chatHasNewPendingEvents(ctx context.Context, chatID, turnID int64) (bool, error) {
 	var exists bool
 	err := l.db.QueryRow(ctx, `
 		SELECT EXISTS (
-		  SELECT 1 FROM social_events
-		  WHERE chat_id = $1 AND status = 'pending' AND turn_id IS NULL
-		)`, chatID).Scan(&exists)
+		  SELECT 1 FROM social_events e
+		  WHERE e.chat_id = $1
+		    AND e.id > COALESCE((SELECT max(id) FROM social_events WHERE turn_id = $2), 0)
+		    AND e.status IN ('pending', 'buffered')
+		    AND e.turn_id IS DISTINCT FROM $2
+		)`, chatID, turnID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("delivery: новые события чата %d не проверяются: %w", chatID, err)
 	}
