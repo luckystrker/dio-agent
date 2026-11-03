@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBatchTexts(t *testing.T) {
@@ -128,5 +129,28 @@ func TestBatchTextsSanitizesAuthorName(t *testing.T) {
 	})
 	if len(got) != 2 || got[0] != "Коля (/состояние): раз" || got[1] != "Аня: два" {
 		t.Fatalf("имя автора не санировано: %v", got)
+	}
+}
+
+// TestMemoryQueryFromBatch — этап 21.1: запрос релевантной карточки собирается
+// из текстов пачки, пустые реплики пропускаются, объём обрезается ~1000 рун.
+func TestMemoryQueryFromBatch(t *testing.T) {
+	batch := []BatchEvent{
+		{ActorID: 7, Text: "  привет  "},
+		{ActorID: 7, Text: "   "},
+		{ActorID: 7, Text: "что там с пластинками?"},
+	}
+	got := memoryQuery(batch)
+	if got != "привет что там с пластинками?" {
+		t.Fatalf("запрос собран неверно: %q", got)
+	}
+	if memoryQuery(nil) != "" {
+		t.Fatalf("пустая пачка дала непустой запрос")
+	}
+
+	long := []BatchEvent{{ActorID: 7, Text: strings.Repeat("я", memoryQueryLimit+500)}}
+	got = memoryQuery(long)
+	if n := utf8.RuneCountInString(got); n > memoryQueryLimit {
+		t.Fatalf("запрос %d рун превышает лимит %d", n, memoryQueryLimit)
 	}
 }

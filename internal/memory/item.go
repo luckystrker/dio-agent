@@ -450,9 +450,35 @@ func (Items) ItemsForEntities(ctx context.Context, db DBTX, audience string, ent
 	return collectItems(rows)
 }
 
+// LinkedToEntity — какие из перечисленных записей связаны с сущностью (§8.3):
+// карточке нужно различить «память о собеседнике» и «память этого чата» среди
+// релевантных попаданий. Фильтр приватности здесь не нужен: id записей уже
+// отобраны видимым аудитории поиском, а связь раскрывает только роль записи.
+func (Items) LinkedToEntity(ctx context.Context, db DBTX, entityID int64, ids []int64) (map[int64]bool, error) {
+	out := make(map[int64]bool, len(ids))
+	if entityID <= 0 || len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := db.Query(ctx,
+		`SELECT DISTINCT memory_id FROM memory_links
+		 WHERE entity_id = $1 AND memory_id = ANY($2)`,
+		entityID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("memory_links: связи записей с сущностью: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("memory_links: чтение связи: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // LatestForScope — последние активные записи назначенного скоупа (карточка
-// собеседника, решение 2026-11-02): «что персонаж уже знает об этом чате».
-// Фильтр приватности тот же, что у инструментов: видимость проверяется в SQL
+// собеседника, решение 2026-11-02): «что персонаж уже знает об этом чате».// Фильтр приватности тот же, что у инструментов: видимость проверяется в SQL
 // до выдачи текста (§9.2), поэтому запись чужого чата не попадает в карточку
 // даже при совпадении имени сущности. Порядок детерминирован (время, вес, id).
 func (Items) LatestForScope(ctx context.Context, db DBTX, audience, scopeID string, limit int) ([]Item, error) {

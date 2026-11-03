@@ -56,7 +56,7 @@ func TestConversationCardScopesAndOrder(t *testing.T) {
 		t.Fatalf("stance не создан: %v", err)
 	}
 
-	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA)
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "")
 	if err != nil {
 		t.Fatalf("карточка не собрана: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestConversationCardScopesAndOrder(t *testing.T) {
 		t.Fatalf("порядок записей не «лучшие первыми»:\n%s", card.Text)
 	}
 	// Детерминированный порядок: повторная сборка — тот же текст.
-	again, err := ts.ConversationCard(ctx, scopeA, entity, scopeA)
+	again, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "")
 	if err != nil {
 		t.Fatalf("повторная карточка не собрана: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestConversationCardCeiling(t *testing.T) {
 		})
 	}
 
-	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA)
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "")
 	if err != nil {
 		t.Fatalf("карточка не собрана: %v", err)
 	}
@@ -145,11 +145,148 @@ func TestConversationCardSingleChatItemsOrderedByRecency(t *testing.T) {
 	stampRecorded(t, ctx, pool, oldItem.ID, "2026-09-01T10:00:00Z")
 	stampRecorded(t, ctx, pool, newItem.ID, time.Now().UTC().Format(time.RFC3339))
 
-	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA)
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "")
 	if err != nil {
 		t.Fatalf("карточка не собрана: %v", err)
 	}
 	if strings.Index(card.Text, "свежее событие") > strings.Index(card.Text, "старое событие") {
 		t.Fatalf("память чата не от свежего к старому:\n%s", card.Text)
 	}
+}
+
+// TestConversationCardUsesRelevantSearch — этап 21.1: при непустом запросе
+// записи карточки выбираются поиском (FTS + вектор), а не «последние N».
+// Старая релевантная запись попадает в карточку, хотя её перекрывают свежие
+// нерелевантные реплики чата.
+func TestConversationCardUsesRelevantSearch(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts, err := NewToolset(pool, &Searcher{Embedder: nil, Items: Items{}})
+	if err != nil {
+		t.Fatalf("NewToolset: %v", err)
+	}
+	entity, err := (EntityRepo{}).FindOrCreate(ctx, pool, EntityPerson, "Данил", scopeA)
+	if err != nil {
+		t.Fatalf("сущность не создана: %v", err)
+	}
+
+	old := seedItem(t, ctx, pool, scopeA, "Данил коллекционирует старые пластинки", seedOpts{
+		salience: 0.5, links: []EntityLink{{Name: "Данил", Kind: EntityPerson, Role: RoleSubject}},
+	})
+	stampRecorded(t, ctx, pool, old.ID, "2026-09-01T10:00:00Z")
+	for i := 0; i < 12; i++ {
+		fresh := seedItem(t, ctx, pool, scopeA, fmt.Sprintf("свежая болтовня про погоду номер %d", i), seedOpts{
+			salience: 0.6, links: []EntityLink{{Name: "Данил", Kind: EntityPerson, Role: RoleSubject}},
+		})
+		stampRecorded(t, ctx, pool, fresh.ID, "2026-11-01T10:00:00Z")
+	}
+
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "что там с пластинками?")
+	if err != nil {
+		t.Fatalf("карточка не собрана: %v", err)
+	}
+	if !strings.Contains(card.Text, "пластинки") {
+		t.Fatalf("релевантная старая запись не попала в карточку:\n%s", card.Text)
+	}
+	// Нерелевантные записи в базе не делают карточку неполной (этап 21.2):
+	// в память идём только если ответа нет ни в истории, ни в карточке.
+	if !card.Fits {
+		t.Fatalf("нерелевантные записи сделали карточку неполной:\n%s", card.Text)
+	}
+	if n := utf8.RuneCountInString(card.Text); n > ConversationCardBudget {
+		t.Fatalf("карточка %d рун превышает потолок %d", n, ConversationCardBudget)
+	}
+}
+
+// TestConversationCardFitsWhenRelevantCut — этап 21.2: срез РЕЛЕВАНТНЫХ
+// попаданий по количеству — честная неполнота (ход получит инструменты).
+func TestConversationCardFitsWhenRelevantCut(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts, err := NewToolset(pool, &Searcher{Embedder: nil, Items: Items{}})
+	if err != nil {
+		t.Fatalf("NewToolset: %v", err)
+	}
+	entity, err := (EntityRepo{}).FindOrCreate(ctx, pool, EntityPerson, "Данил", scopeA)
+	if err != nil {
+		t.Fatalf("сущность не создана: %v", err)
+	}
+	for i := 0; i < cardChatItemLimit+1; i++ {
+		seedItem(t, ctx, pool, scopeA, fmt.Sprintf("пластинки выпуск %d", i), seedOpts{salience: 0.5})
+	}
+
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "пластинки")
+	if err != nil {
+		t.Fatalf("карточка не собрана: %v", err)
+	}
+	if card.Fits {
+		t.Fatalf("срезанные релевантные попадания не пометили карточку неполной:\n%s", card.Text)
+	}
+}
+
+// TestConversationCardSearchFailureFallsBack — сбой поиска/эмбеддинга не
+// роняет ход: карточка собирается прежним отбором (последние записи).
+func TestConversationCardSearchFailureFallsBack(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts, err := NewToolset(pool, &Searcher{Embedder: failingEmbedder{}, Items: Items{}})
+	if err != nil {
+		t.Fatalf("NewToolset: %v", err)
+	}
+	entity, err := (EntityRepo{}).FindOrCreate(ctx, pool, EntityPerson, "Данил", scopeA)
+	if err != nil {
+		t.Fatalf("сущность не создана: %v", err)
+	}
+	seedItem(t, ctx, pool, scopeA, "последняя запись этого чата", seedOpts{salience: 0.5})
+
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "о чём мы говорили?")
+	if err != nil {
+		t.Fatalf("сбой поиска уронил сборку карточки: %v", err)
+	}
+	if !strings.Contains(card.Text, "последняя запись этого чата") {
+		t.Fatalf("откат к последним записям не сработал:\n%s", card.Text)
+	}
+}
+
+// TestConversationCardBasisCountKeepsFits — этап 21.2: несколько оснований
+// stance — подтверждение отношения, а не пропущенный факт; карточка полна.
+func TestConversationCardBasisCountKeepsFits(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts, err := NewToolset(pool, &Searcher{Embedder: nil, Items: Items{}})
+	if err != nil {
+		t.Fatalf("NewToolset: %v", err)
+	}
+	entity, err := (EntityRepo{}).FindOrCreate(ctx, pool, EntityPerson, "Данил", scopeA)
+	if err != nil {
+		t.Fatalf("сущность не создана: %v", err)
+	}
+	prov := seedRawProvenance(t, ctx, pool, []string{scopeA})
+	first := seedRawItem(t, ctx, pool, scopeA, "Данил рассказал про пластинки", "active", prov)
+	second := seedRawItem(t, ctx, pool, scopeA, "Данил подарил пластинку", "active", prov)
+	if _, err := (Stances{}).Upsert(ctx, pool, StanceInput{
+		EntityID: entity.ID, Aspect: "general", ScopeID: scopeA,
+		Summary: "приятель, интересен", Strength: 0.7, Interest: 0.4,
+		BasisMemoryIDs: []int64{first, second},
+	}); err != nil {
+		t.Fatalf("stance не создан: %v", err)
+	}
+
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "")
+	if err != nil {
+		t.Fatalf("карточка не собрана: %v", err)
+	}
+	if !card.Fits {
+		t.Fatalf("два основания stance сделали карточку неполной:\n%s", card.Text)
+	}
+}
+
+// failingEmbedder — векторизатор, всегда падающий (сеть недоступна): проверка
+// отката карточки к прежнему отбору без падения хода.
+type failingEmbedder struct{}
+
+func (failingEmbedder) Model() string { return "failing-test-embedder" }
+
+func (failingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+	return nil, fmt.Errorf("сеть недоступна")
 }

@@ -71,9 +71,12 @@ type BaseContext struct {
 	HistoryTrimmed bool
 	// MemoryCardIncluded — карточка памяти собеседника собрана в панель.
 	MemoryCardIncluded bool
-	// MemoryCardFitted — карточка уместилась в потолок без срезки. false при
-	// отсутствующей карточке: ход идёт обычным путём с инструментами.
+	// MemoryCardFitted — карточка уместилась в потолок без срезки релевантного
+	// (решение 2026-11-03). false при отсутствующей карточке: ход идёт обычным
+	// путём с инструментами.
 	MemoryCardFitted bool
+	// MemoryCardEntries — число заметок карточки (наблюдаемость хода, 21.4).
+	MemoryCardEntries int
 }
 
 // Assembler собирает базовый контекст из БД (§11.1). Один источник истины —
@@ -154,7 +157,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	// --- карточка собеседника (решение 2026-11-02): в панель, не в system ---
 	memoryCard := ""
 	if a.Memory != nil && a.MemoryPrefetch && actor != nil && singleActor {
-		card, cerr := a.Memory.ConversationCard(ctx, scopeID, *actor, scopeID)
+		card, cerr := a.Memory.ConversationCard(ctx, scopeID, *actor, scopeID, memoryQuery(batch))
 		if cerr != nil {
 			// Карточка — оптимизация, а не условие хода: сбой её сборки не
 			// роняет разговор. Ход идёт обычным путём — с инструментами
@@ -167,6 +170,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		} else {
 			out.MemoryCardIncluded = true
 			out.MemoryCardFitted = card.Fits
+			out.MemoryCardEntries = card.Entries
 			memoryCard = card.Text
 		}
 	}
@@ -198,6 +202,29 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	}
 	out.StatePanel = buildStatePanel(panel)
 	return out, nil
+}
+
+// memoryQueryLimit — потолок запроса релевантной карточки (этап 21.1):
+// поиск не должен получать километровую пачку целиком, но обязан видеть её
+// смысл — «первые ~1000 рун» достаточно для отбора записей.
+const memoryQueryLimit = 1000
+
+// memoryQuery собирает текст текущей пачки как запрос релевантной памяти:
+// пустые реплики пропускаются, реплики склеиваются пробелом, объём режется по
+// рунам. Пустая строка — запрос не строится (карточка идёт прежним отбором).
+func memoryQuery(batch []BatchEvent) string {
+	parts := make([]string, 0, len(batch))
+	for _, ev := range batch {
+		if text := strings.TrimSpace(ev.Text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	query := strings.Join(parts, " ")
+	runes := []rune(query)
+	if len(runes) > memoryQueryLimit {
+		query = string(runes[:memoryQueryLimit])
+	}
+	return query
 }
 
 // batchTexts — тексты пачки для контекста: пустой текст не теряется, а
