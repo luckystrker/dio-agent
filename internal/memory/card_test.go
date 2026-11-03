@@ -29,6 +29,22 @@ func TestSanitizeCardLabel(t *testing.T) {
 	}
 }
 
+// TestSanitizeCardBasis — 21.6: основание stance в строке карточки обрезается
+// своим потолком (150 рун), а не общим потолком заметки 300.
+func TestSanitizeCardBasis(t *testing.T) {
+	got := sanitizeCardBasis(strings.Repeat("я", cardStanceBasisLimit+50))
+	if n := utf8.RuneCountInString(got); n != cardStanceBasisLimit {
+		t.Fatalf("основание stance %d рун, хочу %d", n, cardStanceBasisLimit)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("обрезанное основание без многоточия: %q", got)
+	}
+	// Короткое основание не трогается.
+	if short := sanitizeCardBasis("пластинки"); short != "пластинки" {
+		t.Fatalf("короткое основание изменено: %q", short)
+	}
+}
+
 // TestAssembleConversationCardFitsOnlyRelevant — решение 2026-11-03 (этап 21):
 // карточка неполна, только если в бюджет не влезло РЕЛЕВАНТНОЕ. Вытесненный
 // фон о записей собеседника полноту не ломает; вытесненное релевантное
@@ -52,7 +68,7 @@ func TestAssembleConversationCardFitsOnlyRelevant(t *testing.T) {
 	}
 
 	// Релевантная запись не влезла — карточка честно неполна.
-	huge := cardEntry{text: strings.Repeat("важное ", 400), relevant: true}
+	huge := cardEntry{text: strings.Repeat("важное ", 500), relevant: true}
 	card = assembleConversationCard([]cardEntry{relevant, huge}, true)
 	if card.Fits {
 		t.Fatalf("вытесненное релевантное попадание не пометило карточку неполной")

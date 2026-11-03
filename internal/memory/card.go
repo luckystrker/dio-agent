@@ -25,8 +25,10 @@ import (
 
 const (
 	// ConversationCardBudget — потолок объёма карточки в рунах (решение
-	// 2026-11-02): панель состояния не должна раздувать контекст хода.
-	ConversationCardBudget = 1500
+	// 2026-11-02; 21.6: 1500 → 3000). Живые ходы 107/108 показали: две
+	// stance-строки с summary и основанием съедали ~1200 из 1500, и первое же
+	// релевантное попадание вылетало по бюджету — инструменты включались снова.
+	ConversationCardBudget = 3000
 
 	// cardStanceLimit — потолок отношений: больше — релевантное не влезло.
 	cardStanceLimit = 3
@@ -42,6 +44,10 @@ const (
 	// cardEntryLimit — потолок текста одной заметки: одна длинная запись не
 	// вытесняет все остальные из карточки.
 	cardEntryLimit = 300
+	// cardStanceBasisLimit — потолок основания stance в строке карточки
+	// (21.6): summary и основание вместе не должны съедать бюджет, иначе
+	// релевантные попадания вылетают первыми.
+	cardStanceBasisLimit = 150
 	// cardSemanticDistanceMax — порог семантической близости (калибровка
 	// bge-m3 на русском, 2026-11-03): настоящие попадания 0.34–0.44,
 	// несвязанные начинаются с ~0.49. Порог 0.45 отсекает шум, не теряя
@@ -132,7 +138,7 @@ func (t *Toolset) ConversationCard(ctx context.Context, audience string, entity 
 		// Основание — подтверждение отношения, а не пропущенный факт: второе и
 		// следующие основания полноту карточки не ломают (решение 2026-11-03).
 		if len(basis) > 0 {
-			line += fmt.Sprintf(" (основание: %s)", sanitizeCardText(basis[0].Text))
+			line += fmt.Sprintf(" (основание: %s)", sanitizeCardBasis(basis[0].Text))
 			seen[basis[0].ID] = struct{}{}
 		}
 		entries = append(entries, cardEntry{text: line, relevant: true})
@@ -329,12 +335,27 @@ func assembleConversationCard(entries []cardEntry, complete bool) ConversationCa
 var cardMarkerScrub = strings.NewReplacer("[/состояние]", "(/состояние)", "[состояние хода", "(состояние хода")
 
 func sanitizeCardText(text string) string {
-	text = cardMarkerScrub.Replace(strings.Join(strings.Fields(text), " "))
-	if utf8.RuneCountInString(text) <= cardEntryLimit {
+	return truncateCardRunes(sanitizeCardLine(text), cardEntryLimit)
+}
+
+// sanitizeCardBasis — то же для основания stance, но со своим потолком 150 рун
+// (21.6): основание — подтверждение отношения, а не второй рассказ.
+func sanitizeCardBasis(text string) string {
+	return truncateCardRunes(sanitizeCardLine(text), cardStanceBasisLimit)
+}
+
+// sanitizeCardLine — однострочная санация без обрезки.
+func sanitizeCardLine(text string) string {
+	return cardMarkerScrub.Replace(strings.Join(strings.Fields(text), " "))
+}
+
+// truncateCardRunes режет строку по рунам с многоточием в пределах limit.
+func truncateCardRunes(text string, limit int) string {
+	if utf8.RuneCountInString(text) <= limit {
 		return text
 	}
 	runes := []rune(text)
-	return string(runes[:cardEntryLimit-1]) + "…"
+	return string(runes[:limit-1]) + "…"
 }
 
 // sanitizeCardLabel — имя сущности/аспект внутри строки карточки: та же

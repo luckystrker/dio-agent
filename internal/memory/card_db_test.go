@@ -290,3 +290,57 @@ func (failingEmbedder) Model() string { return "failing-test-embedder" }
 func (failingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, fmt.Errorf("сеть недоступна")
 }
+
+// TestConversationCardBudgetFitsStancesAndRelevant — 21.6: карточка 3000 рун
+// вмещает две длинные stance-строки (summary + основание) и три релевантные
+// записи по 300 рун. На прежних 1500 первое же попадание вылетало, и ход
+// получал инструменты на каждом разговоре.
+func TestConversationCardBudgetFitsStancesAndRelevant(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+	ts, err := NewToolset(pool, &Searcher{Embedder: nil, Items: Items{}})
+	if err != nil {
+		t.Fatalf("NewToolset: %v", err)
+	}
+	entity, err := (EntityRepo{}).FindOrCreate(ctx, pool, EntityPerson, "Данил", scopeA)
+	if err != nil {
+		t.Fatalf("сущность не создана: %v", err)
+	}
+	prov := seedRawProvenance(t, ctx, pool, []string{scopeA})
+	basis := seedRawItem(t, ctx, pool, scopeA, strings.Repeat("основание ", 60), "active", prov)
+	// Две stance в живом диапазоне ходов 107/108: summary 196 и 313 рун.
+	for i, summary := range []string{
+		strings.Repeat("а", 196),
+		strings.Repeat("б", 313),
+	} {
+		if _, err := (Stances{}).Upsert(ctx, pool, StanceInput{
+			EntityID: entity.ID, Aspect: fmt.Sprintf("aspect-%d", i), ScopeID: scopeA,
+			Summary: summary, Strength: 0.7 - 0.1*float64(i), Interest: 0.4,
+			BasisMemoryIDs: []int64{basis},
+		}); err != nil {
+			t.Fatalf("stance %d не создан: %v", i, err)
+		}
+	}
+	// Три релевантные записи по 300 рун.
+	for i := 0; i < 3; i++ {
+		base := fmt.Sprintf("ремонт номер %d ", i)
+		text := base + strings.Repeat("я", 300-utf8.RuneCountInString(base))
+		seedItem(t, ctx, pool, scopeA, text, seedOpts{salience: 0.5})
+	}
+
+	card, err := ts.ConversationCard(ctx, scopeA, entity, scopeA, "ремонт")
+	if err != nil {
+		t.Fatalf("карточка не собрана: %v", err)
+	}
+	if !card.Fits {
+		t.Fatalf("длинные stance и 3 релевантные записи не влезли в 3000 рун:\n%s", card.Text)
+	}
+	for i := 0; i < 3; i++ {
+		if !strings.Contains(card.Text, fmt.Sprintf("ремонт номер %d", i)) {
+			t.Fatalf("релевантная запись ремонт номер %d вытеснена из карточки:\n%s", i, card.Text)
+		}
+	}
+	if n := utf8.RuneCountInString(card.Text); n > ConversationCardBudget {
+		t.Fatalf("карточка %d рун превышает потолок %d", n, ConversationCardBudget)
+	}
+}
