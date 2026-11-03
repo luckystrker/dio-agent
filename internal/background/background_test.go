@@ -309,4 +309,30 @@ func TestParseConsolidationProposal(t *testing.T) {
 			t.Fatalf("больше %d stances должно отклонять", maxStanceAspects)
 		}
 	})
+	t.Run("entity_merges принимаются и валидируются", func(t *testing.T) {
+		raw := []byte(`{"summary":"x","entity_merges":[{"keep":"Коля","merge":"Николай","reason":"одно лицо"}]}`)
+		p, err := parseConsolidationProposal(raw)
+		if err != nil {
+			t.Fatalf("валидный entity_merges отклонён: %v", err)
+		}
+		if len(p.EntityMerges) != 1 || p.EntityMerges[0].Keep != "Коля" ||
+			p.EntityMerges[0].Merge != "Николай" || p.EntityMerges[0].Reason != "одно лицо" {
+			t.Fatalf("entity_merges потерялись: %+v", p.EntityMerges)
+		}
+	})
+	t.Run("entity_merges: пустая причина отклоняется", func(t *testing.T) {
+		if _, err := parseConsolidationProposal([]byte(`{"summary":"x","entity_merges":[{"keep":"A","merge":"B","reason":"  "}]}`)); err == nil {
+			t.Fatal("склейка без основания должна отклоняться")
+		}
+	})
+	t.Run("entity_merges: слишком много отклоняется", func(t *testing.T) {
+		merges := make([]map[string]any, maxEntityMerges+1)
+		for i := range merges {
+			merges[i] = map[string]any{"keep": "A", "merge": "B", "reason": "r"}
+		}
+		raw, _ := json.Marshal(map[string]any{"summary": "x", "entity_merges": merges})
+		if _, err := parseConsolidationProposal(raw); err == nil {
+			t.Fatalf("больше %d entity_merges должно отклонять", maxEntityMerges)
+		}
+	})
 }
