@@ -25,7 +25,11 @@ type Persona struct {
 	MoodBaseline Mood
 	SeedBio      *string
 	Interests    []string
-	CreatedAt    time.Time
+	// Schedule — расписание дня из файла персоны (этап 22). В БД не хранится
+	// (как каркас промпта): это настройка процесса, правка файла применяется
+	// перезапуском службы; nil — расписания нет (прежнее поведение).
+	Schedule  *Schedule
+	CreatedAt time.Time
 }
 
 // personaRow — форма строки таблицы personas.
@@ -191,6 +195,10 @@ func marshalValues(values []string) string {
 	return string(raw)
 }
 
+// personaMatchesSource сравнивает поля, которые версионируются в БД.
+// Расписание дня (source.Schedule) сюда сознательно не входит: это настройка
+// процесса, как каркас промпта, — правка только расписания новую версию
+// персоны не создаёт, но применяется перезапуском (этап 22).
 func personaMatchesSource(p Persona, source PersonaSource) bool {
 	if p.Name != source.Name || p.Description != source.Description || p.SpeechStyle != source.SpeechStyle {
 		return false

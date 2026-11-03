@@ -16,7 +16,9 @@ import (
 // Обязательные и известные секции persona-файла (§7.1).
 var (
 	personaRequiredSections = []string{"Имя", "Описание", "Манера речи", "Ценности", "Настроение (базовое)"}
-	personaKnownSections    = append(append([]string{}, personaRequiredSections...), "Биография", "Интересы")
+	// «Расписание» — необязательная секция ритма дня (этап 22); разбор и
+	// валидация — persona_schedule.go.
+	personaKnownSections = append(append([]string{}, personaRequiredSections...), "Биография", "Интересы", scheduleSection)
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
@@ -42,6 +44,11 @@ type PersonaSource struct {
 	// 2026-10-31: биография — фон, интересы — другой содержательный кусок);
 	// nil — секции нет.
 	Interests []string
+	// Schedule — расписание дня (этап 22): блоки по часам с целевыми
+	// arousal/socialEnergy, «чем занят» и пометкой тихого блока; nil — секции
+	// нет (прежнее поведение). Настройка процесса, как каркас промпта: в
+	// версию персоны в БД не входит, применяется перезапуском службы.
+	Schedule *Schedule
 }
 
 // splitSections разбирает текст на секции по заголовкам «## …». Первое
@@ -175,6 +182,13 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		}
 	}
 
+	// расписание дня необязательно (этап 22): секция есть — блоки разбираются
+	// строго и обязаны покрыть сутки; нет секции — nil.
+	schedule, err := parsePersonaSchedule(text)
+	if err != nil {
+		return PersonaSource{}, err
+	}
+
 	return PersonaSource{
 		Name:         name,
 		Description:  description,
@@ -183,5 +197,6 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		MoodBaseline: Mood{Valence: valence, Arousal: arousal, SocialEnergy: socialEnergy},
 		SeedBio:      seedBio,
 		Interests:    interests,
+		Schedule:     schedule,
 	}, nil
 }

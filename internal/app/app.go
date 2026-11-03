@@ -521,12 +521,14 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	}
 
 	raw, err := os.ReadFile(personaPath)
+	var schedule *character.Schedule
 	switch {
 	case err == nil:
 		source, perr := character.ParsePersonaFile(string(raw))
 		if perr != nil {
 			return character.Persona{}, "", fmt.Errorf("app: %s: %w", personaPath, perr)
 		}
+		schedule = source.Schedule
 		if _, _, uerr := repo.EnsureFromSource(ctx, a.pool, source); uerr != nil {
 			return character.Persona{}, "", fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
 		}
@@ -540,6 +542,9 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	if err != nil {
 		return character.Persona{}, "", fmt.Errorf("app: активная персона не получена: %w", err)
 	}
+	// Расписание дня — из файла (этап 22): в БД не версионируется, как каркас
+	// промпта; nil — секции нет, прежнее поведение.
+	persona.Schedule = schedule
 
 	var template string
 	if raw, err := os.ReadFile(templatePath); err == nil {
