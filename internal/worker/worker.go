@@ -50,6 +50,10 @@ const (
 	// провайдера (5xx/429/сеть): 5-минутная недоступность API не должна
 	// превращать сообщение в терминальный skipped за 6 секунд (§12.2, M10).
 	DefaultTransientMaxAttempts = 8
+	// MaxDirectTurnBudgetWait — разумный предел ожидания дневного бюджета для
+	// прямого хода (29.2): дольше вопроса в очереди «не бывает» — ход честно
+	// пропускается с логом, а не откладывается снова и снова.
+	MaxDirectTurnBudgetWait = 12 * time.Hour
 	// transientMinPause — минимальная пауза между попытками транзитного
 	// отказа провайдера: короткая экспонента 2–4 с выжигает лимит попыток
 	// раньше, чем провайдер успевает восстановиться.
@@ -112,10 +116,11 @@ type Deps struct {
 
 // claimedTurn — захваченный ход.
 type claimedTurn struct {
-	ID      int64
-	ChatID  int64
-	Direct  bool
-	Attempt int // attempts после захвата
+	ID        int64
+	ChatID    int64
+	Direct    bool
+	CreatedAt time.Time
+	Attempt   int // attempts после захвата
 }
 
 // Worker — когнитивный цикл. Run — единственная горутина обработки;
@@ -284,7 +289,8 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 // claimNext берёт следующий ход очереди: прямое обращение раньше группового
 // (приоритеты §5.2), внутри — порядок по id. Захват — CAS attempts (повторный
 // прогон того же хода после сбоя видит выросший номер попытки); ходы на
-// локальной паузе повтора пропускаются до срока. Ход чата не берётся, пока
+// локальной паузе повтора и на сроке not_before (отложенные по бюджету, 29.2)
+// пропускаются до срока. Ход чата не берётся, пока
 // более ранний ход того же чата ещё created (M2): иначе после сбоя ответ на
 // позднее сообщение уходил раньше ответа на раннее, а события раннего хода
 // попадали в историю позднего как обработанные.
@@ -294,12 +300,13 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 // пуле захват молча не проходил.
 func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	rows, err := w.pool.Query(ctx, `
-		SELECT t.id, t.chat_id, (e.chat_type = 'private') AS direct
+		SELECT t.id, t.chat_id, (e.chat_type = 'private') AS direct, t.created_at
 		FROM turns t
 		JOIN LATERAL (
 		  SELECT chat_type FROM social_events WHERE turn_id = t.id ORDER BY id LIMIT 1
 		) e ON true
 		WHERE t.status = 'created'
+		  AND (t.not_before IS NULL OR t.not_before <= now())
 		  AND NOT EXISTS (
 		    SELECT 1 FROM turns prev
 		    WHERE prev.chat_id = t.chat_id
@@ -315,7 +322,7 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	var candidates []claimedTurn
 	for rows.Next() {
 		var t claimedTurn
-		if err := rows.Scan(&t.ID, &t.ChatID, &t.Direct); err != nil {
+		if err := rows.Scan(&t.ID, &t.ChatID, &t.Direct, &t.CreatedAt); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("worker: строка очереди не читается: %w", err)
 		}
@@ -337,7 +344,8 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 		// закрывает CAS; при singleton это страховка).
 		var attempt int
 		err := w.pool.QueryRow(ctx,
-			`UPDATE turns SET attempts = attempts + 1 WHERE id = $1 AND status = 'created' RETURNING attempts`,
+			`UPDATE turns SET attempts = attempts + 1, not_before = NULL
+			 WHERE id = $1 AND status = 'created' RETURNING attempts`,
 			t.ID).Scan(&attempt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue // забран другим (в singleton невозможно), берём следующий
@@ -396,7 +404,14 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 		// Исчерпание дневного бюджета (§16) — не сбой хода: в полночь пул
 		// обнуляется, ход откладывается до завтра, а не теряется (решение 16.7,
 		// паритет с фоном). Ошибка хода несёт ErrBudgetExhausted через %w.
+		// Срок откладывания — в БД (not_before, 29.2): рестарт не делает ход
+		// доступным раньше сброса счётчика. Прямой ход, провисевший дольше
+		// разумного предела, пропускается честно — ждать вечно нечего.
 		if errors.Is(err, runtime.ErrBudgetExhausted) {
+			if turn.Direct && time.Since(turn.CreatedAt) >= MaxDirectTurnBudgetWait {
+				w.skipStaleBudgetTurn(ctx, turn)
+				return
+			}
 			w.deferTurn(ctx, turn, runtime.NextDay(time.Now()), "бюджет")
 			return
 		}
@@ -563,17 +578,37 @@ func (w *Worker) releaseAttempt(turn *claimedTurn) {
 
 // deferTurn — отложить ход без расхода попытки: бюджет откладывается до
 // следующей границы суток (решение 16.7), ненастроенная модель — на RetryMax
-// (конфигурация приходит рестартом, попытка не должна сгорать).
-// notBefore живёт в памяти процесса: рестарт делает ход доступным сразу.
+// (конфигурация приходит рестартом, попытка не должна сгорать). Срок пишется
+// в строку хода (not_before, 29.2) — рестарт процесса его не теряет; та же
+// пауза дублируется в памяти, чтобы цикл не перечитывал ход каждый опрос.
 func (w *Worker) deferTurn(ctx context.Context, turn *claimedTurn, notBefore time.Time, reason string) {
 	if _, err := w.pool.Exec(ctx,
-		`UPDATE turns SET attempts = GREATEST(attempts - 1, 0) WHERE id = $1 AND status = 'created'`, turn.ID); err != nil {
-		w.logger.Printf("ход %d: попытка не возвращена после откладывания (%s): %v", turn.ID, reason, err)
+		`UPDATE turns SET attempts = GREATEST(attempts - 1, 0), not_before = $2
+		 WHERE id = $1 AND status = 'created'`, turn.ID, notBefore); err != nil {
+		w.logger.Printf("ход %d: срок откладывания (%s) не записан: %v", turn.ID, reason, err)
 	}
 	w.notBeforeMu.Lock()
 	w.notBefore[turn.ID] = notBefore
 	w.notBeforeMu.Unlock()
 	w.logger.Printf("ход %d отложен (%s) до %s", turn.ID, reason, notBefore.UTC().Format("2006-01-02 15:04"))
+}
+
+// skipStaleBudgetTurn — прямой ход, провисевший в ожидании бюджета дольше
+// MaxDirectTurnBudgetWait (29.2): честный терминальный пропуск с причиной и
+// логом вместо бесконечного переноса на завтра.
+func (w *Worker) skipStaleBudgetTurn(ctx context.Context, turn *claimedTurn) {
+	reason := fmt.Sprintf("дневной бюджет моделей: прямой ход ждёт с %s дольше предела %d ч — терминальный пропуск (29.2)",
+		turn.CreatedAt.UTC().Format("2006-01-02 15:04"), int(MaxDirectTurnBudgetWait.Hours()))
+	if w.journal != nil {
+		if jerr := w.journal.WriteTurnSkipped(ctx, turn.ID, "budget", reason); jerr != nil {
+			w.logger.Printf("ход %d: turn_skipped не записан: %v", turn.ID, jerr)
+		}
+	}
+	if _, uerr := w.pool.Exec(ctx,
+		`UPDATE turns SET status = 'skipped' WHERE id = $1 AND status <> 'applied'`, turn.ID); uerr != nil {
+		w.logger.Printf("ход %d: статус skipped не записан: %v", turn.ID, uerr)
+	}
+	w.logger.Printf("ход %d пропущен терминально: %s", turn.ID, reason)
 }
 
 // backoff — экспоненциальная пауза: base * 2^(попытка-1), с потолком RetryMax.
