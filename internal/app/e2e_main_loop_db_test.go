@@ -103,8 +103,10 @@ func (h *harness) memoryCount(kind, provKind string) int64 {
 		WHERE mi.kind = $1 AND p.kind = $2`, kind, provKind)
 }
 
-func (h *harness) memoryProvenanceRef(kind, textLike string) string {
-	return queryString(h, `
+// memoryProvenanceRefOK — ref источника памяти нужного вида/текста; «строки
+// ещё нет» не фатально (опрос внутри eventually, запись появляется асинхронно).
+func (h *harness) memoryProvenanceRefOK(kind, textLike string) (string, bool) {
+	return queryStringOK(h, `
 		SELECT p.ref FROM memory_items mi
 		JOIN provenance p ON p.id = mi.provenance_id
 		WHERE mi.kind = $1 AND mi.text LIKE '%' || $2 || '%'
@@ -146,11 +148,12 @@ func TestMainLoop(t *testing.T) {
 	}
 
 	// Шаг 2 (§1 п.2): запись с источником — claim с provenance события хода.
+	claimRef := ""
 	eventually(t, "claim с источником turn:* записан", func() bool {
-		ref := h.memoryProvenanceRef("claim", "виниловый")
-		return strings.HasPrefix(ref, "turn:")
+		ref, ok := h.memoryProvenanceRefOK("claim", "виниловый")
+		claimRef = ref
+		return ok && strings.HasPrefix(ref, "turn:")
 	})
-	claimRef := h.memoryProvenanceRef("claim", "виниловый")
 	t.Logf("claim записан с источником %s", claimRef)
 
 	// Намерение исследования создано ходом (§14.1).
@@ -170,8 +173,16 @@ func TestMainLoop(t *testing.T) {
 	eventually(t, "share-намерение создано exploration", func() bool {
 		return h.intentionCount("share", "pending")+h.intentionCount("share", "completed") >= 1
 	})
-	if got := h.memoryProvenanceRef("thought", "ремень"); !strings.HasPrefix(got, "intention:") {
-		t.Fatalf("thought не с источником намерения: %q", got)
+	// Находка пишется в той же транзакции, что share-намерение, но проверяем
+	// условием: в ожидании отсутствие строки — не ошибка (не t.Fatalf).
+	thoughtRef := ""
+	eventually(t, "thought находки записан exploration", func() bool {
+		ref, ok := h.memoryProvenanceRefOK("thought", "ремень")
+		thoughtRef = ref
+		return ok
+	})
+	if !strings.HasPrefix(thoughtRef, "intention:") {
+		t.Fatalf("thought не с источником намерения: %q", thoughtRef)
 	}
 
 	// Срок share тоже двигаем (10 минут спеки не ждём реальным временем).
@@ -210,10 +221,15 @@ func TestMainLoop(t *testing.T) {
 	}
 
 	// Опыт записан с источником хода; отношения выросли (преемственность).
+	expRef := ""
 	eventually(t, "experience-запись нового опыта", func() bool {
-		ref := h.memoryProvenanceRef("experience", "месяц работает без проблем")
-		return strings.HasPrefix(ref, "turn:")
+		ref, ok := h.memoryProvenanceRefOK("experience", "месяц работает без проблем")
+		expRef = ref
+		return ok
 	})
+	if !strings.HasPrefix(expRef, "turn:") {
+		t.Fatalf("experience без источника хода: %q", expRef)
+	}
 	after := h.familiarity()
 	if after <= before {
 		t.Fatalf("familiarity не выросла: до %v, после %v", before, after)
