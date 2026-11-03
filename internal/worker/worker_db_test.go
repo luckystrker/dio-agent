@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -207,6 +208,36 @@ func TestWorkerKeepsChatOrderWhileHeadPaused(t *testing.T) {
 		t.Fatalf("после паузы взят %v, хочу ранний ход %d", got, first)
 	}
 	_ = second
+}
+
+// TestWorkerClaimWithSingleConnection — M9: захват не держит открытый курсор
+// при CAS. При DB_MAX_CONNS=1 старый код занимал единственное соединение
+// выборкой и не мог захватить ход (таймаут acquire, тихий пропуск).
+func TestWorkerClaimWithSingleConnection(t *testing.T) {
+	pool := newWorkerPool(t)
+	ctx := context.Background()
+	turnID := seedTurn(t, pool, 4301, "private", "единственное соединение")
+
+	singleCfg, err := pgxpool.ParseConfig(pool.Config().ConnConfig.ConnString())
+	if err != nil {
+		t.Fatalf("конфиг пула не разбирается: %v", err)
+	}
+	singleCfg.MaxConns = 1
+	singleCfg.MinConns = 0
+	single, err := runtime.NewPoolFromConfig(ctx, singleCfg)
+	if err != nil {
+		t.Fatalf("пул из одного соединения не создан: %v", err)
+	}
+	t.Cleanup(single.Close)
+
+	w := New(Deps{Pool: single}, Options{PollInterval: time.Millisecond})
+	got, err := w.claimNext(ctx)
+	if err != nil {
+		t.Fatalf("claimNext на одном соединении: %v", err)
+	}
+	if got == nil || got.ID != turnID {
+		t.Fatalf("захвачен %v, хочу ход %d — захват пропущен при насыщении пула", got, turnID)
+	}
 }
 
 // TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;

@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -255,6 +257,10 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) bool {
 // более ранний ход того же чата ещё created (M2): иначе после сбоя ответ на
 // позднее сообщение уходил раньше ответа на раннее, а события раннего хода
 // попадали в историю позднего как обработанные.
+//
+// Строки очереди дочитываются и закрываются ДО CAS (M9): CAS на открытом
+// курсоре занимает второе соединение, и при DB_MAX_CONNS=1 или насыщенном
+// пуле захват молча не проходил.
 func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	rows, err := w.pool.Query(ctx, `
 		SELECT t.id, t.chat_id, (e.chat_type = 'private') AS direct
@@ -275,33 +281,47 @@ func (w *Worker) claimNext(ctx context.Context) (*claimedTurn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("worker: очередь не читается: %w", err)
 	}
-	defer rows.Close()
+	var candidates []claimedTurn
+	for rows.Next() {
+		var t claimedTurn
+		if err := rows.Scan(&t.ID, &t.ChatID, &t.Direct); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("worker: строка очереди не читается: %w", err)
+		}
+		candidates = append(candidates, t)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("worker: очередь не дочитана: %w", err)
+	}
 
 	w.notBeforeMu.Lock()
 	defer w.notBeforeMu.Unlock()
 	now := time.Now()
-	for rows.Next() {
-		var t claimedTurn
-		if err := rows.Scan(&t.ID, &t.ChatID, &t.Direct); err != nil {
-			return nil, fmt.Errorf("worker: строка очереди не читается: %w", err)
-		}
+	for _, t := range candidates {
 		if nb, ok := w.notBefore[t.ID]; ok && now.Before(nb) {
 			continue // на паузе повтора
 		}
-		delete(w.notBefore, t.ID)
 		// Захват: только если ход всё ещё created (гонку с повторным запуском
 		// закрывает CAS; при singleton это страховка).
 		var attempt int
 		err := w.pool.QueryRow(ctx,
 			`UPDATE turns SET attempts = attempts + 1 WHERE id = $1 AND status = 'created' RETURNING attempts`,
 			t.ID).Scan(&attempt)
-		if err != nil {
-			continue // забран другим (нет — в singleton невозможно), берём следующий
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue // забран другим (в singleton невозможно), берём следующий
 		}
+		if err != nil {
+			// Ошибка CAS (таймаут acquire, обрыв соединения) — не «забрал
+			// другой»: молчаливый пропуск при насыщенном пуле оставлял бота
+			// без ходов и без единой строки в логе (M9).
+			return nil, fmt.Errorf("worker: ход %d не захвачен: %w", t.ID, err)
+		}
+		delete(w.notBefore, t.ID)
 		t.Attempt = attempt
 		return &t, nil
 	}
-	return nil, rows.Err()
+	return nil, nil
 }
 
 // process обрабатывает один ход и фиксирует служебный статус (журнал хода —
