@@ -62,6 +62,21 @@ func TurnResultJSONSchema() map[string]any {
 				"description": "Эмодзи-реакция на последнее сообщение: при decision=react — сама реакция, при decision=answer — необязательное дополнение к тексту. " +
 					"Только эмодзи из списка ReactionTypeEmoji Telegram — не текст и не произвольный символ.",
 			},
+			"sticker": map[string]any{
+				"type": "string", "minLength": 1, "maxLength": maxStickerLabel,
+				"description": "Метка стикера из твоей коллекции в панели состояния (например «#3»), если вместо слов честнее стикер. " +
+					"Выбирай только из списка панели; не выдумывай метки и file_id. Необязательное дополнение к answer/react.",
+			},
+			"save_sticker": map[string]any{
+				"type": "object",
+				"description": "Сохранить в свою коллекцию стикер, присланный в этой пачке: добавь заметку, когда он уместен. " +
+					"Только если стикера ещё нет в твоей коллекции и он тебе нравится.",
+				"properties": map[string]any{
+					"note": map[string]any{"type": "string", "minLength": 1, "maxLength": stickerNoteLimit},
+				},
+				"required":             []string{"note"},
+				"additionalProperties": false,
+			},
 			"intentions": map[string]any{
 				"type":     "array",
 				"maxItems": maxIntentions,

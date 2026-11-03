@@ -701,3 +701,40 @@ func TestDeliveryLoopRecoversFullTurnFromQueue(t *testing.T) {
 		t.Fatalf("дубль после перезапуска: %d отправок", len(sent))
 	}
 }
+
+// TestDeliveryLoopSendsSticker — kind=sticker из outbox уходит sendSticker с
+// file_id из коллекции (этап 25.4); message_id стикера записывается в sent.
+func TestDeliveryLoopSendsSticker(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	var stickerBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botTESTTOKEN/sendSticker" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&stickerBody)
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":555}}`))
+	}))
+	defer server.Close()
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+
+	id := insertOutbox(t, pool, 150, 42, 0, `{"kind":"sticker","file_id":"STICKER-FILE","emoji":"😂"}`)
+	loop := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil, DeliveryOptions{BubbleGap: time.Millisecond})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	if stickerBody["sticker"] != "STICKER-FILE" {
+		t.Fatalf("стикер отправлен с %v, хочу sticker=STICKER-FILE", stickerBody)
+	}
+	var status string
+	var telegramID *int64
+	if err := pool.QueryRow(ctx,
+		`SELECT status, telegram_message_id FROM delivery_outbox WHERE id = $1`, id).
+		Scan(&status, &telegramID); err != nil {
+		t.Fatalf("outbox не читается: %v", err)
+	}
+	if status != "sent" || telegramID == nil || *telegramID != 555 {
+		t.Fatalf("стикер: статус %q message_id %v, хочу sent/555", status, telegramID)
+	}
+}

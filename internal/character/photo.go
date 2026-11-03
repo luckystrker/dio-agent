@@ -12,7 +12,8 @@ import (
 	"github.com/luckystrker/dio-agent/internal/telegram"
 )
 
-// Photo — скачанное фото одного события пачки.
+// Photo — скачанная картинка одного события пачки: фото, статичный стикер или
+// превью анимированного стикера/гифки (этап 25; уходит в Ask как BinaryInput).
 type Photo struct {
 	FileID string
 	Data   []byte
@@ -38,6 +39,12 @@ func photoFileIDFromBatchEvent(ev BatchEvent) string {
 // причина пишется в logf (nil — не писать): молчаливый пропуск месяц прятал
 // 404 на каждом скачивании (bug 2026-11-02).
 func CollectPhotos(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher, max int, logf func(format string, args ...any)) []Photo {
+	return collectImages(ctx, batch, fetcher, max, photoFileIDFromBatchEvent, logf)
+}
+
+// collectImages — общий цикл скачивания картинок пачки: resolver даёт file_id
+// (фото, стикер, превью), потолок и терпимость к ошибкам — общие.
+func collectImages(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher, max int, fileIDFor func(BatchEvent) string, logf func(format string, args ...any)) []Photo {
 	if fetcher == nil || len(batch) == 0 {
 		return nil
 	}
@@ -49,14 +56,14 @@ func CollectPhotos(ctx context.Context, batch []BatchEvent, fetcher PhotoFetcher
 		if len(photos) >= max {
 			break
 		}
-		fileID := photoFileIDFromBatchEvent(ev)
+		fileID := fileIDFor(ev)
 		if fileID == "" {
 			continue
 		}
 		pm, err := fetcher.FetchPhotoByFileID(ctx, fileID)
 		if err != nil || pm == nil {
 			if logf != nil {
-				logf("фото не скачано — ход по тексту (event %d): err=%v пусто=%v", ev.EventID, err, pm == nil)
+				logf("картинка не скачана — событие остаётся текстом (event %d): err=%v пусто=%v", ev.EventID, err, pm == nil)
 			}
 			continue
 		}

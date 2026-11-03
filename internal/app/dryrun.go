@@ -30,6 +30,11 @@ func (d *dryRunAPI) SendMessage(ctx context.Context, chatID int64, text string) 
 	return 0, nil
 }
 
+func (d *dryRunAPI) SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error) {
+	d.logger.Printf("dry-run: sendSticker chat=%d: %s", chatID, fileID)
+	return 0, nil
+}
+
 func (d *dryRunAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {
 	return nil
 }

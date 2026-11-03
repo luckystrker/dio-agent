@@ -128,9 +128,10 @@ func (DeliveryQueued) Conversational() bool { return false }
 type QueuedDelivery struct {
 	ID       int64  `json:"id"`
 	Position int    `json:"position"`
-	Kind     string `json:"kind"` // message | reaction
+	Kind     string `json:"kind"` // message | reaction | sticker
 	Text     string `json:"text,omitempty"`
 	Reaction string `json:"reaction,omitempty"`
+	FileID   string `json:"file_id,omitempty"` // стикер: file_id из коллекции
 }
 
 // TurnSkipped — терминальный пропуск с причиной (инвариант 5): после события

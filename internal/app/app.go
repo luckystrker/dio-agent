@@ -167,12 +167,21 @@ func (a *App) Start(ctx context.Context) error {
 	a.logger.Printf("singleton получен (pid %d)", single.PID())
 
 	// --- персона (§7.1): файлы — источник истины, отличие создаёт версию ---
-	persona, template, err := a.loadPersona(ctx)
+	persona, source, template, err := a.loadPersona(ctx)
 	if err != nil {
 		return a.stopFailed(err)
 	}
 	a.persona = persona
 	a.logSchedule(persona)
+
+	// --- коллекция стикеров (25.3): стартовый набор персоны синхронизируется
+	// при старте; сохранённые персонажем стикеры не трогаются. Сбой не валит
+	// запуск: разговор без стикеров лучше неподнявшегося процесса.
+	if n, serr := character.NewStickerRepo().SyncPersona(ctx, a.pool, source.Stickers); serr != nil {
+		a.logger.Printf("стикеры: стартовый набор персоны не синхронизирован: %v", serr)
+	} else if n > 0 {
+		a.logger.Printf("стикеры: коллекция персоны — %d", n)
+	}
 
 	// --- память, журнал, бюджет ---
 	// Адаптеры журнала/WAL/чекпоинтов живут на runCtx, а не на пришедшем ctx:
@@ -207,6 +216,7 @@ func (a *App) Start(ctx context.Context) error {
 	// --- когнитивный worker §5.2 ---
 	assembler := &character.Assembler{
 		Mood:            character.NewMoodRepo(),
+		Stickers:        character.NewStickerRepo(),
 		Relationships:   character.NewRelationshipRepo(),
 		PromptTemplate:  template,
 		HistoryMessages: historyMessages(a.opts.Config),
@@ -534,7 +544,7 @@ func (a *App) logSchedule(persona character.Persona) {
 // loadPersona — активная персона; config/persona.md при наличии синхронизируется
 // (отличие файла создаёт версию, §7.1), config/system-prompt.md — каркас промпта.
 // Пути берутся из опций (дефолт — от рабочей директории процесса).
-func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error) {
+func (a *App) loadPersona(ctx context.Context) (character.Persona, character.PersonaSource, string, error) {
 	repo := character.NewPersonaRepo()
 	personaPath := a.opts.PersonaFile
 	if personaPath == "" {
@@ -545,27 +555,30 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 		templatePath = promptTemplatePath
 	}
 
+	var source character.PersonaSource
 	raw, err := os.ReadFile(personaPath)
 	var schedule *character.Schedule
 	switch {
 	case err == nil:
-		source, perr := character.ParsePersonaFile(string(raw))
+		parsed, perr := character.ParsePersonaFile(string(raw))
 		if perr != nil {
-			return character.Persona{}, "", fmt.Errorf("app: %s: %w", personaPath, perr)
+			return character.Persona{}, character.PersonaSource{}, "", fmt.Errorf("app: %s: %w", personaPath, perr)
 		}
+		source = parsed
 		schedule = source.Schedule
 		if _, _, uerr := repo.EnsureFromSource(ctx, a.pool, source); uerr != nil {
-			return character.Persona{}, "", fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
+			return character.Persona{}, character.PersonaSource{}, "",
+				fmt.Errorf("app: персона файла не синхронизирована: %w", uerr)
 		}
 	case errors.Is(err, os.ErrNotExist):
 		// Файла нет — дефолтная персона версии 1 (паритет 9.4).
 	default:
-		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", personaPath, err)
+		return character.Persona{}, character.PersonaSource{}, "", fmt.Errorf("app: %s не читается: %w", personaPath, err)
 	}
 
 	persona, err := repo.Active(ctx, a.pool)
 	if err != nil {
-		return character.Persona{}, "", fmt.Errorf("app: активная персона не получена: %w", err)
+		return character.Persona{}, character.PersonaSource{}, "", fmt.Errorf("app: активная персона не получена: %w", err)
 	}
 	// Расписание дня — из файла (этап 22): в БД не версионируется, как каркас
 	// промпта; nil — секции нет, прежнее поведение.
@@ -575,9 +588,10 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	if raw, err := os.ReadFile(templatePath); err == nil {
 		template = string(raw)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", templatePath, err)
+		return character.Persona{}, character.PersonaSource{}, "",
+			fmt.Errorf("app: %s не читается: %w", templatePath, err)
 	}
-	return persona, template, nil
+	return persona, source, template, nil
 }
 
 // buildMemory — инструментарий памяти (§10.4): векторизатор из Options или

@@ -103,6 +103,9 @@ type Assembler struct {
 	// Logger — журнал оператора: сбой сборки карточки не роняет ход, но не
 	// должен исчезать молча (откат неотличим от «памяти нет»).
 	Logger *log.Logger
+	// Stickers — коллекция стикеров персонажа (этап 25.3): краткий список в
+	// панели, чтобы модель могла выбрать метку. nil — списка нет.
+	Stickers *StickerRepo
 }
 
 // now возвращает время хода (часы инъектируются в тестах).
@@ -189,6 +192,20 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	out.System = system
 	out.Constraints = constraintsSection()
 
+	// --- коллекция стикеров (этап 25.3): краткий список для выбора метки;
+	// сбой чтения не роняет ход — стикеров в панели просто нет.
+	stickerList := ""
+	if a.Stickers != nil {
+		list, serr := a.Stickers.List(ctx, db, stickerPanelItems)
+		if serr != nil {
+			if a.Logger != nil {
+				a.Logger.Printf("контекст: коллекция стикеров не прочитана: %v", serr)
+			}
+		} else {
+			stickerList = RenderStickerList(list)
+		}
+	}
+
 	// --- панель состояния: время, пауза, кто говорит, состояние, память ---
 	panel := statePanelData{
 		Now:          now,
@@ -198,6 +215,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		Relationship: out.RelationshipLine,
 		Activity:     persona.ActivityAt(now, a.Timezone),
 		MemoryCard:   memoryCard,
+		Stickers:     stickerList,
 		MultiActor:   distinctActors(batch) > 1,
 		// Подсказка «память доступна инструментами» — ровно когда они будут
 		// выданы планом хода (21.3): история урезана или карточка неполна.
@@ -320,6 +338,8 @@ func constraintsSection() string {
 	b.WriteString("- decision=defer требует defer_hours; вернёшься к ответу позже.\n")
 	b.WriteString("- mood_delta и relationship_delta — изменения (дельты), а не абсолютные значения; значимое изменение — с кратким основанием reason.\n")
 	b.WriteString("- Результаты инструментов памяти — часть контекста хода, а не отправляемый текст; не цитируй их формат.\n")
+	b.WriteString("- sticker — только метка стикера из списка в панели; неизвестная метка не отправляется.\n")
+	b.WriteString("- save_sticker сохраняет стикер, присланный в этой пачке, с твоей заметкой «когда уместен»; file_id не выдумывай.\n")
 	return strings.TrimSuffix(b.String(), "\n")
 }
 

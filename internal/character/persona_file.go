@@ -17,8 +17,10 @@ import (
 var (
 	personaRequiredSections = []string{"Имя", "Описание", "Манера речи", "Ценности", "Настроение (базовое)"}
 	// «Расписание» — необязательная секция ритма дня (этап 22); разбор и
-	// валидация — persona_schedule.go.
-	personaKnownSections = append(append([]string{}, personaRequiredSections...), "Биография", "Интересы", scheduleSection)
+	// валидация — persona_schedule.go. «Стикеры» — стартовый набор коллекции
+	// (этап 25.3).
+	personaKnownSections = append(append([]string{}, personaRequiredSections...),
+		"Биография", "Интересы", scheduleSection, "Стикеры")
 )
 
 // commentPattern — HTML-комментарии (подсказки редактору) в файл не попадают.
@@ -49,6 +51,10 @@ type PersonaSource struct {
 	// нет (прежнее поведение). Настройка процесса, как каркас промпта: в
 	// версию персоны в БД не входит, применяется перезапуском службы.
 	Schedule *Schedule
+	// Stickers — стартовый набор коллекции стикеров (этап 25.3): строки
+	// «file_id | эмодзи | заметка». Пустая секция допустима — владелец
+	// заполнит file_id своими стикерами.
+	Stickers []SourceSticker
 }
 
 // splitSections разбирает текст на секции по заголовкам «## …». Первое
@@ -188,6 +194,12 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 	if err != nil {
 		return PersonaSource{}, err
 	}
+	// стикеры необязательны: секция есть — строки «file_id | эмодзи | заметка»;
+	// пустая секция — коллекция без стартового набора (этап 25.3).
+	stickers, err := parseStickerSection(sections["Стикеры"])
+	if err != nil {
+		return PersonaSource{}, err
+	}
 
 	return PersonaSource{
 		Name:         name,
@@ -198,5 +210,34 @@ func ParsePersonaFile(text string) (PersonaSource, error) {
 		SeedBio:      seedBio,
 		Interests:    interests,
 		Schedule:     schedule,
+		Stickers:     stickers,
 	}, nil
+}
+
+// parseStickerSection разбирает секцию «Стикеры»: по строке на стикер,
+// «file_id | эмодзи | заметка». file_id обязателен (по нему Telegram отдаёт
+// файл), эмодзи и заметка — подсказки модели и владельцу.
+func parseStickerSection(raw string) ([]SourceSticker, error) {
+	var out []SourceSticker
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(dashPrefix.ReplaceAllString(strings.TrimSpace(line), ""))
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "|")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf(
+				"persona-файл: секция «Стикеры»: строка %q не в формате «file_id | эмодзи | заметка»", line)
+		}
+		fileID := strings.TrimSpace(parts[0])
+		if fileID == "" {
+			return nil, fmt.Errorf("persona-файл: секция «Стикеры»: пустой file_id в строке %q", line)
+		}
+		out = append(out, SourceSticker{
+			FileID: fileID,
+			Emoji:  strings.TrimSpace(parts[1]),
+			Note:   strings.TrimSpace(parts[2]),
+		})
+	}
+	return out, nil
 }
