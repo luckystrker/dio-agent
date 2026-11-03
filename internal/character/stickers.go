@@ -156,6 +156,55 @@ func (r *StickerRepo) ByLabel(ctx context.Context, db DBTX, label string) (*Stic
 	return &s, nil
 }
 
+// Known сообщает, есть ли уже этот стикер в коллекции (28.1): узнаётся по
+// file_unique_id, а до первой встречи (строка персоны) — по file_id.
+func (r *StickerRepo) Known(ctx context.Context, db DBTX, info telegram.StickerInfo) (bool, error) {
+	fileID := strings.TrimSpace(info.FileID)
+	if fileID == "" {
+		return true, nil // сохранять нечего — «незнакомым» не считается
+	}
+	unique := strings.TrimSpace(info.FileUniqueID)
+	var known bool
+	if err := db.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM stickers
+			WHERE file_id = $1 OR ($2 <> '' AND file_unique_id = $2))`,
+		fileID, unique).Scan(&known); err != nil {
+		return false, fmt.Errorf("стикеры: знакомство стикера не проверено: %w", err)
+	}
+	return known, nil
+}
+
+// HasUnknown — есть ли среди стикеров пачки хотя бы один, которого нет в
+// коллекции: только тогда «сохранить себе» применимо (28.1). Подсказка в
+// панели и приём save_sticker опираются на один и тот же признак.
+func (r *StickerRepo) HasUnknown(ctx context.Context, db DBTX, infos []telegram.StickerInfo) (bool, error) {
+	for _, info := range infos {
+		known, err := r.Known(ctx, db, info)
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(info.FileID) == "" {
+			continue
+		}
+		if !known {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// BatchStickers — стикеры пачки в порядке событий (28.1): по ним решается,
+// есть ли что сохранять.
+func BatchStickers(batch []BatchEvent) []telegram.StickerInfo {
+	var out []telegram.StickerInfo
+	for _, ev := range batch {
+		if info := telegram.StickerFromUpdate(ev.Raw); info != nil {
+			out = append(out, *info)
+		}
+	}
+	return out
+}
+
 // Save добавляет присланный стикер в коллекцию (25.5). Дубли отсекаются по
 // file_unique_id; стикер персоны узнаётся по file_id и получает недостающий
 // уникальный id, а не вторую строку. Возвращает id и признак «создан».
@@ -215,13 +264,21 @@ func (r *StickerRepo) Save(ctx context.Context, db DBTX, info telegram.StickerIn
 	return id, false, nil
 }
 
-// ParseStickerLabel — метка коллекции «#12» (или «12») → id. Мусор, отрицательные
-// и переполняющие числа отвергаются: модель не может сослаться на несуществующее.
+// ParseStickerLabel — метка коллекции «#12» (или «12») → id. Разбор терпим к
+// живым формам (28.2): запятая/точка/№ вокруг метки («,#1», «#1.», «№1») —
+// та же метка, модель часто пишет её как элемент перечисления. Внутри метки
+// допускаются только цифры: «стикер 3» и «1 2» — не метка. Мусор,
+// отрицательные и переполняющие числа отвергаются: модель не может сослаться
+// на несуществующее.
 func ParseStickerLabel(label string) (int64, bool) {
-	trimmed := strings.TrimSpace(label)
-	trimmed = strings.TrimPrefix(trimmed, "#")
+	trimmed := strings.Trim(label, stickerLabelCutset)
 	if trimmed == "" {
 		return 0, false
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
 	}
 	id, err := strconv.ParseInt(trimmed, 10, 64)
 	if err != nil || id <= 0 {
@@ -229,6 +286,10 @@ func ParseStickerLabel(label string) (int64, bool) {
 	}
 	return id, true
 }
+
+// stickerLabelCutset — обвязка метки, которую модель пишет вокруг числа:
+// пробелы, пунктуация перечисления, решётка и знак номера.
+const stickerLabelCutset = " \t\r\n.,;:!?()[]{}\"'«»#№"
 
 // stickerLabel — метка стикера для панели и TurnResult.sticker.
 func stickerLabel(id int64) string { return "#" + strconv.FormatInt(id, 10) }

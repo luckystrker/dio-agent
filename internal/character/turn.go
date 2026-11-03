@@ -115,7 +115,9 @@ func planMemoryTools(in Input, bctx BaseContext, hasMemory, prefetch bool, confi
 }
 
 // memoryToolsReason — причина включения инструментов памяти в лог хода (21.4):
-// history_trimmed / card_incomplete / rollback / none.
+// history_trimmed / card_incomplete:<причина> / rollback / none. Причина
+// неполноты карточки (28.3) уточняет, какая ветка сработала:
+// card_incomplete:fts_cut|budget|stances|limit.
 func memoryToolsReason(prefetch bool, bctx BaseContext) string {
 	switch {
 	case !prefetch:
@@ -123,6 +125,9 @@ func memoryToolsReason(prefetch bool, bctx BaseContext) string {
 	case bctx.HistoryTrimmed:
 		return "history_trimmed"
 	case !bctx.MemoryCardFitted:
+		if bctx.MemoryCardIncomplete != "" {
+			return "card_incomplete:" + bctx.MemoryCardIncomplete
+		}
 		return "card_incomplete"
 	default:
 		return "none"
@@ -609,8 +614,15 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 	if out.Apply.SkippedSticker {
 		r.logf("ход %d: метка стикера %q не найдена в коллекции — стикер не отправлен", in.TurnID, result.Sticker)
 	}
+	if out.Apply.SuppressedSticker {
+		r.logf("ход %d: стикер %q мягко обнулён предохранителем частоты — в последних %d ходах чата стикер уже уходил (28.1)",
+			in.TurnID, result.Sticker, stickerRateWindow)
+	}
 	if out.Apply.SavedStickerID != 0 {
 		r.logf("ход %d: стикер из пачки сохранён в коллекцию (#%d)", in.TurnID, out.Apply.SavedStickerID)
+	}
+	if out.Apply.DroppedStickerSave {
+		r.logf("ход %d: save_sticker отброшен — в пачке нет стикера, которого не было бы в коллекции (28.1)", in.TurnID)
 	}
 	// Дубли намерений (§14.1, блок 17.5): причина отклонения предложения —
 	// в лог оператора, молчаливая потеря не видна ни в чате, ни в журнале.
