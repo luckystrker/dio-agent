@@ -7,9 +7,11 @@
 package character
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -362,6 +364,8 @@ func TestTurnInvalidResultRepaired(t *testing.T) {
 // пропуск (инвариант 5), результат не применяется, повтор не возрождает ход.
 func TestTurnInvalidResultTerminalSkip(t *testing.T) {
 	f, ctx := newFixture(t)
+	var logs bytes.Buffer
+	f.runner.Logger = log.New(&logs, "", 0)
 	turnID := int64(103)
 	f.seedTurn(t, ctx, turnID, "Кто ты?")
 
@@ -377,6 +381,30 @@ func TestTurnInvalidResultTerminalSkip(t *testing.T) {
 	}
 	if !out.Skipped || out.SkipReason == "" {
 		t.Fatalf("ход не помечен пропуском: %+v", out)
+	}
+
+	// 21.7: сырые ответы модели обеих попыток — и в turn_skipped, и в логе:
+	// иначе терминальный пропуск не разобрать.
+	var skip *TurnSkipped
+	evs, err := f.journal.History(ctx, turnID)
+	if err != nil {
+		t.Fatalf("журнал не читается: %v", err)
+	}
+	for _, ev := range evs {
+		if s, ok := events.AsValue(ev).(TurnSkipped); ok {
+			skip = &s
+		}
+	}
+	if skip == nil {
+		t.Fatalf("turn_skipped не записан: события %v", f.eventTypes(t, ctx, turnID))
+	}
+	for _, raw := range []string{`{"decision":"answer","messages":[]}`, `{"decision":"react"}`} {
+		if !strings.Contains(skip.Reason, raw) {
+			t.Fatalf("в turn_skipped нет сырого ответа %q:\n%s", raw, skip.Reason)
+		}
+		if !strings.Contains(logs.String(), raw) {
+			t.Fatalf("в логе нет сырого ответа %q:\n%s", raw, logs.String())
+		}
 	}
 
 	// ничего не применено: outbox пуст, turn остался created

@@ -26,6 +26,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/luckystrker/ago/agent"
 	agocontext "github.com/luckystrker/ago/context"
@@ -275,7 +276,9 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if errors.As(err, &invalidErr) {
 		// Результат так и не стал валидным: терминальный пропуск с причиной
 		// (§11.3: после исчерпания попыток — skipped, система продолжает приём).
-		reason := fmt.Sprintf("валидация TurnResult не пройдена после repair: %v", invalidErr.err)
+		// 21.7: причина несёт сырые ответы модели обеих попыток — иначе
+		// пропуск не разобрать по журналу.
+		reason := invalidErr.skipReason()
 		if skipErr := r.Journal.WriteTurnSkipped(ctx, in.TurnID, "generate", reason); skipErr != nil {
 			return out, fmt.Errorf("ход %d: turn_skipped не записан: %w", in.TurnID, skipErr)
 		}
@@ -299,10 +302,46 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 }
 
 // invalidResultError — ответ модели не прошёл валидацию §11.2 ни с первой,
-// ни с repair-попытки.
-type invalidResultError struct{ err error }
+// ни с repair-попытки. Сырые тела обеих попыток едут в turn_skipped (21.7):
+// без них терминальный пропуск не разобрать.
+type invalidResultError struct {
+	err    error
+	first  string
+	repair string
+}
 
 func (e *invalidResultError) Error() string { return e.err.Error() }
+
+// invalidOutputRunes — потолок сырого ответа модели в причине пропуска:
+// журнал не должен раздуваться мегабайтами, но ответ обязан быть узнаваем.
+const invalidOutputRunes = 2000
+
+// skipReason — текст причины пропуска для журнала и лога: ошибка валидации +
+// сырые ответы первой и repair-попыток.
+func (e *invalidResultError) skipReason() string {
+	return fmt.Sprintf("валидация TurnResult не пройдена после repair: %v\nответ модели (попытка 1): %s\nответ на repair: %s",
+		e.err, truncateRawOutput(e.first), truncateRawOutput(e.repair))
+}
+
+// truncateRawOutput режет сырой ответ модели по рунам (не байтам).
+func truncateRawOutput(text string) string {
+	if utf8.RuneCountInString(text) <= invalidOutputRunes {
+		return text
+	}
+	runes := []rune(text)
+	return string(runes[:invalidOutputRunes-1]) + "…"
+}
+
+// repairHint — подсказка repair-попытки (§11.3): общий шаблон + конкретика
+// для известной ошибки «answer без сообщений» (21.7), иначе модель повторяет
+// тот же пустой answer.
+func repairHint(perr error) string {
+	hint := fmt.Sprintf("Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr)
+	if strings.Contains(perr.Error(), "answer требует") {
+		hint += " decision=answer требует непустой messages с текстом; если сказать нечего — decision=react с эмодзи или ignore."
+	}
+	return hint
+}
 
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
@@ -384,30 +423,34 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 
 	// --- строгая валидация ответа (§11.2); один repair-retry (§11.3) ---
 	repairs := 0
-	result, perr := parseReply(reply, bctx.History)
+	result, body, perr := parseReply(reply, bctx.History)
 	if perr != nil {
 		repairs = 1
-		fixed, ferr := reply.Ask(ctx,
-			fmt.Sprintf("Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr))
+		fixed, ferr := reply.Ask(ctx, repairHint(perr))
 		if ferr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), ferr
 		}
-		result, perr = parseReply(fixed, bctx.History)
+		var repairBody string
+		result, repairBody, perr = parseReply(fixed, bctx.History)
 		if perr != nil {
-			return TurnResult{}, repairs, budgetMW.callCount(), &invalidResultError{err: perr}
+			return TurnResult{}, repairs, budgetMW.callCount(), &invalidResultError{
+				err: perr, first: body, repair: repairBody,
+			}
 		}
 	}
 	return result, repairs, budgetMW.callCount(), nil
 }
 
 // parseReply разбирает тело ответа как строгий TurnResult (§11.2); история
-// нужна, чтобы срезать скопированного автора реплики до валидации.
-func parseReply(reply *agent.AgentReply, history []HistoryMessage) (TurnResult, error) {
+// нужна, чтобы срезать скопированного автора реплики до валидации. Сырое тело
+// возвращается для turn_skipped (21.7).
+func parseReply(reply *agent.AgentReply, history []HistoryMessage) (TurnResult, string, error) {
 	body, err := reply.Content()
 	if err != nil {
-		return TurnResult{}, err
+		return TurnResult{}, "", err
 	}
-	return ParseTurnResultWithHistory(body, history)
+	result, perr := ParseTurnResultWithHistory(body, history)
+	return result, string(body), perr
 }
 
 // toolJournalMW — middleware журналирования инструментного цикла (§12.1:

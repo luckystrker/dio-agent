@@ -133,3 +133,86 @@ func TestChatConfigWithClientObservesDisabledTools(t *testing.T) {
 		t.Fatalf("размеры opts.Tools = %v, хочу [1 0]", rec.sizes)
 	}
 }
+
+// repairSequenceClient — заглушка модели для 21.7: зовёт инструмент, пока
+// схемы выданы; после исчерпания лимита (opts.Tools пуст) отвечает невалидным
+// answer без сообщений, затем — валидным. Запоминает размер opts.Tools на
+// каждом вызове, чтобы repair-продолжение тоже проверить.
+type repairSequenceClient struct {
+	mu     sync.Mutex
+	counts []int
+	call   int
+}
+
+func (c *repairSequenceClient) Call(_ context.Context, _ []events.Event, _ *agocontext.Context, opts config.CallOptions) (*events.ModelResponse, error) {
+	c.mu.Lock()
+	n := c.call
+	c.call++
+	c.counts = append(c.counts, len(opts.Tools))
+	c.mu.Unlock()
+
+	switch {
+	case n < 2:
+		return &events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
+			ID:        fmt.Sprintf("call-%d", n+1),
+			Name:      "probe",
+			Arguments: `{}`,
+		}}}}, nil
+	case n == 2:
+		// Модель без инструментов выдала невалидный ответ: answer без сообщений.
+		return &events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":[]}`}}, nil
+	default:
+		return &events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"react","reaction":"👀"}`}}, nil
+	}
+}
+
+func (c *repairSequenceClient) toolCounts() []int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]int(nil), c.counts...)
+}
+
+// TestRepairCallAfterToolLimitHasNoTools — после исчерпания лимита инструментов
+// repair-продолжение (reply.Ask) идёт без схем инструментов, как и следующий
+// обычный вызов: модель обязана выдать финальный TurnResult, а не звать память.
+func TestRepairCallAfterToolLimitHasNoTools(t *testing.T) {
+	fake := &repairSequenceClient{}
+	cfg := NewChatConfigWithClient(fake)
+
+	tool := testTool(t, "probe")
+	limitMW := NewToolLimitMiddleware(1, nil)
+	limitMW.SetOnExhausted(cfg.DisableTools)
+
+	a := agent.New("tool-limit-repair", "",
+		agent.WithConfig(cfg),
+		agent.WithTools(tool),
+		agent.WithMiddleware(func() middleware.Middleware { return limitMW }),
+	)
+	reply, err := a.Ask(context.Background(), "привет")
+	if err != nil {
+		t.Fatalf("ход не выполнен: %v", err)
+	}
+	if _, err := ParseTurnResult([]byte(reply.Body())); err == nil {
+		t.Fatalf("первый ответ должен быть невалидным, получено: %s", reply.Body())
+	}
+
+	fixed, err := reply.Ask(context.Background(), repairHint(fmt.Errorf("answer требует от 1 до 4 сообщений")))
+	if err != nil {
+		t.Fatalf("repair-вызов упал: %v", err)
+	}
+	result, err := ParseTurnResult([]byte(fixed.Body()))
+	if err != nil {
+		t.Fatalf("repair-ответ не валиден: %v (%s)", err, fixed.Body())
+	}
+	if result.Decision != DecisionReact || result.Reaction != "👀" {
+		t.Fatalf("repair-ответ = %+v, хочу react/👀", result)
+	}
+
+	counts := fake.toolCounts()
+	if len(counts) < 4 {
+		t.Fatalf("модельных вызовов %d, хочу минимум 4 (2 tool + финал + repair)", len(counts))
+	}
+	if counts[2] != 0 || counts[3] != 0 {
+		t.Fatalf("после исчерпания лимита инструменты остались: %v", counts)
+	}
+}
