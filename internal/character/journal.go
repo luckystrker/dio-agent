@@ -99,6 +99,8 @@ func stamped(ev events.Event) events.Event {
 		stampBase(&e.Base)
 	case *TurnSkipped:
 		stampBase(&e.Base)
+	case *TurnFailed:
+		stampBase(&e.Base)
 	}
 	return ev
 }
@@ -147,6 +149,13 @@ func (j *TurnJournal) WriteTurnSkipped(ctx context.Context, turnID int64, phase,
 	return j.appendOnce(ctx, turnID, &TurnSkipped{TurnID: turnID, Phase: phase, Reason: reason})
 }
 
+// WriteTurnFailed записывает терминальный провал хода (29.1): попытки
+// исчерпаны, ход завершён ошибкой с причиной. Пишется однократно, как и
+// пропуск: повтор воркера не плодит событий.
+func (j *TurnJournal) WriteTurnFailed(ctx context.Context, turnID int64, phase, reason string) error {
+	return j.appendOnce(ctx, turnID, &TurnFailed{TurnID: turnID, Phase: phase, Reason: reason})
+}
+
 // WriteApplyTx пишет deltas_applied + delivery_queued ВНУТРИ транзакции
 // применения (§12.1: дельты + outbox + события — всё или ничего).
 func (j *TurnJournal) WriteApplyTx(ctx context.Context, tx pgx.Tx, turnID int64, deltas *DeltasApplied, delivery *DeliveryQueued) error {
@@ -181,6 +190,8 @@ type TurnState struct {
 	Delivered           bool // delivery_queued записан
 	SkipReason          string
 	Skipped             bool // turn_skipped — терминальный пропуск
+	Failed              bool // turn_failed — терминальный провал (29.1)
+	FailReason          string
 }
 
 // LoadTurnState читает состояние хода из журнала (§12.2: recovery есть
@@ -224,6 +235,9 @@ func stateOfEvents(evs []events.Event) TurnState {
 		case TurnSkipped:
 			st.Skipped = true
 			st.SkipReason = e.Reason
+		case TurnFailed:
+			st.Failed = true
+			st.FailReason = e.Reason
 		}
 	}
 	return st

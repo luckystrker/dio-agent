@@ -11,9 +11,9 @@
 //
 // Повтор хода после транзитного сбоя — ограниченный (§12.2): attempts растёт
 // при каждом claim, пауза повтора растёт экспоненциально (§12.1 retry_wait);
-// исчерпание лимита — терминальный пропуск (инвариант 5). Пауза между
-// попытками живёт в памяти процесса: после падения ход подбирается сразу,
-// попытки в БД не теряются.
+// исчерпание лимита — терминальный провал: status=failed с причиной и событием
+// turn_failed (29.1). Пауза между попытками живёт в памяти процесса: после
+// падения ход подбирается сразу, попытки в БД не теряются.
 package worker
 
 import (
@@ -412,6 +412,11 @@ func (w *Worker) process(ctx context.Context, turn *claimedTurn) {
 	}
 
 	switch {
+	case out.Failed:
+		// Терминальный провал (29.1) уже записан в журнал; служебный статус —
+		// failed с причиной: воркер такие не берёт, recovery не воскрешает.
+		w.markFailed(ctx, turn.ID, out.FailReason)
+		w.logger.Printf("ход %d провален терминально: %s", turn.ID, out.FailReason)
 	case out.Skipped:
 		// Терминальный пропуск записал Runner в журнал; служебный статус — здесь.
 		if _, uerr := w.pool.Exec(ctx,
@@ -452,22 +457,21 @@ func (w *Worker) loadBatch(ctx context.Context, turnID int64) ([]character.Batch
 }
 
 // fail — реакция на транзитный сбой хода: пауза повтора растёт с номером
-// попытки (§12.1 retry_wait); исчерпание лимита — терминальный пропуск
-// (инвариант 5: событие не теряется, пропуск фиксируется явно).
+// попытки (§12.1 retry_wait); исчерпание лимита — терминальный провал:
+// статус failed с причиной и событие turn_failed в журнале (29.1). Пропуск
+// (skipped) остаётся для сознательных решений хода, провал — для ошибок
+// исполнения, которые повтором не лечатся.
 func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 	if turn.Attempt >= w.attemptLimitFor(runErr) {
 		// Причина — для журнала и наблюдаемости: текст ошибки провайдера может
 		// быть простынёй (429-блобы OpenRouter), в логах достаточно хвоста.
 		reason := fmt.Sprintf("превышен лимит попыток (%d): %v", turn.Attempt, truncateRunes(fmt.Sprint(runErr), 300))
 		if w.journal != nil {
-			if jerr := w.journal.WriteTurnSkipped(ctx, turn.ID, "worker", reason); jerr != nil {
-				w.logger.Printf("ход %d: turn_skipped не записан: %v", turn.ID, jerr)
+			if jerr := w.journal.WriteTurnFailed(ctx, turn.ID, "worker", reason); jerr != nil {
+				w.logger.Printf("ход %d: turn_failed не записан: %v", turn.ID, jerr)
 			}
 		}
-		if _, uerr := w.pool.Exec(ctx,
-			`UPDATE turns SET status = 'skipped' WHERE id = $1 AND status <> 'applied'`, turn.ID); uerr != nil {
-			w.logger.Printf("ход %d: статус skipped не записан: %v", turn.ID, uerr)
-		}
+		w.markFailed(ctx, turn.ID, reason)
 		w.logger.Printf("ход %d: %s", turn.ID, reason)
 		return
 	}
@@ -478,6 +482,17 @@ func (w *Worker) fail(ctx context.Context, turn *claimedTurn, runErr error) {
 	w.notBeforeMu.Unlock()
 	w.logger.Printf("ход %d вернулся в очередь с паузой %v (попытка %d): %v",
 		turn.ID, pause, turn.Attempt, runErr)
+}
+
+// markFailed переводит строку хода в терминальный статус failed с причиной.
+// Применённый ход не перезаписывается (CAS по статусу): провал после
+// успешного применения невозможен.
+func (w *Worker) markFailed(ctx context.Context, turnID int64, reason string) {
+	if _, err := w.pool.Exec(ctx,
+		`UPDATE turns SET status = 'failed', failure_reason = $2
+		 WHERE id = $1 AND status <> 'applied'`, turnID, reason); err != nil {
+		w.logger.Printf("ход %d: статус failed не записан: %v", turnID, err)
+	}
 }
 
 // attemptLimitFor — предел попыток: для транзитного отказа провайдера он выше,

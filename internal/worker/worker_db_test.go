@@ -25,6 +25,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/luckystrker/ago/events"
+
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/migrations"
@@ -132,8 +134,8 @@ func newWorkerPool(t *testing.T) *runtime.Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 16 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 16/0", result.Applied, result.Skipped)
+	if result.Applied != 17 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 17/0", result.Applied, result.Skipped)
 	}
 	return pool
 }
@@ -275,9 +277,11 @@ func TestWorkerShutdownReturnsAttempt(t *testing.T) {
 	}
 }
 
-// TestWorkerRetriesThenSkips — §12.1/§12.2: транзитный сбой — повтор с паузой;
-// исчерпание попыток — терминальный пропуск (turn_skipped, инвариант 5).
-func TestWorkerRetriesThenSkips(t *testing.T) {
+// TestWorkerRetriesThenFails — §12.1/§12.2: транзитный сбой — повтор с паузой;
+// исчерпание попыток — терминальный провал: статус failed с причиной
+// (failure_reason) и событием turn_failed в журнале (29.1). Воркер такие ходы
+// больше не берёт (очередь — только created), recovery их не воскрешает.
+func TestWorkerRetriesThenFails(t *testing.T) {
 	pool := newWorkerPool(t)
 	ctx := context.Background()
 
@@ -306,7 +310,7 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 		t.Fatalf("неожиданная последовательность попыток: %v", runner.called())
 	}
 
-	// Сценарий исчерпания: ход, падающий всегда, — терминальный пропуск.
+	// Сценарий исчерпания: ход, падающий всегда, — терминальный провал.
 	turnFail := seedTurn(t, pool, 3003, "private", "ход с постоянным сбоем")
 	runner2 := &fakeRunner{pool: pool, fails: map[int64]int{turnFail: 1 << 30}}
 	w2 := New(Deps{Pool: pool, Runner: runner2, Journal: journal,
@@ -314,30 +318,49 @@ func TestWorkerRetriesThenSkips(t *testing.T) {
 		Options{PollInterval: 10 * time.Millisecond, RetryBase: 10 * time.Millisecond, RetryMax: 20 * time.Millisecond, MaxAttempts: 2})
 	go func() { _ = w2.Run(runCtx) }()
 
-	eventually(t, "исчерпание попыток зафиксировано пропуском", func() bool {
+	eventually(t, "исчерпание попыток зафиксировано провалом", func() bool {
 		var status string
 		if err := pool.QueryRow(ctx, `SELECT status FROM turns WHERE id = $1`, turnFail).Scan(&status); err != nil {
 			return false
 		}
-		return status == "skipped"
+		return status == "failed"
 	})
 	w2.StopDrain()
 	<-w2.Done()
 
-	// turn_skipped в журнале (инвариант 5: пропуск фиксируется явно).
+	// Причина провала видна в строке хода (§11.3: терминальный статус с причиной).
+	var reason *string
+	if err := pool.QueryRow(ctx,
+		`SELECT failure_reason FROM turns WHERE id = $1`, turnFail).Scan(&reason); err != nil {
+		t.Fatalf("причина провала не читается: %v", err)
+	}
+	if reason == nil || !strings.Contains(*reason, "лимит попыток") {
+		t.Fatalf("failure_reason = %v, хочу причину с лимитом попыток", reason)
+	}
+
+	// turn_failed в журнале (инвариант 5: терминальный провал фиксируется явно).
 	evs, err := journal.History(ctx, turnFail)
 	if err != nil {
 		t.Fatalf("журнал не читается: %v", err)
 	}
-	skipped := false
+	failed := false
 	for _, ev := range evs {
-		if ev.EventType() == "turn_skipped" {
-			skipped = true
+		if ev.EventType() == "turn_failed" {
+			failed = true
 		}
 	}
-	if !skipped {
-		t.Fatalf("turn_skipped нет в журнале хода %d", turnFail)
+	if !failed {
+		t.Fatalf("turn_failed нет в журнале хода %d (события: %v)", turnFail, evTypes(evs))
 	}
+}
+
+// evTypes — типы событий потока в порядке записи (для диагностики теста).
+func evTypes(evs []events.Event) []string {
+	out := make([]string, 0, len(evs))
+	for _, ev := range evs {
+		out = append(out, ev.EventType())
+	}
+	return out
 }
 
 // budgetRunner — двойной исполнитель, отвечающий исчерпанием дневного бюджета
