@@ -87,7 +87,10 @@ type statePanelData struct {
 	Actor        string
 	Mood         string
 	Relationship string
-	MemoryCard   string
+	// Activity — «чем занят» по расписанию дня (этап 22.3): дописывается к
+	// строке «сейчас: <время>». Пусто — расписания нет.
+	Activity   string
+	MemoryCard string
 	// MemoryTools — инструменты памяти выданы на этом ходе (этап 21.3):
 	// подсказка прямо в панели, что это страховка, а не основной путь.
 	MemoryTools bool
@@ -113,7 +116,13 @@ func sanitizePanelValue(value string, limit int) string {
 // детерминирована при одинаковом состоянии.
 func buildStatePanel(d statePanelData) string {
 	lines := []string{statePanelOpen}
-	lines = append(lines, "сейчас: "+formatHistoryTime(d.Now, d.Location))
+	// «сейчас: пн 02.11 17:02, на работе» — время и занятие по расписанию дня
+	// одной строкой (этап 22.3): модель видит, чем персонаж занят в этот час.
+	nowLine := "сейчас: " + formatHistoryTime(d.Now, d.Location)
+	if activity := sanitizePanelValue(d.Activity, 200); activity != "" {
+		nowLine += ", " + activity
+	}
+	lines = append(lines, nowLine)
 	if d.HasLast {
 		pause := d.Now.Sub(d.LastAt)
 		if pause < 0 {

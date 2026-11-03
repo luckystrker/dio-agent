@@ -104,6 +104,17 @@ func (p Persona) MoodTargetAt(at time.Time, loc *time.Location) Mood {
 	}
 }
 
+// ActivityAt — «чем занят» по расписанию в момент at (пусто — расписания нет).
+func (p Persona) ActivityAt(at time.Time, loc *time.Location) string {
+	if p.Schedule == nil {
+		return ""
+	}
+	if block := p.Schedule.BlockAt(at, loc); block != nil {
+		return block.Activity
+	}
+	return ""
+}
+
 // minuteOfDay — минута суток в поясе персонажа (AGENT_TIMEZONE; nil — пояс
 // по умолчанию, как у панели).
 func minuteOfDay(at time.Time, loc *time.Location) int {

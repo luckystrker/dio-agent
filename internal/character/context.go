@@ -196,6 +196,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		Actor:        out.ActorLine,
 		Mood:         out.MoodLine,
 		Relationship: out.RelationshipLine,
+		Activity:     persona.ActivityAt(now, a.Timezone),
 		MemoryCard:   memoryCard,
 		MultiActor:   distinctActors(batch) > 1,
 		// Подсказка «память доступна инструментами» — ровно когда они будут
