@@ -6,8 +6,12 @@ package runtime
 
 import "time"
 
-// NextDay — момент после полуночи UTC (00:05) следующего за now дня.
+// NextDay — момент после полуночи UTC (00:05) следующего за now дня. Дата
+// считается в UTC независимо от пояса аргумента: time.Now() в TZ=Europe/Moscow
+// в 01:00 давал «завтра» по московской дате, то есть ещё почти сутки ожидания
+// после настоящей полуночи UTC (M6).
 func NextDay(now time.Time) time.Time {
+	now = now.UTC()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 	return midnight.Add(5 * time.Minute)
 }

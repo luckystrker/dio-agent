@@ -70,7 +70,7 @@ func (s *BudgetStore) Reserve(ctx context.Context, operationID string, attempt i
 	}
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO budget_reservations (operation_id, attempt, pool, reserved, period)
-		 VALUES ($1, $2, $3, $4::jsonb, CURRENT_DATE)
+		 VALUES ($1, $2, $3, $4::jsonb, (now() AT TIME ZONE 'UTC')::date)
 		 ON CONFLICT (operation_id) DO NOTHING`,
 		operationID, attempt, pool, string(reservedJSON))
 	if err != nil {
@@ -88,13 +88,13 @@ func (s *BudgetStore) Reserve(ctx context.Context, operationID string, attempt i
 	// видит закоммиченное значение, а не одновременное чтение одного нуля.
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO budget_counters (pool, period, reserved_calls, updated_at)
-		 VALUES ($1, CURRENT_DATE, 0, now())
+		 VALUES ($1, (now() AT TIME ZONE 'UTC')::date, 0, now())
 		 ON CONFLICT (pool, period) DO NOTHING`, pool); err != nil {
 		return false, fmt.Errorf("бюджет: счётчик не создан: %w", err)
 	}
 	var reserved int64
 	err = tx.QueryRow(ctx,
-		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = CURRENT_DATE FOR UPDATE`,
+		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = (now() AT TIME ZONE 'UTC')::date FOR UPDATE`,
 		pool).Scan(&reserved)
 	if err != nil {
 		return false, fmt.Errorf("бюджет: счётчик не читается: %w", err)
@@ -105,7 +105,7 @@ func (s *BudgetStore) Reserve(ctx context.Context, operationID string, attempt i
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE budget_counters SET reserved_calls = reserved_calls + $2, updated_at = now()
-		 WHERE pool = $1 AND period = CURRENT_DATE`, pool, count); err != nil {
+		 WHERE pool = $1 AND period = (now() AT TIME ZONE 'UTC')::date`, pool, count); err != nil {
 		return false, fmt.Errorf("бюджет: счётчик не увеличен: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -190,7 +190,7 @@ func (s *BudgetStore) RecordActualUsage(ctx context.Context, operationID, pool s
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO budget_counters (pool, period, actual_tokens, actual_calls, updated_at)
-		VALUES ($1, CURRENT_DATE, $2, $3, now())
+		VALUES ($1, (now() AT TIME ZONE 'UTC')::date, $2, $3, now())
 		ON CONFLICT (pool, period) DO UPDATE
 		  SET actual_tokens = budget_counters.actual_tokens + $2,
 		      actual_calls  = budget_counters.actual_calls + $3,
@@ -215,7 +215,7 @@ func (s *BudgetStore) Available(ctx context.Context, pool string, count, limit i
 	}
 	var reserved int64
 	err := s.pool.QueryRow(ctx,
-		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = CURRENT_DATE`,
+		`SELECT reserved_calls FROM budget_counters WHERE pool = $1 AND period = (now() AT TIME ZONE 'UTC')::date`,
 		pool).Scan(&reserved)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("бюджет: счётчик дня не читается: %w", err)
@@ -228,7 +228,7 @@ func (s *BudgetStore) ReservedToday(ctx context.Context, pool string) (int64, er
 	var n int64
 	err := s.pool.QueryRow(ctx, `
 		SELECT count(*) FROM budget_reservations
-		WHERE pool = $1 AND period = CURRENT_DATE`, pool).Scan(&n)
+		WHERE pool = $1 AND period = (now() AT TIME ZONE 'UTC')::date`, pool).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("бюджет: счётчик дня не читается: %w", err)
 	}
