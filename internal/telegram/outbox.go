@@ -212,12 +212,15 @@ func (r *OutboxRepo) StatusOf(ctx context.Context, id int64) (OutboxStatus, erro
 // MarkRetryWait — подтверждённый временный отказ: пауза до повторной попытки,
 // для 429 — с honor retry_after (§13.2).
 func (r *OutboxRepo) MarkRetryWait(ctx context.Context, id int64, notBefore time.Time, sendErr string) error {
-	_, err := r.Pool.Exec(ctx, `
+	tag, err := r.Pool.Exec(ctx, `
 		UPDATE delivery_outbox
 		SET status = 'retry_wait', not_before = $2, last_error = $3, updated_at = now()
-		WHERE id = $1`, id, notBefore, sendErr)
+		WHERE id = $1 AND status = 'sending'`, id, notBefore, sendErr)
 	if err != nil {
 		return fmt.Errorf("outbox: retry_wait не записан: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("outbox: строка %d не в sending — retry_wait не записан", id)
 	}
 	return nil
 }
@@ -241,13 +244,17 @@ func (r *OutboxRepo) RequeueFromSending(ctx context.Context, id int64, notBefore
 	return nil
 }
 
-// MarkFailed — подтверждённая постоянная ошибка (§13.2).
+// MarkFailed — подтверждённая постоянная ошибка (§13.2). Условная запись, как
+// MarkSent: терминальный исход, записанный recovery, не перезаписывается.
 func (r *OutboxRepo) MarkFailed(ctx context.Context, id int64, sendErr string) error {
-	_, err := r.Pool.Exec(ctx, `
+	tag, err := r.Pool.Exec(ctx, `
 		UPDATE delivery_outbox SET status = 'failed', last_error = $2, updated_at = now()
-		WHERE id = $1`, id, sendErr)
+		WHERE id = $1 AND status = 'sending'`, id, sendErr)
 	if err != nil {
 		return fmt.Errorf("outbox: failed не записан: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("outbox: строка %d не в sending — failed не записан", id)
 	}
 	return nil
 }

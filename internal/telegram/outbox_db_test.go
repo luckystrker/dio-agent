@@ -326,6 +326,36 @@ func TestRecoverStaleSending(t *testing.T) {
 	}
 }
 
+// TestMarkRetryWaitAndFailedOnlyFromSending — minor 5: терминальная строка
+// (recovery уже записал unknown/cancelled) не перезаписывается отложенной
+// ошибкой доставки: инвариант держится кодом, а не дисциплиной вызывающего.
+func TestMarkRetryWaitAndFailedOnlyFromSending(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := NewOutboxRepo(pool)
+
+	id := insertOutbox(t, pool, 90, 42, 0, `{"kind":"message","text":"исход уже решён"}`)
+	if _, err := pool.Exec(ctx, `UPDATE delivery_outbox SET status = 'unknown' WHERE id = $1`, id); err != nil {
+		t.Fatalf("unknown не выставлен: %v", err)
+	}
+	if err := repo.MarkRetryWait(ctx, id, time.Now().Add(time.Minute), "поздно"); err == nil {
+		t.Fatal("MarkRetryWait перезаписал терминальную строку")
+	}
+	if err := repo.MarkFailed(ctx, id, "поздно"); err == nil {
+		t.Fatal("MarkFailed перезаписал терминальную строку")
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("статус не читается: %v", err)
+	}
+	if status != "unknown" {
+		t.Fatalf("терминальный статус изменён на %s", status)
+	}
+}
+
+// «раньше голова очереди» — строго в пределах чата: флуд-пауза одного чата
+// не должна морить голом соседние (EXISTS-фильтр коррелирован по chat_id).
+// Терминальный failed ранней строки поздних не держит — очередь движется.
 // TestClaimDueBlockedChatDoesNotBlockOthers — приёмка 17.7: блокировка
 // «раньше голова очереди» — строго в пределах чата: флуд-пауза одного чата
 // не должна морить голом соседние (EXISTS-фильтр коррелирован по chat_id).
