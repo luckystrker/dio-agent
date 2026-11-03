@@ -88,6 +88,9 @@ type statePanelData struct {
 	Mood         string
 	Relationship string
 	MemoryCard   string
+	// Stickers — краткий список коллекции стикеров (этап 25.3/25.4): метка,
+	// эмодзи и заметка «когда уместен»; по метке модель просит стикер.
+	Stickers string
 	// MemoryTools — инструменты памяти выданы на этом ходе (этап 21.3):
 	// подсказка прямо в панели, что это страховка, а не основной путь.
 	MemoryTools bool
@@ -132,6 +135,9 @@ func buildStatePanel(d statePanelData) string {
 	}
 	if card := strings.TrimSpace(d.MemoryCard); card != "" {
 		lines = append(lines, card)
+	}
+	if stickers := strings.TrimSpace(d.Stickers); stickers != "" {
+		lines = append(lines, stickers)
 	}
 	if d.MemoryTools {
 		lines = append(lines, "память доступна инструментами — обращаться только если ответа нет ни в истории, ни в карточке")
