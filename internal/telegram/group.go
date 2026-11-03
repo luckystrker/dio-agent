@@ -20,6 +20,7 @@ import (
 	"log"
 	"math"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -94,6 +95,9 @@ type GroupGate struct {
 	log  *log.Logger
 	now  func() time.Time
 	name []string
+	// mu защищает topicVectors: кэш готовится в фоне, пачки читают его
+	// параллельно.
+	mu sync.RWMutex
 	// topicVectors — кэш эмбеддингов тем персоны; пусто — семантика выключена
 	// или не подготовлена.
 	topicVectors [][]float32
@@ -132,7 +136,9 @@ func (g *GroupGate) Prepare(ctx context.Context) {
 		g.log.Printf("группы: эмбеддинги тем не подготовлены, повод по теме выключен: %v", err)
 		return
 	}
+	g.mu.Lock()
 	g.topicVectors = vectors
+	g.mu.Unlock()
 }
 
 // DecideBatch решает судьбу пачки группы (30.1/30.2). Для лички — всегда ход.
@@ -226,7 +232,13 @@ func (g *GroupGate) mentionsName(text string) bool {
 
 // topicCatches — эмбеддинг пачки близок к интересам/темам персоны (30.1).
 func (g *GroupGate) topicCatches(ctx context.Context, text string) bool {
-	if g.cfg.Embedder == nil || len(g.topicVectors) == 0 {
+	if g.cfg.Embedder == nil {
+		return false
+	}
+	g.mu.RLock()
+	topicVectors := g.topicVectors
+	g.mu.RUnlock()
+	if len(topicVectors) == 0 {
 		return false
 	}
 	query := strings.TrimSpace(text)
@@ -242,7 +254,7 @@ func (g *GroupGate) topicCatches(ctx context.Context, text string) bool {
 		return false
 	}
 	best := math.Inf(1)
-	for _, topic := range g.topicVectors {
+	for _, topic := range topicVectors {
 		if d := cosineDistance(vectors[0], topic); d < best {
 			best = d
 		}

@@ -312,7 +312,9 @@ func (a *App) Start(ctx context.Context) error {
 		Logger:   a.logger,
 		Now:      a.opts.Now,
 	})
-	groupGate.Prepare(ctx)
+	// Кэш тем готовится в фоне: сетевой вызов векторизатора не должен
+	// задерживать старт (и тестовый блокирующий embedder не вешает службу).
+	go groupGate.Prepare(a.runCtx)
 	if toolset.Embedder() != nil {
 		a.logger.Printf("группы: повод по теме включён (тем %d)", len(persona.Interests)+len(persona.Curiosity))
 	} else {
