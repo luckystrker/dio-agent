@@ -334,6 +334,7 @@ func (a *App) Start(ctx context.Context) error {
 		ToolCallsLimit:  toolCallsLimit(a.opts.Config),
 		Cognition:       cognition,
 		Logger:          a.logger,
+		Location:        a.opts.Config.Timezone,
 		Now:             a.opts.Now,
 	}, a.opts.Background)
 	if err != nil {

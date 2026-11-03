@@ -86,6 +86,24 @@ func (s Schedule) BlockAt(at time.Time, loc *time.Location) *ScheduleBlock {
 	return nil
 }
 
+// MoodTargetAt — цель затухания настроения (этап 22.2): valence остаётся
+// базовой линией персоны, arousal и socialEnergy берутся из блока текущего
+// времени. Расписания нет — прежняя базовая линия.
+func (p Persona) MoodTargetAt(at time.Time, loc *time.Location) Mood {
+	if p.Schedule == nil {
+		return p.MoodBaseline
+	}
+	block := p.Schedule.BlockAt(at, loc)
+	if block == nil {
+		return p.MoodBaseline
+	}
+	return Mood{
+		Valence:      p.MoodBaseline.Valence,
+		Arousal:      block.Arousal,
+		SocialEnergy: block.SocialEnergy,
+	}
+}
+
 // minuteOfDay — минута суток в поясе персонажа (AGENT_TIMEZONE; nil — пояс
 // по умолчанию, как у панели).
 func minuteOfDay(at time.Time, loc *time.Location) int {

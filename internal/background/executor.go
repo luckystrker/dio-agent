@@ -558,7 +558,8 @@ func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope
 // stateContext — системный промпт из шаблона §7.1 с mood и отношением к
 // собеседнику чата (последний актор событий) + addendum задачи.
 func (s *Scheduler) stateContext(ctx context.Context, chatID int64, scope, addendum string) (string, error) {
-	moodNow, _, err := character.NewMoodRepo().ReadDecayed(ctx, s.pool, s.persona.MoodBaseline)
+	moodNow, _, err := character.NewMoodRepo().ReadDecayed(ctx, s.pool,
+		s.persona.MoodTargetAt(s.now(), s.location))
 	if err != nil {
 		return "", fmt.Errorf("фон: настроение не читается: %w", err)
 	}
@@ -669,11 +670,12 @@ func (s *Scheduler) applyInitiative(ctx context.Context, it Intention, turnID in
 	result = character.SanitizeInitiativeResult(result)
 	scope := memory.ChatScope(fmt.Sprintf("%d", it.TargetChatID))
 	res, err := character.ApplyTurn(ctx, s.pool, character.ApplyOptions{
-		TurnID:          turnID,
-		ChatID:          it.TargetChatID,
-		ScopeID:         scope,
-		Result:          result,
-		PersonaBaseline: s.persona.MoodBaseline,
+		TurnID:  turnID,
+		ChatID:  it.TargetChatID,
+		ScopeID: scope,
+		Result:  result,
+		// Цель затухания — блок расписания дня на момент применения (этап 22.2).
+		PersonaBaseline: s.persona.MoodTargetAt(s.now(), s.location),
 		Journal:         s.journal,
 		Extra: func(ctx context.Context, tx pgx.Tx) error {
 			moved, cerr := chatMovedQuery(ctx, tx, it.TargetChatID, s.now().Add(-InitiativeQuietWindow))

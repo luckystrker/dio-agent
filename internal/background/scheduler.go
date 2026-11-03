@@ -87,8 +87,11 @@ type Deps struct {
 	// Cognition — общий с worker'ом семафор модельных заданий (§5.2); nil — без него.
 	Cognition *runtime.CognitionLock
 	Logger    *log.Logger
-	Now       func() time.Time // часы; nil — time.Now (тесты подменяют)
-	Rand      *rand.Rand       // источник jitter; nil — локальный
+	// Location — пояс персонажа (AGENT_TIMEZONE): расписание дня и тихие часы
+	// считаются по местным часам (этап 22). nil — пояс по умолчанию.
+	Location *time.Location
+	Now      func() time.Time // часы; nil — time.Now (тесты подменяют)
+	Rand     *rand.Rand       // источник jitter; nil — локальный
 }
 
 // Scheduler — фон: намерения, консолидация, cleanup, наблюдаемость (§14, §20).
@@ -111,6 +114,7 @@ type Scheduler struct {
 	toolLimit    int
 	cognition    *runtime.CognitionLock
 	logger       *log.Logger
+	location     *time.Location
 	now          func() time.Time
 	rnd          *rand.Rand
 	intentions   *IntentionRepo
@@ -171,6 +175,7 @@ func New(deps Deps, opts Options) (*Scheduler, error) {
 		toolLimit:    deps.ToolCallsLimit,
 		cognition:    deps.Cognition,
 		logger:       logger,
+		location:     deps.Location,
 		now:          now,
 		rnd:          rnd,
 		intentions:   NewIntentionRepo(deps.Pool),

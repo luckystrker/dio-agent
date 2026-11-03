@@ -497,11 +497,13 @@ func (m *toolJournalMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *eve
 // apply — фаза 4: применение валидированного результата (одна транзакция).
 func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Outcome) (Outcome, error) {
 	applyRes, err := ApplyTurn(ctx, r.Pool, ApplyOptions{
-		TurnID:          in.TurnID,
-		ChatID:          in.ChatID,
-		ScopeID:         in.ScopeID,
-		Result:          result,
-		PersonaBaseline: r.Persona.MoodBaseline,
+		TurnID:  in.TurnID,
+		ChatID:  in.ChatID,
+		ScopeID: in.ScopeID,
+		Result:  result,
+		// Цель затухания — блок расписания дня (этап 22.2): дельта ложится на
+		// «сегодняшнюю» базу, а не на статичную линию персоны.
+		PersonaBaseline: r.Persona.MoodTargetAt(time.Now(), r.Timezone),
 		Journal:         r.Journal,
 	})
 	if err != nil {

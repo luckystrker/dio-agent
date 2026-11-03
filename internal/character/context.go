@@ -118,11 +118,14 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 	out := BaseContext{}
 	now := a.now()
 
-	// --- mood (§7.2): затухание при чтении ---
-	moodNow, _, err := a.Mood.ReadDecayed(ctx, db, persona.MoodBaseline)
+	// --- mood (§7.2): затухание при чтении; цель — блок расписания дня (22.2),
+	// без расписания — базовая линия персоны ---
+	moodNow, _, err := a.Mood.ReadDecayed(ctx, db, persona.MoodTargetAt(now, a.Timezone))
 	if err != nil {
 		return BaseContext{}, fmt.Errorf("контекст: настроение: %w", err)
 	}
+	// Описание сравнивается с базовой линией, а не с целью блока: ночью модель
+	// должна видеть «спокоен, мало сил», а не «в ровном настроении».
 	out.MoodLine = DescribeMood(moodNow, persona.MoodBaseline)
 
 	// --- актор пачки: карточка человека (§7.3), сущность в scope чата ---
