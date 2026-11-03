@@ -9,7 +9,35 @@ import (
 	"testing"
 )
 
-// TestEnsurePersonDistinctActorsSameName — два «Саши» в одном чате — разные
+// TestEnsurePersonAdoptsLegacyEntity — major ревью: до M7 ключом было
+// отображаемое имя. Первый актор с таким именем усыновляет старую сущность
+// (его отношения/карточка не обнуляются), второй «Саша» получает свою.
+func TestEnsurePersonAdoptsLegacyEntity(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	repo := EntityRepo{}
+	scope := "chat:77"
+
+	legacy, err := repo.FindOrCreate(ctx, pool, EntityPerson, "Саша", scope)
+	if err != nil {
+		t.Fatalf("легаси-сущность: %v", err)
+	}
+	adopted, err := repo.EnsurePerson(ctx, pool, 2001, "Саша", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson(2001): %v", err)
+	}
+	if adopted.ID != legacy.ID {
+		t.Fatalf("легаси-сущность не усыновлена: %d вместо %d", adopted.ID, legacy.ID)
+	}
+	second, err := repo.EnsurePerson(ctx, pool, 2002, "Саша", scope)
+	if err != nil {
+		t.Fatalf("EnsurePerson(2002): %v", err)
+	}
+	if second.ID == legacy.ID {
+		t.Fatalf("второй «Саша» слился с усыновлённой сущностью %d", legacy.ID)
+	}
+}
+
 // сущности: доверие, симпатия и карточка памяти не смешиваются.
 func TestEnsurePersonDistinctActorsSameName(t *testing.T) {
 	pool := newTestPool(t)

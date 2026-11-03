@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,7 +222,11 @@ func (t *Toolset) findEntities(ctx context.Context, audience, query string) (str
 	}
 	out := make([]entityJSON, 0, len(found))
 	for _, e := range found {
-		out = append(out, entityJSON{ID: strconv.FormatInt(e.ID, 10), Kind: e.Kind, Name: e.CanonicalName, Scope: e.ScopeID})
+		name := e.CanonicalName
+		if display, derr := t.entities.DisplayName(ctx, t.db, e); derr == nil && strings.TrimSpace(display) != "" {
+			name = display
+		}
+		out = append(out, entityJSON{ID: strconv.FormatInt(e.ID, 10), Kind: e.Kind, Name: name, Scope: e.ScopeID})
 	}
 	return marshalJSON(entitiesResultJSON{Entities: out})
 }
@@ -322,8 +327,12 @@ func (t *Toolset) entityCard(ctx context.Context, audience, entityID string) (st
 	// оснований не раздувает контекст хода неограниченно.
 	stanceJSONs, memoryJSONs = trimCardToBudget(stanceJSONs, memoryJSONs, cardRunesBudget)
 
+	displayName := entity.CanonicalName
+	if display, derr := t.entities.DisplayName(ctx, t.db, entity); derr == nil && strings.TrimSpace(display) != "" {
+		displayName = display
+	}
 	return marshalJSON(cardResultJSON{
-		Entity:   entityJSON{ID: strconv.FormatInt(entity.ID, 10), Kind: entity.Kind, Name: entity.CanonicalName, Scope: entity.ScopeID},
+		Entity:   entityJSON{ID: strconv.FormatInt(entity.ID, 10), Kind: entity.Kind, Name: displayName, Scope: entity.ScopeID},
 		Stances:  stanceJSONs,
 		Memories: memoryJSONs,
 	})

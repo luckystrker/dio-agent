@@ -139,7 +139,7 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		// Имя»; несколько авторов — имена различают префиксы пачки, и одно
 		// имя в панели вводило бы в заблуждение (пусто — строки нет).
 		if singleActor {
-			out.ActorLine = actor.CanonicalName
+			out.ActorLine = actorDisplayName(batch, actor)
 		}
 	}
 
@@ -224,6 +224,20 @@ func batchTexts(batch []BatchEvent) []string {
 		out = append(out, text)
 	}
 	return out
+}
+
+// actorDisplayName — отображаемое имя автора пачки для панели/карточки:
+// канонический ключ user:<id> модели не показывается (M7).
+func actorDisplayName(batch []BatchEvent, actor *memory.Entity) string {
+	for _, ev := range batch {
+		if ev.ActorID != 0 && strings.TrimSpace(ev.ActorName) != "" {
+			return strings.TrimSpace(ev.ActorName)
+		}
+	}
+	if actor != nil {
+		return actor.CanonicalName
+	}
+	return ""
 }
 
 // batchAuthorLabel — имя автора строки пачки для префикса (17.10): без имени

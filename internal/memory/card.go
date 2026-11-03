@@ -89,13 +89,17 @@ func (t *Toolset) ConversationCard(ctx context.Context, audience string, entity 
 	fits := true
 	seen := make(map[int64]struct{}, len(actorItems)+len(chatItems))
 	var entries []string
+	displayName := entity.CanonicalName
+	if name, nerr := (EntityRepo{}).DisplayName(ctx, t.db, entity); nerr == nil && strings.TrimSpace(name) != "" {
+		displayName = name
+	}
 
 	for i, st := range stances {
 		if i >= cardStanceLimit {
 			fits = false
 			break
 		}
-		line := fmt.Sprintf("отношение к %s: %s — %s", sanitizeCardLabel(entity.CanonicalName),
+		line := fmt.Sprintf("отношение к %s: %s — %s", sanitizeCardLabel(displayName),
 			sanitizeCardLabel(st.Aspect), sanitizeCardText(st.Summary))
 		basis, hidden, err := t.stances.Basis(ctx, t.db, t.items, audience, st.ID)
 		if err != nil {
@@ -122,7 +126,7 @@ func (t *Toolset) ConversationCard(ctx context.Context, audience string, entity 
 		}
 		shownActor++
 		seen[it.ID] = struct{}{}
-		entries = append(entries, fmt.Sprintf("память о %s: %s", sanitizeCardLabel(entity.CanonicalName), sanitizeCardText(it.Text)))
+		entries = append(entries, fmt.Sprintf("память о %s: %s", sanitizeCardLabel(displayName), sanitizeCardText(it.Text)))
 	}
 
 	shownChat := 0

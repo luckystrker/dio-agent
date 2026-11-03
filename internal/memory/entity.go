@@ -55,6 +55,63 @@ const entityKeyExpr = `replace(lower(btrim(regexp_replace(normalize(%s, NFC), '\
 
 func entityKeySQL(column string) string { return fmt.Sprintf(entityKeyExpr, column) }
 
+// DisplayName — имя сущности для человека и модели: последний алиас
+// (отображаемое имя), иначе каноническое имя. Ключ `user:<id>` в панель и
+// карточку не попадает (M7, замечание ревью).
+func (EntityRepo) DisplayName(ctx context.Context, db DBTX, e Entity) (string, error) {
+	var alias string
+	err := db.QueryRow(ctx,
+		`SELECT alias FROM entity_aliases WHERE entity_id = $1 ORDER BY id DESC LIMIT 1`,
+		e.ID).Scan(&alias)
+	if isNoRows(err) {
+		return e.CanonicalName, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("entities: отображаемое имя не читается: %w", err)
+	}
+	if trimmed := strings.TrimSpace(alias); trimmed != "" {
+		return trimmed, nil
+	}
+	return e.CanonicalName, nil
+}
+
+// adoptLegacyPerson — совместимость с сущностями, созданными до M7: ключом
+// было отображаемое имя. При первом обращении актора такая сущность
+// «усыновляется» (ей добавляется алиас user:<id>), поэтому накопленные
+// отношения и карточка не обнуляются. Уже занятую другим актором сущность
+// (есть любой алиас user:*) не трогаем: два «Саши» должны разойтись.
+func (EntityRepo) adoptLegacyPerson(ctx context.Context, db DBTX, actorID int64, displayName, scopeID string) (Entity, bool, error) {
+	var e Entity
+	err := db.QueryRow(ctx,
+		`SELECT id, kind, canonical_name, scope_id FROM entities e
+		 WHERE e.kind = $1 AND e.scope_id = $2 AND e.name_key = `+entityKeySQL("$3")+`
+		 LIMIT 1`,
+		EntityPerson, scopeID, norm.NFC.String(strings.TrimSpace(displayName))).
+		Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
+	if isNoRows(err) {
+		return Entity{}, false, nil
+	}
+	if err != nil {
+		return Entity{}, false, fmt.Errorf("entities: легаси-сущность не читается: %w", err)
+	}
+	if strings.HasPrefix(strings.ToLower(e.CanonicalName), "user:") {
+		return Entity{}, false, nil // уже каноническая (возможно, наша)
+	}
+	var claimed bool
+	if err := db.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM entity_aliases WHERE entity_id = $1 AND lower(alias) LIKE 'user:%')`,
+		e.ID).Scan(&claimed); err != nil {
+		return Entity{}, false, fmt.Errorf("entities: занятость легаси-сущности не читается: %w", err)
+	}
+	if claimed {
+		return Entity{}, false, nil
+	}
+	if err := (EntityRepo{}).AddAlias(ctx, db, e.ID, PersonEntityName(actorID)); err != nil {
+		return Entity{}, false, err
+	}
+	return e, true, nil
+}
+
 // PersonEntityName — каноническое имя сущности собеседника: actor_id
 // стабилен, отображаемое имя меняется (M7). Отображаемое имя хранится
 // алиасом, поэтому смена имени в Telegram не обнуляет отношения, а два
@@ -66,11 +123,22 @@ func PersonEntityName(actorID int64) string {
 // EnsurePerson находит/создаёт сущность собеседника по actor_id и добавляет
 // отображаемое имя алиасом.
 func (EntityRepo) EnsurePerson(ctx context.Context, db DBTX, actorID int64, displayName, scopeID string) (Entity, error) {
+	display := strings.TrimSpace(displayName)
+	if display != "" {
+		if legacy, ok, err := (EntityRepo{}).adoptLegacyPerson(ctx, db, actorID, display, scopeID); err != nil {
+			return Entity{}, err
+		} else if ok {
+			// Старые отношения и карточка остаются на месте; отображаемое имя
+			// уже каноническое — алиас добавляем для единообразия.
+			_ = (EntityRepo{}).AddAlias(ctx, db, legacy.ID, display)
+			return legacy, nil
+		}
+	}
 	e, err := (EntityRepo{}).FindOrCreate(ctx, db, EntityPerson, PersonEntityName(actorID), scopeID)
 	if err != nil {
 		return Entity{}, err
 	}
-	if display := strings.TrimSpace(displayName); display != "" {
+	if display != "" {
 		if err := (EntityRepo{}).AddAlias(ctx, db, e.ID, display); err != nil {
 			return Entity{}, err
 		}

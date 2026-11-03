@@ -456,9 +456,12 @@ func TestAssembleContext(t *testing.T) {
 	if len(bctx.Batch) != 1 || bctx.Batch[0] != "Привет, как погода?" {
 		t.Fatalf("пачка не в контексте: %+v", bctx.Batch)
 	}
-	// Сущность собеседника создана.
-	if bctx.Actor == nil || bctx.Actor.CanonicalName != "Коля" {
-		t.Fatalf("актор не разрешён: %+v", bctx.Actor)
+	// Сущность собеседника создана: ключ — actor_id, в панели — имя.
+	if bctx.Actor == nil || !strings.HasPrefix(bctx.Actor.CanonicalName, "user:") {
+		t.Fatalf("актор не разрешён по actor_id: %+v", bctx.Actor)
+	}
+	if bctx.ActorLine != "Коля" {
+		t.Fatalf("отображаемое имя собеседника потеряно: %q", bctx.ActorLine)
 	}
 	// Память в базовый контекст v0.7 не кладётся (§11.1): абзац {{memory}}
 	// исчезает из system-промпта, модель добирает её инструментами.
