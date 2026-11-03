@@ -56,7 +56,7 @@ func TestAssembleConversationCardFitsOnlyRelevant(t *testing.T) {
 		text:     "память о Даниле: " + strings.Repeat("нерелевантный фон ", 200),
 		relevant: false,
 	}
-	card := assembleConversationCard([]cardEntry{relevant, background}, true)
+	card := assembleConversationCard([]cardEntry{relevant, background}, "")
 	if !card.Fits {
 		t.Fatalf("вытесненный нерелевантный фон сделал карточку неполной")
 	}
@@ -66,23 +66,29 @@ func TestAssembleConversationCardFitsOnlyRelevant(t *testing.T) {
 	if card.Entries != 1 {
 		t.Fatalf("записей в карточке %d, хочу 1", card.Entries)
 	}
+	if card.Incomplete != "" {
+		t.Fatalf("полная карточка назвала причину %q", card.Incomplete)
+	}
 
-	// Релевантная запись не влезла — карточка честно неполна.
+	// Релевантная запись не влезла — карточка честно неполна, причина budget.
 	huge := cardEntry{text: strings.Repeat("важное ", 500), relevant: true}
-	card = assembleConversationCard([]cardEntry{relevant, huge}, true)
+	card = assembleConversationCard([]cardEntry{relevant, huge}, "")
 	if card.Fits {
 		t.Fatalf("вытесненное релевантное попадание не пометило карточку неполной")
+	}
+	if card.Incomplete != "budget" {
+		t.Fatalf("причина неполноты %q, хочу budget", card.Incomplete)
 	}
 }
 
 // TestCardRelevantItemsThreshold — отсев семантического шума по порогу:
-// full-text попадания релевантны всегда, слабые векторы отбрасываются.
-// Срез лишних СЕМАНТИЧЕСКИХ попаданий — нормален (лучшие уже в карточке) и
-// полноту не ломает; cut=true только если за лимитом осталось full-text
-// попадание.
+// слабые векторы отбрасываются; полнотекстовое попадание считается
+// релевантным по покрытию запроса (Rank, 28.3). Срез лишних СЕМАНТИЧЕСКИХ
+// попаданий — нормален (лучшие уже в карточке) и полноту не ломает; cut=true
+// только если за лимитом осталось высокорелевантное попадание.
 func TestCardRelevantItemsThreshold(t *testing.T) {
 	results := []ScoredItem{
-		{Item: Item{ID: 1, Text: "full-text"}, Distance: -1},
+		{Item: Item{ID: 1, Text: "full-text"}, Distance: -1, Rank: 0.6},
 		{Item: Item{ID: 2, Text: "настоящее попадание"}, Distance: 0.40},
 		{Item: Item{ID: 3, Text: "на границе"}, Distance: 0.5},
 		{Item: Item{ID: 4, Text: "далёкий вектор"}, Distance: 0.6},
@@ -110,11 +116,21 @@ func TestCardRelevantItemsThreshold(t *testing.T) {
 		t.Fatalf("срез лишних семантических: items=%d cut=%v, хочу %d/false", len(items), cut, cardChatItemLimit)
 	}
 
-	// Full-text попадание вылетело за лимит — это честная неполнота.
+	// Полнотекстовое попадание с высоким покрытием вылетело за лимит — честная
+	// неполнота.
 	mixed := append([]ScoredItem{}, semantic[:cardChatItemLimit]...)
-	mixed = append(mixed, ScoredItem{Item: Item{ID: 999, Text: "full-text в хвосте"}, Distance: -1})
+	mixed = append(mixed, ScoredItem{Item: Item{ID: 999, Text: "full-text в хвосте"}, Distance: -1, Rank: 0.8})
 	items, cut = cardRelevantItems(mixed)
 	if !cut || len(items) != cardChatItemLimit {
-		t.Fatalf("вытесненное full-text попадание: items=%d cut=%v, хочу %d/true", len(items), cut, cardChatItemLimit)
+		t.Fatalf("вытесненное релевантное full-text: items=%d cut=%v, хочу %d/true", len(items), cut, cardChatItemLimit)
+	}
+
+	// Случайное слово из длинного запроса (низкое покрытие) за лимитом —
+	// карточка полна: живой ход 122/126 не должен включать инструменты.
+	mixed = append([]ScoredItem{}, semantic[:cardChatItemLimit]...)
+	mixed = append(mixed, ScoredItem{Item: Item{ID: 1000, Text: "случайное слово"}, Distance: -1, Rank: 0.08})
+	items, cut = cardRelevantItems(mixed)
+	if cut || len(items) != cardChatItemLimit {
+		t.Fatalf("низкое покрытие сделало карточку неполной: items=%d cut=%v", len(items), cut)
 	}
 }

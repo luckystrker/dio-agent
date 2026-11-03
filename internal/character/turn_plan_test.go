@@ -69,7 +69,8 @@ func TestPlanMemoryToolsRollback(t *testing.T) {
 }
 
 // TestMemoryToolsReason — этап 21.4: причина включения инструментов в лог
-// разговорного хода — history_trimmed / card_incomplete / rollback / none.
+// разговорного хода — history_trimmed / card_incomplete:<причина> / rollback /
+// none. С 28.3 причина неполноты карточки уточняется веткой.
 func TestMemoryToolsReason(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -80,6 +81,9 @@ func TestMemoryToolsReason(t *testing.T) {
 		{"откат", false, BaseContext{}, "rollback"},
 		{"история урезана", true, BaseContext{HistoryTrimmed: true, MemoryCardFitted: true}, "history_trimmed"},
 		{"карточка неполна", true, BaseContext{MemoryCardFitted: false}, "card_incomplete"},
+		{"карточка: срез full-text", true, BaseContext{MemoryCardFitted: false, MemoryCardIncomplete: "fts_cut"}, "card_incomplete:fts_cut"},
+		{"карточка: бюджет", true, BaseContext{MemoryCardFitted: false, MemoryCardIncomplete: "budget"}, "card_incomplete:budget"},
+		{"карточка: отношения и бюджет", true, BaseContext{MemoryCardFitted: false, MemoryCardIncomplete: "budget,stances"}, "card_incomplete:budget,stances"},
 		{"всё на месте", true, BaseContext{MemoryCardFitted: true}, "none"},
 	}
 	for _, tc := range cases {

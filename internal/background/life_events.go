@@ -690,16 +690,20 @@ func (s *Scheduler) lifeEventSystemPrompt() (string, error) {
 func (s *Scheduler) lifeEventUserPrompt(ctx context.Context) (string, error) {
 	now := s.now()
 	loc := s.location
-	local := now
-	if loc != nil {
-		local = now.In(loc)
+	// Панель состояния первой частью user-сообщения (28.4): время, «чем занят»
+	// по расписанию и настроение. Собеседника у события жизни нет — личные
+	// данные чатов в контекст не попадают.
+	moodNow, _, err := character.NewMoodRepo().ReadDecayed(ctx, s.pool,
+		s.persona.MoodTargetAt(now, loc))
+	if err != nil {
+		return "", fmt.Errorf("событие жизни: настроение не читается: %w", err)
 	}
+	panel := character.BackgroundPanel(now, loc, s.persona.ActivityAt(now, loc), "",
+		character.DescribeMood(moodNow, s.persona.MoodBaseline), "")
+
 	var b strings.Builder
-	fmt.Fprintf(&b, "Сейчас %s", local.Format("02.01 15:04"))
-	if activity := s.persona.ActivityAt(now, loc); activity != "" {
-		fmt.Fprintf(&b, ", по расписанию ты: %s", activity)
-	}
-	b.WriteString(".\n")
+	b.WriteString(character.ComposeUserText(panel, ""))
+	b.WriteString("\n")
 
 	events, err := s.recentLifeEvents(ctx, lifeEventContextLimit)
 	if err != nil {
