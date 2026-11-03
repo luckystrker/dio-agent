@@ -55,14 +55,19 @@ LOG_FILE="$CLUSTER_DIR/postgres.log"
 cleanup() {
 	local code=$?
 	trap - EXIT INT TERM
+	# Журнал упавшего прогона сохраняем до удаления кластера: иначе причина
+	# (не поднялся initdb/pg_ctl, упали тесты) исчезает вместе с каталогом.
+	if (( code != 0 )) && [[ -f "$LOG_FILE" ]]; then
+		cp -f "$LOG_FILE" "$TEST_PG_ROOT/last-failure.log" 2>/dev/null || true
+	fi
 	if [[ -f "$DATA_DIR/postmaster.pid" ]]; then
 		"$PG_BIN/pg_ctl" -D "$DATA_DIR" -m immediate stop >/dev/null 2>&1 || true
 	fi
 	# Кластер эфемерный: после остановки удаляем целиком. Если остановка не
 	# удалась — файлы всё равно наши собственные, вреда от них нет.
 	rm -rf "$CLUSTER_DIR"
-	if (( code != 0 )) && [[ -f "$LOG_FILE" ]]; then
-		echo "test-db: журнал кластера: $LOG_FILE" >&2
+	if (( code != 0 )); then
+		echo "test-db: журнал упавшего прогона: $TEST_PG_ROOT/last-failure.log" >&2
 	fi
 	exit "$code"
 }
