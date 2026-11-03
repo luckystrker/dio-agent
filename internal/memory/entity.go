@@ -55,6 +55,29 @@ const entityKeyExpr = `replace(lower(btrim(regexp_replace(normalize(%s, NFC), '\
 
 func entityKeySQL(column string) string { return fmt.Sprintf(entityKeyExpr, column) }
 
+// PersonEntityName — каноническое имя сущности собеседника: actor_id
+// стабилен, отображаемое имя меняется (M7). Отображаемое имя хранится
+// алиасом, поэтому смена имени в Telegram не обнуляет отношения, а два
+// «Саши» в группе не делят доверие.
+func PersonEntityName(actorID int64) string {
+	return fmt.Sprintf("user:%d", actorID)
+}
+
+// EnsurePerson находит/создаёт сущность собеседника по actor_id и добавляет
+// отображаемое имя алиасом.
+func (EntityRepo) EnsurePerson(ctx context.Context, db DBTX, actorID int64, displayName, scopeID string) (Entity, error) {
+	e, err := (EntityRepo{}).FindOrCreate(ctx, db, EntityPerson, PersonEntityName(actorID), scopeID)
+	if err != nil {
+		return Entity{}, err
+	}
+	if display := strings.TrimSpace(displayName); display != "" {
+		if err := (EntityRepo{}).AddAlias(ctx, db, e.ID, display); err != nil {
+			return Entity{}, err
+		}
+	}
+	return e, nil
+}
+
 // FindOrCreate находит сущность по нормализованному имени или алиасу в скоупе
 // записи или создаёт новую. Нормализация (17.12): регистр, ё/е, внутренние и
 // хвостовые пробелы, NFC — «Алёна» и «АЛЕНА» одна сущность; сокращение
@@ -78,12 +101,13 @@ func (EntityRepo) FindOrCreate(ctx context.Context, db DBTX, kind, name, scopeID
 	var e Entity
 	err := db.QueryRow(ctx,
 		`SELECT `+cols+` FROM entities e
-		 WHERE e.scope_id = $1 AND e.name_key = `+entityKeySQL("$2")+`
+		 WHERE e.kind = $3
+		   AND (e.scope_id = $1 AND e.name_key = `+entityKeySQL("$2")+`
 		    OR e.id IN (
 		      SELECT a.entity_id FROM entity_aliases a
-		      WHERE a.scope_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`)
+		      WHERE a.scope_id = $1 AND `+entityKeySQL("a.alias")+` = `+entityKeySQL("$2")+`))
 		 LIMIT 1`,
-		scopeID, canonical).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
+		scopeID, canonical, kind).Scan(&e.ID, &e.Kind, &e.CanonicalName, &e.ScopeID)
 	if err == nil {
 		return e, nil
 	}

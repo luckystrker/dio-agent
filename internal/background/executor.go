@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -570,11 +569,11 @@ func (s *Scheduler) stateContext(ctx context.Context, chatID int64, scope, adden
 		return "", fmt.Errorf("фон: актор чата не читается: %w", err)
 	}
 	if actorID != nil {
-		name := fmt.Sprintf("user:%d", *actorID)
-		if actorName != nil && strings.TrimSpace(*actorName) != "" {
+		name := ""
+		if actorName != nil {
 			name = *actorName
 		}
-		entity, ferr := memory.EntityRepo{}.FindOrCreate(ctx, s.pool, "person", name, scope)
+		entity, ferr := memory.EntityRepo{}.EnsurePerson(ctx, s.pool, *actorID, name, scope)
 		if ferr != nil {
 			return "", fmt.Errorf("фон: сущность собеседника: %w", ferr)
 		}

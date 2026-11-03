@@ -242,11 +242,7 @@ func (a *Assembler) resolveActor(ctx context.Context, db DBTX, batch []BatchEven
 		if ev.ActorID == 0 {
 			continue
 		}
-		name := ev.ActorName
-		if name == "" {
-			name = fmt.Sprintf("user:%d", ev.ActorID)
-		}
-		entity, err := a.Entities.FindOrCreate(ctx, db, "person", name, scopeID)
+		entity, err := a.Entities.EnsurePerson(ctx, db, ev.ActorID, ev.ActorName, scopeID)
 		if err != nil {
 			return nil, fmt.Errorf("контекст: сущность собеседника: %w", err)
 		}

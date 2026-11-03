@@ -501,11 +501,11 @@ func resolveActorEntity(ctx context.Context, tx pgx.Tx, turnID int64, scopeID st
 	if err != nil {
 		return nil, fmt.Errorf("применение: актор пачки не найден: %w", err)
 	}
-	name := fmt.Sprintf("user:%d", *actorID)
-	if actorName != nil && strings.TrimSpace(*actorName) != "" {
+	name := ""
+	if actorName != nil {
 		name = *actorName
 	}
-	entity, err := (memory.EntityRepo{}).FindOrCreate(ctx, tx, "person", name, scopeID)
+	entity, err := (memory.EntityRepo{}).EnsurePerson(ctx, tx, *actorID, name, scopeID)
 	if err != nil {
 		return nil, fmt.Errorf("применение: сущность собеседника: %w", err)
 	}
