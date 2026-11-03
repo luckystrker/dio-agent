@@ -399,7 +399,18 @@ func TestDeliveryTickCancellationDuringBubbleGapRequeues(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
+		// Отменяем строго после захвата строки в sending: фиксированная
+		// пауза 50 мс под параллельной нагрузкой успевала истечь до такта
+		// (флейк финального прогона этапа 29), и проверка получала состояние
+		// «до паузы» вместо «во время паузы».
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			var st string
+			if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&st); err == nil && st == "sending" {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
 		cancel()
 	}()
 	if err := loop.Tick(runCtx); err == nil {

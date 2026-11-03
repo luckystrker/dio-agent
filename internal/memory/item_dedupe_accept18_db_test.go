@@ -112,12 +112,13 @@ func newPoolWithoutDedupe(t *testing.T) *runtime.Pool {
 
 	result, err := runtime.Migrate(ctx, pool, subset)
 	if err != nil {
-		t.Fatalf("миграции до 000013 не применены: %v", err)
+		t.Fatalf("миграции без 000014 не применены: %v", err)
 	}
-	// Набор без одной миграции 000014: все остальные, включая 000015 (стикеры)
-	// и 000016 (скука).
-	if result.Applied != 15 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 15/0", result.Applied, result.Skipped)
+	// Набор без одной миграции 000014: все остальные (число файлов минус один),
+	// включая 000015 (стикеры), 000016 (скука), 000017/000018 (этап 29).
+	wantApplied := len(names) - 1
+	if result.Applied != wantApplied || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу %d/0", result.Applied, result.Skipped, wantApplied)
 	}
 	return pool
 }
@@ -207,8 +208,8 @@ func TestDedupeMigrationCollapsesExistingDuplicates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("миграция 000014 обязана применяться поверх существующих дублей: %v", err)
 	}
-	if result.Applied != 1 || result.Skipped != 15 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 1/15", result.Applied, result.Skipped)
+	if result.Applied != 1 || result.Skipped != len(migrationNames(t))-1 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 1/%d", result.Applied, result.Skipped, len(migrationNames(t))-1)
 	}
 
 	// Схлопнуто до старейшей строки; её исходная связь цела, ссылка, висевшая
@@ -342,4 +343,15 @@ func TestDedupeMigrationTransfersDerivationInputs(t *testing.T) {
 	if exists(derivedID, doomedID) {
 		t.Fatal("input-ребро обязано либо переноситься, либо вывозиться (FK на удалённый дубль невозможен)")
 	}
+}
+
+// migrationNames — имена SQL-миграций встроенного набора: ожидаемые счётчики
+// applied/skipped не хардкодятся и не ломаются от новой миграции.
+func migrationNames(t *testing.T) []string {
+	t.Helper()
+	names, err := fs.Glob(migrations.FS, "*.sql")
+	if err != nil {
+		t.Fatalf("миграции не читаются: %v", err)
+	}
+	return names
 }
