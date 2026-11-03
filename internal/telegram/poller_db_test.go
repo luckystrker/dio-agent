@@ -51,6 +51,7 @@ func TestPollerIngestsBatchAndFeedsBuffers(t *testing.T) {
 	pending := make(chan PendingEvent, 16)
 	m := NewChatBufferManager(BufferDeps{
 		Pool: pool,
+		Gate: NewGroupGate(pool, GroupGateConfig{}),
 		OnTurnReady: func(turnID, chatID int64, kind string) {
 			pending <- PendingEvent{EventID: turnID} // сигнал о закрытии порции
 		},
@@ -81,7 +82,26 @@ func TestPollerIngestsBatchAndFeedsBuffers(t *testing.T) {
 	}
 	m.Wait()
 
-	// Все три update сохранены (включая шум группы journal_only), offset — 1003.
+	// Шум группы закрывается своим окном и уходит в journal_only (30.1) —
+	// дождёмся решения гейта, а не только хода лички.
+	statusDeadline := time.After(3 * time.Second)
+	for {
+		var journaled int
+		if err := pool.QueryRow(context.Background(),
+			`SELECT count(*) FROM social_events WHERE status = 'journal_only'`).Scan(&journaled); err != nil {
+			t.Fatalf("journal_only не читается: %v", err)
+		}
+		if journaled == 1 {
+			break
+		}
+		select {
+		case <-statusDeadline:
+			t.Fatalf("шум группы не ушёл в journal_only за 3 с")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// Все три update сохранены (шум группы — journal_only после гейта, 30.1), offset — 1003.
 	var count int
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM social_events`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("сохранено %d событий (err=%v), хочу 3", count, err)
@@ -90,15 +110,11 @@ func TestPollerIngestsBatchAndFeedsBuffers(t *testing.T) {
 	if err != nil || offset != 1003 {
 		t.Fatalf("offset = %d (err=%v), хочу 1003", offset, err)
 	}
-	// Порция лички закрыта в turn, шум группы остался journal_only.
-	var buffered, journaled int
+	// Порция лички закрыта в turn; шум группы — journal_only (гейт §30.1).
+	var buffered int
 	if err := pool.QueryRow(context.Background(),
 		`SELECT count(*) FROM social_events WHERE status = 'buffered'`).Scan(&buffered); err != nil || buffered != 2 {
 		t.Fatalf("buffered: %d (err=%v), хочу 2", buffered, err)
-	}
-	if err := pool.QueryRow(context.Background(),
-		`SELECT count(*) FROM social_events WHERE status = 'journal_only'`).Scan(&journaled); err != nil || journaled != 1 {
-		t.Fatalf("journal_only: %d (err=%v), хочу 1", journaled, err)
 	}
 	// Однократность: повторный прогон poller по тому же offset не создаёт дублей
 	// (проверяем механику ingest — restart с offset 0 отсечётся UNIQUE).

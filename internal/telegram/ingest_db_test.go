@@ -100,10 +100,11 @@ func TestIngestUnsupportedAndGroupNoiseDoNotStallOffset(t *testing.T) {
 		t.Fatalf("unsupported под фиктивным чатом 0: chat=%d err=%v", chatID, err)
 	}
 
-	// Групповой шум — journal_only (§6.3), offset тоже двигается.
+	// Групповой шум — pending до решения на закрытии пачки (30.1), offset тоже
+	// двигается: ingest не ждёт фильтра.
 	noise := mustIngest(t, pool, []byte(`{"update_id":401,"message":{"message_id":1,"from":{"id":7,"first_name":"П"},"chat":{"id":-100,"type":"group"},"text":"болтовня"}}`))
-	if noise.Status != StatusJournalOnly {
-		t.Fatalf("групповой шум должен быть journal_only: %+v", noise)
+	if noise.Status != StatusPending {
+		t.Fatalf("групповой шум должен быть pending до гейта: %+v", noise)
 	}
 
 	offset, _, err := ReadOffset(ctx, pool)

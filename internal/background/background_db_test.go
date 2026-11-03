@@ -252,15 +252,16 @@ func TestProactiveCaps(t *testing.T) {
 		t.Fatalf("третья инициатива за сутки должна быть отменена, статус %s", st)
 	}
 
-	// 5) группы выключены.
+	// 5) check_in в группу — никогда (30.3); share/reply_later в группу имеют
+	// свой отдельный гейт (group_share_db_test.go), здесь проверяем запрет.
 	groupChat := int64(-200800)
 	f.seedEventStatus(t, ctx, groupChat, "group", "шум группы", f.now.Add(-6*time.Hour), "journal_only")
-	e := f.createIntention(t, ctx, KindReplyLater, "тема группы", -6, groupChat)
+	e := f.createIntention(t, ctx, KindCheckIn, "как дела в группе", -6, groupChat)
 	if err := f.sched.Tick(ctx); err != nil {
 		t.Fatalf("такт 5 не удался: %v", err)
 	}
 	if st := f.intentionStatus(t, ctx, e); st != "cancelled" {
-		t.Fatalf("инициатива в группу должна быть отменена (§14.3), статус %s", st)
+		t.Fatalf("check_in в группу должен быть отменён (§14.3), статус %s", st)
 	}
 
 	if got := len(cfg.Calls()); got != 2 {
