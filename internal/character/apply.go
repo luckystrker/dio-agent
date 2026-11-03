@@ -44,8 +44,15 @@ type ApplyResult struct {
 	// SkippedSticker — метка стикера не нашлась в коллекции: мягко обнулена,
 	// ход живёт (как мусорная reaction при answer, этап 25.4).
 	SkippedSticker bool
+	// SuppressedSticker — стикер мягко обнулён предохранителем частоты (28.1):
+	// в последних ходах чата стикер уже уходил.
+	SuppressedSticker bool
 	// SavedStickerID — стикер из пачки сохранён в коллекцию (25.5); 0 — нет.
 	SavedStickerID int64
+	// DroppedStickerSave — save_sticker отброшен до записи (28.1): в пачке нет
+	// стикера, которого не было бы в коллекции. Модель предлагала сохранение
+	// в каждом ходе — runtime решает, что сохранять нечего.
+	DroppedStickerSave bool
 	// DuplicateIntentions — предложения модели, отклонённые живым дублем
 	// (§14.1): причина дубля (какое намерение живо) видна оператору в логе.
 	DuplicateIntentions []DuplicateIntention
@@ -204,7 +211,8 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 
 	// --- стикер (25.4): метка из панели → file_id из коллекции; неизвестная
 	// метка мягко обнуляется, как мусорная реакция при answer. Стикер уходит
-	// после сообщений и реакции этого хода.
+	// после сообщений и реакции этого хода. Предохранитель частоты (28.1):
+	// стикер уже был в последних ходах чата — предложение мягко обнуляется.
 	if opts.Result.Sticker != "" {
 		sticker, err := NewStickerRepo().ByLabel(ctx, tx, opts.Result.Sticker)
 		if err != nil {
@@ -212,6 +220,10 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		}
 		if sticker == nil {
 			res.SkippedSticker = true
+		} else if frequent, ferr := stickerTooFrequent(ctx, tx, opts.ChatID, opts.TurnID); ferr != nil {
+			return ApplyResult{}, ferr
+		} else if frequent {
+			res.SuppressedSticker = true
 		} else if err := enqueue(map[string]any{
 			"kind":    "sticker",
 			"file_id": sticker.FileID,
@@ -222,14 +234,16 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 
 	// --- «сохраню себе» (25.5): file_id берём из пачки, заметку — у модели;
-	// дубли отсекаются по file_unique_id. В пачке нет стикера — сохранять
-	// нечего, предложение честно пропускается.
+	// дубли отсекаются по file_unique_id. Стикера, которого нет в коллекции, в
+	// пачке нет — сохранять нечего: предложение отбрасывается до записи, ход
+	// живёт (28.1).
 	if opts.Result.SaveSticker != nil {
-		savedID, err := saveStickerFromBatch(ctx, tx, opts.TurnID, opts.Result.SaveSticker.Note)
+		savedID, dropped, err := saveStickerFromBatch(ctx, tx, opts.TurnID, opts.Result.SaveSticker.Note)
 		if err != nil {
 			return ApplyResult{}, err
 		}
 		res.SavedStickerID = savedID
+		res.DroppedStickerSave = dropped
 	}
 
 	// --- память (§10.1): модель предлагает, runtime назначает источники и разрешение ---
@@ -623,41 +637,49 @@ func resolveActorEntity(ctx context.Context, tx pgx.Tx, turnID int64, scopeID st
 	return &entity, nil
 }
 
-// saveStickerFromBatch сохраняет в коллекцию первый незнакомый стикер пачки
-// (25.5): file_id/file_unique_id/эмодзи берёт runtime из события, модель даёт
-// только заметку. Возвращает id сохранённого стикера; 0 — сохранять нечего
-// (стикера в пачке нет или все уже в коллекции).
-func saveStickerFromBatch(ctx context.Context, tx pgx.Tx, turnID int64, note string) (int64, error) {
+// saveStickerFromBatch сохраняет в коллекцию первый НЕзнакомый стикер пачки
+// (25.5, 28.1): file_id/file_unique_id/эмодзи берёт runtime из события, модель
+// даёт только заметку. Возвращает id сохранённого стикера и признак «сохранять
+// было нечего» (все стикеры пачки уже в коллекции или их нет вовсе) — такой
+// save_sticker отбрасывается до записи, а не создаёт видимость работы.
+func saveStickerFromBatch(ctx context.Context, tx pgx.Tx, turnID int64, note string) (int64, bool, error) {
 	rows, err := tx.Query(ctx,
 		`SELECT raw_update FROM social_events WHERE turn_id = $1 ORDER BY id`, turnID)
 	if err != nil {
-		return 0, fmt.Errorf("применение: события пачки не читаются: %w", err)
+		return 0, false, fmt.Errorf("применение: события пачки не читаются: %w", err)
 	}
-	var sticker *telegram.StickerInfo
+	var stickers []telegram.StickerInfo
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
 			rows.Close()
-			return 0, fmt.Errorf("применение: событие пачки не читается: %w", err)
+			return 0, false, fmt.Errorf("применение: событие пачки не читается: %w", err)
 		}
 		if info := telegram.StickerFromUpdate(raw); info != nil {
-			sticker = info
-			break
+			stickers = append(stickers, *info)
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("применение: события пачки не дочитаны: %w", err)
+		return 0, false, fmt.Errorf("применение: события пачки не дочитаны: %w", err)
 	}
-	if sticker == nil {
-		return 0, nil
+	repo := NewStickerRepo()
+	for _, sticker := range stickers {
+		known, kerr := repo.Known(ctx, tx, sticker)
+		if kerr != nil {
+			return 0, false, kerr
+		}
+		if known {
+			continue // этот уже в коллекции — ищем следующий незнакомый
+		}
+		id, created, serr := repo.Save(ctx, tx, sticker, note)
+		if serr != nil {
+			return 0, false, fmt.Errorf("применение: стикер не сохранён: %w", serr)
+		}
+		if !created {
+			continue // дубль file_unique_id отсечён — пробуем следующий
+		}
+		return id, false, nil
 	}
-	id, created, err := NewStickerRepo().Save(ctx, tx, *sticker, note)
-	if err != nil {
-		return 0, fmt.Errorf("применение: стикер не сохранён: %w", err)
-	}
-	if !created {
-		return 0, nil // уже в коллекции — дубль отсечён
-	}
-	return id, nil
+	return 0, len(stickers) > 0, nil
 }

@@ -555,25 +555,34 @@ func (s *Scheduler) createInitiativeTurn(ctx context.Context, it Intention) (int
 	return turnID, nil
 }
 
-// generateInitiative — контекст §11.1 (persona, mood, отношение) + addendum
+// generateInitiative — контекст §11.1 (persona, настроение, отношение) + addendum
 // инициативы, затем модельный ход с инструментами памяти (§10.4: обращение
-// не принуждается).
+// не принуждается). Динамика идёт панелью состояния первой частью
+// user-сообщения (28.4) — как в разговорном ходе.
 func (s *Scheduler) generateInitiative(ctx context.Context, it Intention, op, scope string) (turnModelRun, error) {
-	system, err := s.stateContext(ctx, it.TargetChatID, scope, initiativeAddendum)
+	system, err := s.stateContext(initiativeAddendum)
+	if err != nil {
+		return turnModelRun{}, err
+	}
+	panel, err := s.statePanel(ctx, it.TargetChatID, scope)
 	if err != nil {
 		return turnModelRun{}, err
 	}
 	userText := fmt.Sprintf("Твоё отложенное намерение: %s по теме «%s» (причина: %s). Напиши собеседнику, если уместно. "+
 		"Новых намерений (intentions) в этом ходе не предлагай — инициатива уже случилась.",
 		it.Kind, it.Topic, it.Reason)
-	return s.runTurnModel(ctx, op, system, userText, s.memoryTools(), scope, sessionForChat(it.TargetChatID), nil)
+	return s.runTurnModel(ctx, op, system, character.ComposeUserText(panel, userText), s.memoryTools(), scope, sessionForChat(it.TargetChatID), nil)
 }
 
 // generateExplore — контекст exploration (§15): инструменты памяти и — при
 // включённом вебе — web_search/web_fetch с бюджетами на задачу (§15/§16);
 // никаких отправок (share-намерение отдельно проходит свежий gate).
 func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope string) (turnModelRun, error) {
-	system, err := s.stateContext(ctx, it.TargetChatID, scope, s.exploreAddendumFor(it))
+	system, err := s.stateContext(s.exploreAddendumFor(it))
+	if err != nil {
+		return turnModelRun{}, err
+	}
+	panel, err := s.statePanel(ctx, it.TargetChatID, scope)
 	if err != nil {
 		return turnModelRun{}, err
 	}
@@ -589,18 +598,33 @@ func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope
 			return turnModelRun{}, err
 		}
 	}
-	return s.runTurnModel(ctx, op, system, userText, tools, scope, sessionForChat(it.TargetChatID), extra)
+	return s.runTurnModel(ctx, op, system, character.ComposeUserText(panel, userText), tools, scope, sessionForChat(it.TargetChatID), extra)
 }
 
-// stateContext — системный промпт из шаблона §7.1 с mood и отношением к
-// собеседнику чата (последний актор событий) + addendum задачи.
-func (s *Scheduler) stateContext(ctx context.Context, chatID int64, scope, addendum string) (string, error) {
+// stateContext — статичный системный промпт из шаблона §7.1 + addendum задачи.
+// Динамика (настроение/отношение/«чем занят») живёт в панели состояния, а не в
+// system: с 2026-11-02 shipped-шаблон метки игнорирует, и фон раньше их не видел
+// (28.4).
+func (s *Scheduler) stateContext(addendum string) (string, error) {
+	system, err := character.BuildSystemPrompt(s.persona, character.PromptExtras{}, s.prompt)
+	if err != nil {
+		return "", fmt.Errorf("фон: промпт не собран: %w", err)
+	}
+	return system + "\n\n" + addendum, nil
+}
+
+// statePanel — компактная панель состояния фоновой задачи (28.4): время и
+// «чем занят» по расписанию, настроение, собеседник целевого чата и отношение
+// к нему (последний актор событий чата). Собирается тем же buildStatePanel, без
+// Assemble разговорного хода.
+func (s *Scheduler) statePanel(ctx context.Context, chatID int64, scope string) (string, error) {
+	now := s.now()
 	moodNow, _, err := character.NewMoodRepo().ReadDecayed(ctx, s.pool,
-		s.persona.MoodTargetAt(s.now(), s.location))
+		s.persona.MoodTargetAt(now, s.location))
 	if err != nil {
 		return "", fmt.Errorf("фон: настроение не читается: %w", err)
 	}
-	extras := character.PromptExtras{MoodLine: character.DescribeMood(moodNow, s.persona.MoodBaseline)}
+	actorLine, relationshipLine := "", ""
 
 	var actorID *int64
 	var actorName *string
@@ -620,18 +644,19 @@ func (s *Scheduler) stateContext(ctx context.Context, chatID int64, scope, adden
 		if ferr != nil {
 			return "", fmt.Errorf("фон: сущность собеседника: %w", ferr)
 		}
+		actorLine = name
+		if actorLine == "" {
+			actorLine = entity.CanonicalName
+		}
 		rel, rerr := character.NewRelationshipRepo().Read(ctx, s.pool, entity.ID, scope)
 		if rerr != nil {
 			return "", fmt.Errorf("фон: отношения не читаются: %w", rerr)
 		}
-		extras.RelationshipLine = character.DescribeRelationship(rel)
+		relationshipLine = character.DescribeRelationship(rel)
 	}
 
-	system, err := character.BuildSystemPrompt(s.persona, extras, s.prompt)
-	if err != nil {
-		return "", fmt.Errorf("фон: промпт не собран: %w", err)
-	}
-	return system + "\n\n" + addendum, nil
+	return character.BackgroundPanel(now, s.location, s.persona.ActivityAt(now, s.location),
+		actorLine, character.DescribeMood(moodNow, s.persona.MoodBaseline), relationshipLine), nil
 }
 
 // memoryTools — инструменты фона: только память (§10.4).

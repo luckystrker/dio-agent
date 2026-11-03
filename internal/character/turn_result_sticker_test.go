@@ -75,7 +75,9 @@ func TestTurnResultStickerRules(t *testing.T) {
 }
 
 // TestTurnResultSchemaSticker — схема провода знает sticker и save_sticker
-// (иначе модель о них не узнает вообще).
+// (иначе модель о них не узнает вообще). С 28.1 описания полей говорят, что
+// стикер — редкая приправа, а save_sticker уместен только для незнакомого
+// стикера пачки: модель не предлагает сохранение в каждом ходе.
 func TestTurnResultSchemaSticker(t *testing.T) {
 	props := TurnResultJSONSchema()["properties"].(map[string]any)
 	sticker, ok := props["sticker"].(map[string]any)
@@ -85,12 +87,29 @@ func TestTurnResultSchemaSticker(t *testing.T) {
 	if sticker["maxLength"] != maxStickerLabel {
 		t.Fatalf("схема: maxLength sticker = %v, валидатор — %d", sticker["maxLength"], maxStickerLabel)
 	}
+	if desc, _ := sticker["description"].(string); !strings.Contains(desc, "редкая") {
+		t.Fatalf("описание sticker не говорит, что стикер — редкая приправа: %q", desc)
+	}
 	save, ok := props["save_sticker"].(map[string]any)
 	if !ok {
 		t.Fatalf("в схеме нет поля save_sticker")
 	}
+	if desc, _ := save["description"].(string); !strings.Contains(desc, "НЕТ в твоей коллекции") {
+		t.Fatalf("описание save_sticker не ограничивает незнакомым стикером пачки: %q", desc)
+	}
 	note := save["properties"].(map[string]any)["note"].(map[string]any)
 	if note["maxLength"] != stickerNoteLimit {
 		t.Fatalf("схема: maxLength заметки = %v, валидатор — %d", note["maxLength"], stickerNoteLimit)
+	}
+}
+
+// TestConstraintsStickerPolicy — 28.1: runtime-ограничения хода прямо говорят
+// «стикер редко» и «save_sticker только для незнакомого стикера пачки».
+func TestConstraintsStickerPolicy(t *testing.T) {
+	text := constraintsSection()
+	for _, want := range []string{"редкая приправа", "которого НЕТ в твоей коллекции", "отбросит"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("в constraints нет %q:\n%s", want, text)
+		}
 	}
 }

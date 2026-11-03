@@ -94,6 +94,10 @@ type statePanelData struct {
 	// Stickers — краткий список коллекции стикеров (этап 25.3/25.4): метка,
 	// эмодзи и заметка «когда уместен»; по метке модель просит стикер.
 	Stickers string
+	// SaveSticker — подсказка «можно сохранить» (28.1): печатается только
+	// когда в пачке есть стикер, которого нет в коллекции. Без этого модель
+	// предлагала save_sticker в каждом ходе, в том числе без стикера вовсе.
+	SaveSticker bool
 	// MemoryTools — инструменты памяти выданы на этом ходе (этап 21.3):
 	// подсказка прямо в панели, что это страховка, а не основной путь.
 	MemoryTools bool
@@ -148,6 +152,9 @@ func buildStatePanel(d statePanelData) string {
 	if stickers := strings.TrimSpace(d.Stickers); stickers != "" {
 		lines = append(lines, stickers)
 	}
+	if d.SaveSticker {
+		lines = append(lines, "в пачке стикер, которого нет в твоей коллекции — можно сохранить его себе (save_sticker с заметкой, когда уместен)")
+	}
 	if d.MemoryTools {
 		lines = append(lines, "память доступна инструментами — обращаться только если ответа нет ни в истории, ни в карточке")
 	}
@@ -171,4 +178,25 @@ func composeUserText(panel, batch string) string {
 	default:
 		return panel + "\n\n" + batch
 	}
+}
+
+// ComposeUserText — то же для фоновых задач (28.4): панель первой частью
+// user-сообщения, как в разговорном ходе.
+func ComposeUserText(panel, body string) string { return composeUserText(panel, body) }
+
+// BackgroundPanel — компактная панель состояния фоновой задачи (28.4): время
+// и «чем занят» по расписанию, настроение, собеседник и отношение к нему (если
+// есть). Собирается тем же buildStatePanel, что и разговорный ход, но без
+// Assemble: у фона нет пачки, истории и карточки памяти. Фон кладёт панель
+// ПЕРВОЙ частью user-сообщения — иначе шаблон system её не видит (shipped
+// шаблон динамику игнорирует, решения 2026-11-02/2026-11-03).
+func BackgroundPanel(now time.Time, loc *time.Location, activity, actor, mood, relationship string) string {
+	return buildStatePanel(statePanelData{
+		Now:          now,
+		Location:     loc,
+		Activity:     activity,
+		Actor:        actor,
+		Mood:         mood,
+		Relationship: relationship,
+	})
 }

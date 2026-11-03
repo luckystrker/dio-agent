@@ -8,7 +8,9 @@ import (
 )
 
 // TestParseStickerLabel — метка коллекции: «#3» и «3» равнозначны (модель
-// часто опускает решётку), мусор не становится стикером.
+// часто опускает решётку), мусор не становится стикером. С 28.2 разбор
+// терпимый к живым формам метки: «,#1», « #1 », «#1.», «№1» — та же метка
+// (модель добавляет запятую и точку как часть перечисления, пишет №).
 func TestParseStickerLabel(t *testing.T) {
 	for _, in := range []string{"#3", "3", " #12 ", "#07"} {
 		id, ok := ParseStickerLabel(in)
@@ -16,7 +18,22 @@ func TestParseStickerLabel(t *testing.T) {
 			t.Fatalf("метка %q не разобрана: id=%d ok=%v", in, id, ok)
 		}
 	}
-	for _, in := range []string{"", "#", "😂", "#-1", "#3a", "три", "999999999999999999999999"} {
+	tolerant := map[string]int64{
+		",#1":   1, // ход 123: запятая перед меткой не распознана
+		" #1 ":  1,
+		"#1.":   1,
+		"1":     1,
+		"№1":    1,
+		"#2,":   2,
+		"№ 12.": 12,
+	}
+	for in, want := range tolerant {
+		id, ok := ParseStickerLabel(in)
+		if !ok || id != want {
+			t.Fatalf("метка %q не разобрана терпимо: id=%d ok=%v, хочу %d", in, id, ok, want)
+		}
+	}
+	for _, in := range []string{"", "#", ".,", "😂", "#-1", "#3a", "три", "стикер 3", "1 2", "999999999999999999999999"} {
 		if id, ok := ParseStickerLabel(in); ok {
 			t.Fatalf("мусор %q принят за метку: id=%d", in, id)
 		}
