@@ -48,8 +48,9 @@ func newTestPool(t *testing.T) *runtime.Pool {
 	if err != nil {
 		t.Fatalf("TEST_DATABASE_URL не разобран: %v", err)
 	}
-	cfg.Database = dbName
-	pool, err := runtime.NewPool(ctx, cfg.ConnString())
+	testDSN := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, dbName)
+	pool, err := runtime.NewPool(ctx, testDSN)
 	if err != nil {
 		t.Fatalf("пул к тестовой базе не создан: %v", err)
 	}

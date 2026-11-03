@@ -1,15 +1,18 @@
 // Сбор снимка метрик из PostgreSQL (этап 31.2): источник истины — база
 // (философия №2), поэтому цифры переживают рестарт и не расходятся с журналом.
-// Все запросы — только чтение, кроме чтения настроения/скуки: репозитории
-// персонажа фиксируют затухшее значение (то же, что делает панель состояния).
+// Только чтение: затухание настроения и рост скуки вычисляются на лету —
+// скрейп мониторинга не должен менять состояние персонажа.
 package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/luckystrker/dio-agent/internal/background"
 	"github.com/luckystrker/dio-agent/internal/character"
@@ -496,21 +499,48 @@ func (s *PgSource) collectCharacter(ctx context.Context, snap *Snapshot, now tim
 	if s.opts.Baseline != nil {
 		baseline = s.opts.Baseline(now)
 	}
-	mood, _, err := character.NewMoodRepo().ReadDecayed(ctx, s.pool, baseline)
-	if err != nil {
+
+	// Настроение: хранимое значение с затуханием к цели (как в панели), но
+	// БЕЗ фиксации затухшего значения — скрейп не пишет в базу.
+	mood := baseline
+	var (
+		valence, arousal, social float64
+		updatedAt                time.Time
+	)
+	err := s.pool.QueryRow(ctx,
+		`SELECT valence, arousal, social_energy, updated_at FROM character_state WHERE id = 1`).
+		Scan(&valence, &arousal, &social, &updatedAt)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		// Строки ещё нет — базовая линия персоны/расписания.
+	case err != nil:
 		return err
+	default:
+		stored := character.Mood{Valence: valence, Arousal: arousal, SocialEnergy: social}
+		mood = character.DecayMood(stored, baseline, now.Sub(updatedAt), character.MoodDecayLambdaPerHour)
 	}
 	snap.Character.Mood = MoodStats{
 		Valence:      mood.Valence,
 		Arousal:      mood.Arousal,
 		SocialEnergy: mood.SocialEnergy,
 	}
-	boredom, err := character.NewBoredomRepo().ReadGrown(ctx, s.pool, now,
-		s.opts.Schedule, s.opts.Timezone, baseline)
-	if err != nil {
+
+	// Скука: доросшее значение от последнего события, без CAS-записи (23.1).
+	var (
+		boredom float64
+		from    time.Time
+	)
+	err = s.pool.QueryRow(ctx,
+		`SELECT boredom, boredom_updated_at FROM character_state WHERE id = 1`).
+		Scan(&boredom, &from)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		snap.Character.Boredom = 0
+	case err != nil:
 		return err
+	default:
+		snap.Character.Boredom = character.GrowBoredom(boredom, from, now, s.opts.Schedule, s.opts.Timezone)
 	}
-	snap.Character.Boredom = boredom
 	return nil
 }
 

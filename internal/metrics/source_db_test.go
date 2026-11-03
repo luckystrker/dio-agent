@@ -152,8 +152,54 @@ func TestSnapshotFromDatabase(t *testing.T) {
 	}
 }
 
-// seedMetricsFixture засевает по строке на каждую метрику: ходы с событиями
-// журнала, доставки, бюджет, намерения, персонажа, стикеры и память.
+// TestSnapshotDoesNotWriteCharacterState — скрейп метрик только читает базу:
+// затухание настроения и рост скуки считаются на лету, но state не меняется
+// (мониторинг не должен влиять на персонажа).
+func TestSnapshotDoesNotWriteCharacterState(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	seedMetricsFixture(t, ctx, pool)
+
+	fixed := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := pool.Exec(ctx, `
+		UPDATE character_state
+		SET valence = 0.9, arousal = 0.9, social_energy = 0.9, updated_at = $1,
+		    boredom = 0.2, boredom_updated_at = $1
+		WHERE id = 1`, fixed); err != nil {
+		t.Fatalf("состояние не подготовлено: %v", err)
+	}
+
+	src := NewPgSource(pool, SourceOptions{
+		Now:      func() time.Time { return time.Now() },
+		Baseline: func(time.Time) character.Mood { return character.Mood{Valence: 0.1, Arousal: 0.1, SocialEnergy: 0.1} },
+		Timezone: time.UTC,
+	})
+	snap, err := src.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("снимок не собран: %v", err)
+	}
+	// Прошло много времени: настроение затухло к базовой линии, скука доросла
+	// до потолка — значения вычислены, а не прочитаны сырыми.
+	if snap.Character.Mood.Valence < 0.099 || snap.Character.Mood.Valence > 0.101 {
+		t.Errorf("valence = %v, хочу базовую линию 0.1", snap.Character.Mood.Valence)
+	}
+	if snap.Character.Boredom != 1 {
+		t.Errorf("скука = %v, хочу 1 (потолок)", snap.Character.Boredom)
+	}
+
+	var updated, boredomUpdated time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT updated_at, boredom_updated_at FROM character_state WHERE id = 1`).
+		Scan(&updated, &boredomUpdated); err != nil {
+		t.Fatalf("состояние не перечитано: %v", err)
+	}
+	if !updated.Equal(fixed) || !boredomUpdated.Equal(fixed) {
+		t.Errorf("скрейп записал в character_state: updated_at=%v boredom_updated_at=%v, хочу %v",
+			updated, boredomUpdated, fixed)
+	}
+}
+
+// seedMetricsFixture засевает по строке на каждую метрику: ходы с событиями// журнала, доставки, бюджет, намерения, персонажа, стикеры и память.
 func seedMetricsFixture(t *testing.T, ctx context.Context, pool *runtime.Pool) {
 	t.Helper()
 	stmts := []string{
