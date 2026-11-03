@@ -529,7 +529,7 @@ func (a *App) loadPersona(ctx context.Context) (character.Persona, string, error
 	if raw, err := os.ReadFile(templatePath); err == nil {
 		template = string(raw)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", promptTemplatePath, err)
+		return character.Persona{}, "", fmt.Errorf("app: %s не читается: %w", templatePath, err)
 	}
 	return persona, template, nil
 }
