@@ -490,20 +490,29 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 	}
 
 	if isInitiativeKind(it.Kind) {
-		// Проактивная политика §14.3: только личные чаты, лимит суток, пауза.
+		// Проактивная политика §14.3: личные чаты — прежние лимиты; группы —
+		// редко и по делу (30.3): share при живом разговоре и близкой теме,
+		// reply_later только там, где создан, check_in — никогда.
 		chatType, err := s.intentions.ChatType(ctx, it.TargetChatID)
 		if err != nil {
 			return false, "", err
 		}
 		if chatType != "private" {
-			return true, "инициативы в группы выключены (§14.3)", nil
-		}
-		usage, err := s.intentions.ProactiveUsage(ctx, it.TargetChatID)
-		if err != nil {
-			return false, "", err
-		}
-		if allowed, reason := ProactiveAllowed(true, usage, now); !allowed {
-			return true, reason, nil
+			allowed, reason, err := s.groupInitiativeAllowed(ctx, it, now)
+			if err != nil {
+				return false, "", err
+			}
+			if !allowed {
+				return true, reason, nil
+			}
+		} else {
+			usage, err := s.intentions.ProactiveUsage(ctx, it.TargetChatID)
+			if err != nil {
+				return false, "", err
+			}
+			if allowed, reason := ProactiveAllowed(true, usage, now); !allowed {
+				return true, reason, nil
+			}
 		}
 	} else if it.Kind == KindExplore {
 		// Дневной лимит exploration (§16): считаем все созданные за сутки,
