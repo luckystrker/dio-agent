@@ -215,11 +215,13 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	// после сообщений и реакции этого хода. Предохранитель частоты (28.1):
 	// стикер уже был в последних ходах чата — предложение мягко обнуляется.
 	if opts.Result.Sticker != "" {
-		sticker, err := NewStickerRepo().ByLabel(ctx, tx, opts.Result.Sticker)
-		if err != nil {
+		if stickerLabelNone(opts.Result.Sticker) {
+			// Модель заполнила поле «ничем» (null/none/пунктуация/«не
+			// используется…»): это не запрос стикера, а шум формы. Тихо
+			// пропускаем, чтобы журнал не считал каждый ход ошибкой (33.1).
+		} else if sticker, err := NewStickerRepo().ByLabel(ctx, tx, opts.Result.Sticker); err != nil {
 			return ApplyResult{}, err
-		}
-		if sticker == nil {
+		} else if sticker == nil {
 			res.SkippedSticker = true
 		} else if frequent, ferr := stickerTooFrequent(ctx, tx, opts.ChatID, opts.TurnID); ferr != nil {
 			return ApplyResult{}, ferr
