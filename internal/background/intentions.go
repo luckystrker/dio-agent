@@ -47,10 +47,6 @@ const (
 	KindExplore    = "explore"
 )
 
-// initiativeKinds — виды, способные отправить сообщение вне активного ответа:
-// учитываются в проактивных лимитах, если отправляются (§14.3).
-func initiativeKinds() []string { return []string{KindReplyLater, KindCheckIn, KindShare} }
-
 func isInitiativeKind(kind string) bool { return character.IsInitiativeKind(kind) }
 
 // Intention — строка intentions (поля, нужные исполнению; §14.1).
