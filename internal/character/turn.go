@@ -378,7 +378,7 @@ func truncateRawOutput(text string) string {
 // для известной ошибки «answer без сообщений» (21.7), иначе модель повторяет
 // тот же пустой answer.
 func repairHint(perr error) string {
-	hint := fmt.Sprintf("Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr)
+	hint := RepairHint(perr, "TurnResult")
 	if strings.Contains(perr.Error(), "answer требует") {
 		hint += " decision=answer требует 1–4 сообщения; если текста нет — добавь sticker или reaction, иначе decision=react с эмодзи или ignore."
 	}
