@@ -40,6 +40,8 @@ const (
 	KindCommand EventKind = "command"
 	KindEdited  EventKind = "edited"
 	KindOther   EventKind = "other"
+	// KindReaction — реакция пользователя на сообщение бота (34.1).
+	KindReaction EventKind = "reaction"
 )
 
 // NormalizedEvent — событие, извлечённое из raw update.
@@ -70,6 +72,11 @@ type NormalizedEvent struct {
 	BotKnown   bool
 	ReplyToBot bool
 	MentionBot bool
+	// Reaction — эмодзи реакции (34.1); ReactionAdded — поставил (true) или
+	// убрал (false). Текст события собирает ingest, когда найдёт цитату
+	// сообщения бота в delivery_outbox (sent → текст).
+	Reaction      string
+	ReactionAdded bool
 }
 
 // telegramEntity, telegramMessage, telegramUpdateShape — узкое представление
@@ -205,11 +212,30 @@ type telegramChat struct {
 }
 
 type telegramUpdateShape struct {
-	UpdateID          int64            `json:"update_id"`
-	Message           *telegramMessage `json:"message"`
-	EditedMessage     *telegramMessage `json:"edited_message"`
-	ChannelPost       *telegramMessage `json:"channel_post"`
-	EditedChannelPost *telegramMessage `json:"edited_channel_post"`
+	UpdateID          int64                    `json:"update_id"`
+	Message           *telegramMessage         `json:"message"`
+	EditedMessage     *telegramMessage         `json:"edited_message"`
+	ChannelPost       *telegramMessage         `json:"channel_post"`
+	EditedChannelPost *telegramMessage         `json:"edited_channel_post"`
+	MessageReaction   *telegramMessageReaction `json:"message_reaction"`
+}
+
+// telegramMessageReaction — update реакции на сообщение (34.1): цель —
+// message_id, изменение — разница old_reaction/new_reaction.
+type telegramMessageReaction struct {
+	Chat        *telegramChat          `json:"chat"`
+	MessageID   int64                  `json:"message_id"`
+	User        *telegramUser          `json:"user"`
+	Date        int64                  `json:"date"`
+	OldReaction []telegramReactionType `json:"old_reaction"`
+	NewReaction []telegramReactionType `json:"new_reaction"`
+}
+
+// telegramReactionType — ReactionType Bot API: emoji (custom_emoji/paid
+// не разбираем — событие останется «изменил реакцию» без эмодзи).
+type telegramReactionType struct {
+	Type  string `json:"type"`
+	Emoji string `json:"emoji"`
 }
 
 // NormalizeUpdate разбирает raw update. Ошибка — только неразборчивый
@@ -229,6 +255,10 @@ func NormalizeUpdateWithBot(raw json.RawMessage, bot BotIdentity) (NormalizedEve
 	}
 	if shape.UpdateID == 0 {
 		return NormalizedEvent{}, fmt.Errorf("%w: у update нет update_id", ErrUnusableUpdate)
+	}
+
+	if shape.MessageReaction != nil {
+		return normalizeMessageReaction(shape.UpdateID, shape.MessageReaction), nil
 	}
 
 	message, edited := extractMessage(&shape)
@@ -270,6 +300,78 @@ func NormalizeUpdateWithBot(raw json.RawMessage, bot BotIdentity) (NormalizedEve
 	}
 	event.Direct = IsDirectAddress(event)
 	return event, nil
+}
+
+// normalizeMessageReaction — реакция пользователя (34.1): цель и направление
+// изменения. Текст события собирает ingest (цитата ответа бота из outbox).
+func normalizeMessageReaction(updateID int64, reaction *telegramMessageReaction) NormalizedEvent {
+	if reaction.Chat == nil {
+		// Чат не привязать к событию — журнал под фиктивным чатом 0 (§6.1).
+		return NormalizedEvent{
+			TelegramUpdateID: updateID,
+			ChatID:           0,
+			ChatType:         ChatGroup,
+			Kind:             KindOther,
+			Supported:        false,
+		}
+	}
+	chatType := ChatGroup
+	if reaction.Chat.Type == string(ChatPrivate) {
+		chatType = ChatPrivate
+	}
+	emoji, added := reactionChange(reaction.OldReaction, reaction.NewReaction)
+	event := NormalizedEvent{
+		TelegramUpdateID: updateID,
+		ChatID:           reaction.Chat.ID,
+		ChatType:         chatType,
+		ActorID:          actorIDOfUser(reaction.User),
+		ActorName:        actorNameOf(reaction.User),
+		Kind:             KindReaction,
+		MessageID:        reaction.MessageID,
+		Date:             reaction.Date,
+		Supported:        true,
+		Reaction:         emoji,
+		ReactionAdded:    added,
+	}
+	// Реакция никогда не прямое обращение: ход по ней — низкий приоритет.
+	return event
+}
+
+// reactionChange — что изменилось: сначала ищем поставленный эмодзи, затем
+// снятый. Пусто (custom emoji/неизвестный тип) — событие без эмодзи.
+func reactionChange(oldReaction, newReaction []telegramReactionType) (emoji string, added bool) {
+	oldSet := map[string]bool{}
+	for _, r := range oldReaction {
+		if r.Type == "emoji" && r.Emoji != "" {
+			oldSet[r.Emoji] = true
+		}
+	}
+	for _, r := range newReaction {
+		if r.Type == "emoji" && r.Emoji != "" && !oldSet[r.Emoji] {
+			return r.Emoji, true
+		}
+	}
+	newSet := map[string]bool{}
+	for _, r := range newReaction {
+		if r.Type == "emoji" && r.Emoji != "" {
+			newSet[r.Emoji] = true
+		}
+	}
+	for _, r := range oldReaction {
+		if r.Type == "emoji" && r.Emoji != "" && !newSet[r.Emoji] {
+			return r.Emoji, false
+		}
+	}
+	return "", true
+}
+
+// actorIDOfUser — id пользователя реакции; nil — анонимный/скрытый автор.
+func actorIDOfUser(user *telegramUser) *int64 {
+	if user == nil {
+		return nil
+	}
+	id := user.ID
+	return &id
 }
 
 // IsDirectAddress — событие прямо адресовано боту (§6.3): личка, упоминание

@@ -12,11 +12,15 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
@@ -29,6 +33,11 @@ type Windows struct {
 
 // DefaultWindows — стартовые окна §6.2 (настраиваемые значения, не гарантии).
 func DefaultWindows(chatType ChatType, kind EventKind) Windows {
+	if kind == KindReaction {
+		// Реакции (34.1): несколько подряд — одна пачка; окно шире обычного,
+		// чтобы человек успел поставить/снять реакцию и дописать сообщение.
+		return Windows{Idle: 10 * time.Second, Max: 10 * time.Second}
+	}
 	if chatType == ChatPrivate {
 		// Личка: idle 3 с (решение 2026-11-01, было 1.5 с — бурст человека
 		// с паузами в пару секунд рвался на отдельные ходы, бот отвечал
@@ -128,8 +137,11 @@ type bufferState struct {
 	eventIDs  []int64
 	textChars int
 	windows   Windows
-	idle      *time.Timer
-	max       *time.Timer
+	// reactionOnly — в порции пока только реакции (34.1): окно 10 с и низкий
+	// приоритет; первое обычное сообщение возвращает обычные окна.
+	reactionOnly bool
+	idle         *time.Timer
+	max          *time.Timer
 }
 
 // take извлекает накопленное и останавливает таймеры (вызов под мьютексом).
@@ -176,11 +188,25 @@ func (m *ChatBufferManager) Add(event PendingEvent) {
 	state, ok := m.buffers[event.ChatID]
 	if !ok {
 		state = &bufferState{
-			chatID:  event.ChatID,
-			windows: m.Windows(event.ChatType, event.Kind),
+			chatID:       event.ChatID,
+			windows:      m.Windows(event.ChatType, event.Kind),
+			reactionOnly: event.Kind == KindReaction,
 		}
 		m.buffers[event.ChatID] = state
 		// Max от первого события: поток не переносит закрытие бесконечно (§6.2).
+		state.max = time.AfterFunc(state.windows.Max, func() { m.closeChat(event.ChatID) })
+	}
+	// Обычное сообщение в порции, начатой реакциями: окно реакции (10 с) не
+	// должно задерживать живой ответ — возвращаем обычные окна чата.
+	if state.reactionOnly && event.Kind != KindReaction {
+		state.reactionOnly = false
+		state.windows = m.Windows(event.ChatType, event.Kind)
+		if state.idle != nil {
+			state.idle.Stop()
+		}
+		if state.max != nil {
+			state.max.Stop()
+		}
 		state.max = time.AfterFunc(state.windows.Max, func() { m.closeChat(event.ChatID) })
 	}
 	state.eventIDs = append(state.eventIDs, event.EventID)
@@ -420,10 +446,51 @@ func (m *ChatBufferManager) processBatch(ctx context.Context, chatID int64, ids 
 		m.logger.Printf("буфер: пачка чата %d идёт в ход (%s, событий %d)",
 			chatID, decision.Reason, len(ids))
 	}
+	// Реакции (34.1): отдельный потолок — не больше одного хода в 10 минут на
+	// чат. Проверка и создание хода — одна транзакция (dbStartTurn): сбой
+	// создания не сжигает слот, а повтор не теряет реакцию в journal_only.
 	if err := m.createTurn(ctx, chatID, ids); err != nil {
+		if errors.Is(err, ErrReactionTurnCapped) {
+			if jerr := m.markJournalOnly(ctx, chatID, ids); jerr != nil {
+				return false, jerr
+			}
+			m.logger.Printf("буфер: реакции чата %d — потолок один ход в %v, остались в истории (событий %d)",
+				chatID, ReactionTurnCooldown, len(ids))
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
+}
+
+// ReactionTurnCooldown — потолок ходов по реакциям (34.1): не больше одного
+// хода в 10 минут на чат; остальные реакции остаются в истории без хода.
+const ReactionTurnCooldown = 10 * time.Minute
+
+// reactionTurnKeyPrefix — ключ runtime_state с временем последнего хода по
+// реакциям чата (unix-секунды).
+const reactionTurnKeyPrefix = "reaction_turn:"
+
+// ErrReactionTurnCapped — порция реакций не получает ход: потолок 10 минут на
+// чат уже израсходован. Не ошибка исполнения: события остаются в истории.
+var ErrReactionTurnCapped = errors.New("потолок ходов по реакциям чата (34.1)")
+
+// takeReactionTurnSlot — атомарная запись слота хода по реакциям в транзакции
+// создания хода: две параллельные порции одного чата не получат его дважды, а
+// сбой createTurn откатывает и слот (следующий повтор не теряет реакцию).
+func takeReactionTurnSlot(ctx context.Context, tx pgx.Tx, chatID int64) (bool, error) {
+	key := reactionTurnKeyPrefix + strconv.FormatInt(chatID, 10)
+	now := time.Now().Unix()
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO runtime_state (key, value) VALUES ($1, to_jsonb($2::bigint))
+		ON CONFLICT (key) DO UPDATE
+		  SET value = EXCLUDED.value, updated_at = now()
+		  WHERE COALESCE((runtime_state.value#>>'{}')::bigint, 0) <= $2::bigint - $3::bigint`,
+		key, now, int64(ReactionTurnCooldown/time.Second))
+	if err != nil {
+		return false, fmt.Errorf("буфер: слот реакции чата %d не записан: %w", chatID, err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // markJournalOnly — пачка не идёт в модель: события видны в недавней истории,
@@ -467,15 +534,19 @@ func (m *ChatBufferManager) dbStartTurn(ctx context.Context, chatID int64, ids [
 		return 0, "", fmt.Errorf("буфер: пустая порция чата %d", chatID)
 	}
 	var chatType string
-	var direct bool
+	var direct, reactionOnly bool
 	if err := m.deps.Pool.QueryRow(ctx, `
 		SELECT (SELECT chat_type FROM social_events WHERE id = $1),
-		       EXISTS (SELECT 1 FROM social_events WHERE id = ANY($2::bigint[]) AND direct)`,
-		ids[0], ids).Scan(&chatType, &direct); err != nil {
+		       EXISTS (SELECT 1 FROM social_events WHERE id = ANY($2::bigint[]) AND direct),
+		       COALESCE(bool_and(kind = 'reaction'), false)
+		FROM social_events WHERE id = ANY($2::bigint[])`,
+		ids[0], ids).Scan(&chatType, &direct, &reactionOnly); err != nil {
 		return 0, "", fmt.Errorf("буфер: тип чата %d не читается: %w", chatID, err)
 	}
 	kind := "group"
-	if chatType == string(ChatPrivate) || direct {
+	// Ход по реакциям (34.1) — низкий приоритет, как группа: он не ответ на
+	// прямой вопрос и не должен обгонять живые сообщения.
+	if (chatType == string(ChatPrivate) || direct) && !reactionOnly {
 		kind = "direct"
 	}
 
@@ -484,6 +555,18 @@ func (m *ChatBufferManager) dbStartTurn(ctx context.Context, chatID int64, ids [
 		return 0, "", fmt.Errorf("буфер: транзакция не открыта: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Потолок ходов по реакциям (34.1) — в той же транзакции, что создание
+	// хода: откат снимает и слот, повтор не теряет события.
+	if reactionOnly {
+		allowed, err := takeReactionTurnSlot(ctx, tx, chatID)
+		if err != nil {
+			return 0, "", err
+		}
+		if !allowed {
+			return 0, "", ErrReactionTurnCapped
+		}
+	}
 
 	var turnID int64
 	if err := tx.QueryRow(ctx,

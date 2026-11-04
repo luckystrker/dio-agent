@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func mustNormalize(t *testing.T, raw string) NormalizedEvent {
@@ -188,6 +189,93 @@ func TestNormalizeSticker(t *testing.T) {
 		"sticker":{"is_animated":true}}}`)
 	if !bare.Supported || bare.Text == nil || *bare.Text != "[стикер]" {
 		t.Fatalf("стикер без эмодзи: %+v", bare)
+	}
+}
+
+func TestNormalizeMessageReaction(t *testing.T) {
+	// Реакция пользователя на сообщение бота (34.1): цель — message_id,
+	// эмодзи и направление (поставил/убрал) из разницы old/new.
+	added := mustNormalize(t, `{
+		"update_id": 900,
+		"message_reaction": {
+			"chat": {"id": 42, "type": "private"},
+			"message_id": 77,
+			"user": {"id": 42, "first_name": "Коля"},
+			"date": 1700000000,
+			"old_reaction": [],
+			"new_reaction": [{"type": "emoji", "emoji": "😂"}]
+		}
+	}`)
+	if added.Kind != KindReaction || !added.Supported {
+		t.Fatalf("kind/supported: %+v", added)
+	}
+	if added.ChatID != 42 || added.ChatType != ChatPrivate {
+		t.Fatalf("чат: %+v", added)
+	}
+	if added.ActorID == nil || *added.ActorID != 42 || added.ActorName == nil || *added.ActorName != "Коля" {
+		t.Fatalf("актор: %+v", added)
+	}
+	if added.MessageID != 77 || added.Date != 1700000000 {
+		t.Fatalf("цель/время: %+v", added)
+	}
+	if added.Reaction != "😂" || !added.ReactionAdded {
+		t.Fatalf("реакция: emoji=%q added=%v", added.Reaction, added.ReactionAdded)
+	}
+	if added.Direct {
+		t.Fatalf("реакция не прямое обращение: %+v", added)
+	}
+
+	removed := mustNormalize(t, `{
+		"update_id": 901,
+		"message_reaction": {
+			"chat": {"id": -100, "type": "group"},
+			"message_id": 78,
+			"user": {"id": 43, "first_name": "Петя"},
+			"old_reaction": [{"type": "emoji", "emoji": "❤"}],
+			"new_reaction": []
+		}
+	}`)
+	if removed.Kind != KindReaction || removed.Reaction != "❤" || removed.ReactionAdded {
+		t.Fatalf("снятие реакции: %+v", removed)
+	}
+	if removed.ChatType != ChatGroup {
+		t.Fatalf("группа: %+v", removed)
+	}
+
+	changed := mustNormalize(t, `{
+		"update_id": 902,
+		"message_reaction": {
+			"chat": {"id": 42, "type": "private"},
+			"message_id": 79,
+			"old_reaction": [{"type": "emoji", "emoji": "😂"}],
+			"new_reaction": [{"type": "emoji", "emoji": "🔥"}]
+		}
+	}`)
+	if changed.Reaction != "🔥" || !changed.ReactionAdded {
+		t.Fatalf("смена реакции: emoji=%q added=%v", changed.Reaction, changed.ReactionAdded)
+	}
+
+	// Без чата update не привязать к событию — журнал под фиктивным чатом.
+	noChat := mustNormalize(t, `{"update_id":903,"message_reaction":{"message_id":1}}`)
+	if noChat.Supported || noChat.Kind != KindOther {
+		t.Fatalf("реакция без чата: %+v", noChat)
+	}
+}
+
+func TestReactionEventText(t *testing.T) {
+	if got := reactionEventText("😂", true, "это был мой ответ"); got != `[поставил 😂 на твоё «это был мой ответ»]` {
+		t.Fatalf("постановка: %q", got)
+	}
+	if got := reactionEventText("😂", false, "это был мой ответ"); got != `[убрал реакцию 😂 с твоего «это был мой ответ»]` {
+		t.Fatalf("снятие: %q", got)
+	}
+	if got := reactionEventText("😂", true, ""); got != `[поставил 😂]` {
+		t.Fatalf("без цели: %q", got)
+	}
+	long := strings.Repeat("я", reactionQuoteLimit+20)
+	got := reactionEventText("🔥", true, long)
+	if !strings.Contains(got, "…") || utf8.RuneCountInString(got) > reactionQuoteLimit+40 {
+		t.Fatalf("цитата не обрезана: %q", got)
 	}
 }
 

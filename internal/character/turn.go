@@ -693,6 +693,11 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *
 	out.Apply = applyRes
 	if !applyRes.Applied {
 		out.AlreadyApplied = true
+	} else {
+		// Аватарка собеседника (34.2): ставим фоновую проверку после
+		// применения — модель узнает об аватарке со следующего хода, ответ уже
+		// не задержан.
+		enqueueAvatarCheck(ctx, r.Pool, in, r.logf)
 	}
 	// Индексация эмбеддингов (§10.4, 16.8): применённый ход векторизует новые
 	// записи памяти — семантический канал оживает в прод-пути. Лучшие усилия:

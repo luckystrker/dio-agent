@@ -161,11 +161,27 @@ func (g *GroupGate) DecideBatch(ctx context.Context, chatID int64, ids []int64) 
 
 	now := g.now()
 	direct := false
+	reactionsOnly := len(events) > 0
 	for _, ev := range events {
 		if ev.direct {
 			direct = true
-			break
 		}
+		if ev.kind != string(KindReaction) {
+			reactionsOnly = false
+		}
+	}
+	// Реакции в группе (34.1): бот получает их только админом; в модель — лишь
+	// если чат вовлечён (30.2). Ни имя, ни эмбеддинг текста реакции (там цитата
+	// ответа бота) поводом не считаются.
+	if reactionsOnly {
+		involved, err := GroupInvolved(ctx, db, chatID, now)
+		if err != nil {
+			return BatchDecision{}, err
+		}
+		if involved {
+			return BatchDecision{Process: true, Reason: "реакция в вовлечённом чате"}, nil
+		}
+		return BatchDecision{Process: false, Reason: "реакция в группе без вовлечённости"}, nil
 	}
 	if direct {
 		if err := ResetGroupCeiling(ctx, db, chatID, now); err != nil {
@@ -270,12 +286,13 @@ func (g *GroupGate) topicCatches(ctx context.Context, text string) bool {
 type batchSignal struct {
 	text   string
 	direct bool
+	kind   string
 }
 
-// loadBatchSignals читает тексты/direct пачки и тип чата.
+// loadBatchSignals читает тексты/direct/вид пачки и тип чата.
 func loadBatchSignals(ctx context.Context, db groupDB, ids []int64) ([]batchSignal, string, error) {
 	rows, err := db.Query(ctx, `
-		SELECT coalesce(text, ''), direct, chat_type
+		SELECT coalesce(text, ''), direct, chat_type, kind
 		FROM social_events WHERE id = ANY($1::bigint[]) ORDER BY id`, ids)
 	if err != nil {
 		return nil, "", fmt.Errorf("группы: пачка не читается: %w", err)
@@ -286,7 +303,7 @@ func loadBatchSignals(ctx context.Context, db groupDB, ids []int64) ([]batchSign
 	for rows.Next() {
 		var ev batchSignal
 		var ct string
-		if err := rows.Scan(&ev.text, &ev.direct, &ct); err != nil {
+		if err := rows.Scan(&ev.text, &ev.direct, &ct, &ev.kind); err != nil {
 			return nil, "", fmt.Errorf("группы: строка пачки не читается: %w", err)
 		}
 		if chatType == "" {

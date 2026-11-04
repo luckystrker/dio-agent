@@ -64,7 +64,7 @@ func RecentHistoryWindow(ctx context.Context, db DBTX, chatID int64, limit int, 
 		         COALESCE(NULLIF(btrim(actor_name), ''), 'user:' || COALESCE(actor_id::text, '0')) AS author
 		  FROM social_events
 		  WHERE chat_id = $1 AND (text IS NOT NULL OR kind = 'photo')
-		    AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo')
+		    AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo', 'reaction')
 		    AND status <> 'pending'
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL

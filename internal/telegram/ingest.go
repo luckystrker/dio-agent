@@ -87,6 +87,32 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 		at := time.Unix(event.Date, 0).UTC()
 		occurredAt = &at
 	}
+	// Реакция (34.1): цель ищем среди доставленных ответов бота (sent →
+	// текст). Чужая цель — только история; группа без вовлечённости (§30.2) —
+	// тоже история (бот получает такие реакции лишь админом).
+	if event.Kind == KindReaction {
+		quote, found, rerr := reactionTargetText(ctx, tx, event.ChatID, event.MessageID)
+		if rerr != nil {
+			return IngestResult{}, fmt.Errorf("ingest: цель реакции не найдена: %w", rerr)
+		}
+		reactionText := reactionEventText(event.Reaction, event.ReactionAdded, quote)
+		text = &reactionText
+		event.Text = &reactionText
+		status = StatusJournalOnly
+		if found {
+			if event.ChatType == ChatPrivate {
+				status = StatusPending
+			} else {
+				involved, ierr := GroupInvolved(ctx, tx, event.ChatID, time.Now())
+				if ierr != nil {
+					return IngestResult{}, fmt.Errorf("ingest: вовлечённость чата реакции не прочитана: %w", ierr)
+				}
+				if involved {
+					status = StatusPending
+				}
+			}
+		}
+	}
 	err = tx.QueryRow(ctx, `
 		INSERT INTO social_events
 		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text,

@@ -154,7 +154,7 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutSec int) (
 	raw, err := c.call(ctx, "getUpdates", map[string]any{
 		"offset":          offset,
 		"timeout":         timeoutSec,
-		"allowed_updates": []string{"message", "edited_message"},
+		"allowed_updates": []string{"message", "edited_message", "message_reaction"},
 	}, 0) // тело читается целиком: пачка-бёрст может занимать мегабайты, обрезанный JSON = вечный повтор пачки (§6.1)
 	if err != nil {
 		return nil, err
