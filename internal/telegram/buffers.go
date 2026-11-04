@@ -12,12 +12,15 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
@@ -444,30 +447,17 @@ func (m *ChatBufferManager) processBatch(ctx context.Context, chatID int64, ids 
 			chatID, decision.Reason, len(ids))
 	}
 	// Реакции (34.1): отдельный потолок — не больше одного хода в 10 минут на
-	// чат. Остальные реакции остаются в истории (journal_only) и без модели.
-	// Без БД (юнит-тесты с подменённым startTurn) вида порции не узнать —
-	// логику потолка проверяют БД-тесты.
-	if m.deps.Pool != nil {
-		reactionOnly, err := m.batchOnlyReactions(ctx, ids)
-		if err != nil {
-			return false, err
-		}
-		if reactionOnly {
-			allowed, err := m.reactionTurnAllowed(ctx, chatID)
-			if err != nil {
-				return false, err
-			}
-			if !allowed {
-				if err := m.markJournalOnly(ctx, chatID, ids); err != nil {
-					return false, err
-				}
-				m.logger.Printf("буфер: реакции чата %d — потолок один ход в %v, остались в истории (событий %d)",
-					chatID, ReactionTurnCooldown, len(ids))
-				return false, nil
-			}
-		}
-	}
+	// чат. Проверка и создание хода — одна транзакция (dbStartTurn): сбой
+	// создания не сжигает слот, а повтор не теряет реакцию в journal_only.
 	if err := m.createTurn(ctx, chatID, ids); err != nil {
+		if errors.Is(err, ErrReactionTurnCapped) {
+			if jerr := m.markJournalOnly(ctx, chatID, ids); jerr != nil {
+				return false, jerr
+			}
+			m.logger.Printf("буфер: реакции чата %d — потолок один ход в %v, остались в истории (событий %d)",
+				chatID, ReactionTurnCooldown, len(ids))
+			return false, nil
+		}
 		return false, err
 	}
 	return true, nil
@@ -481,13 +471,17 @@ const ReactionTurnCooldown = 10 * time.Minute
 // реакциям чата (unix-секунды).
 const reactionTurnKeyPrefix = "reaction_turn:"
 
-// reactionTurnAllowed — можно ли создать ход по реакциям сейчас. Атомарная
-// запись времени слота: две параллельные порции одного чата не получат его
-// дважды. Раньше срока — false (события пойдут journal_only).
-func (m *ChatBufferManager) reactionTurnAllowed(ctx context.Context, chatID int64) (bool, error) {
+// ErrReactionTurnCapped — порция реакций не получает ход: потолок 10 минут на
+// чат уже израсходован. Не ошибка исполнения: события остаются в истории.
+var ErrReactionTurnCapped = errors.New("потолок ходов по реакциям чата (34.1)")
+
+// takeReactionTurnSlot — атомарная запись слота хода по реакциям в транзакции
+// создания хода: две параллельные порции одного чата не получат его дважды, а
+// сбой createTurn откатывает и слот (следующий повтор не теряет реакцию).
+func takeReactionTurnSlot(ctx context.Context, tx pgx.Tx, chatID int64) (bool, error) {
 	key := reactionTurnKeyPrefix + strconv.FormatInt(chatID, 10)
 	now := time.Now().Unix()
-	tag, err := m.deps.Pool.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO runtime_state (key, value) VALUES ($1, to_jsonb($2::bigint))
 		ON CONFLICT (key) DO UPDATE
 		  SET value = EXCLUDED.value, updated_at = now()
@@ -497,18 +491,6 @@ func (m *ChatBufferManager) reactionTurnAllowed(ctx context.Context, chatID int6
 		return false, fmt.Errorf("буфер: слот реакции чата %d не записан: %w", chatID, err)
 	}
 	return tag.RowsAffected() > 0, nil
-}
-
-// batchOnlyReactions — порция состоит только из реакций (34.1): такой ход
-// низкого приоритета и ограничен потолком частоты.
-func (m *ChatBufferManager) batchOnlyReactions(ctx context.Context, ids []int64) (bool, error) {
-	var only bool
-	if err := m.deps.Pool.QueryRow(ctx, `
-		SELECT COALESCE(bool_and(kind = 'reaction'), false)
-		FROM social_events WHERE id = ANY($1::bigint[])`, ids).Scan(&only); err != nil {
-		return false, fmt.Errorf("буфер: вид порции не прочитан: %w", err)
-	}
-	return only, nil
 }
 
 // markJournalOnly — пачка не идёт в модель: события видны в недавней истории,
@@ -573,6 +555,18 @@ func (m *ChatBufferManager) dbStartTurn(ctx context.Context, chatID int64, ids [
 		return 0, "", fmt.Errorf("буфер: транзакция не открыта: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Потолок ходов по реакциям (34.1) — в той же транзакции, что создание
+	// хода: откат снимает и слот, повтор не теряет события.
+	if reactionOnly {
+		allowed, err := takeReactionTurnSlot(ctx, tx, chatID)
+		if err != nil {
+			return 0, "", err
+		}
+		if !allowed {
+			return 0, "", ErrReactionTurnCapped
+		}
+	}
 
 	var turnID int64
 	if err := tx.QueryRow(ctx,
