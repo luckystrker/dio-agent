@@ -308,13 +308,18 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		}
 		qctx, cancel := l.persistCtx()
 		err = l.repo.MarkSent(qctx, row.ID, &messageID)
+		if err == nil {
+			// Байты картинки больше не нужны: sent терминален (§13.2), а каждая
+			// картинка — до 5 МиБ в базе. Сбой удаления не влияет на доставку.
+			if derr := l.repo.DeleteImage(qctx, row.ID); derr != nil {
+				l.logger.Printf("delivery: байты картинки не удалены после отправки (строка %d): %v", row.ID, derr)
+			}
+		}
 		cancel()
 		if err != nil {
 			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
-		l.noteSent(row)
-		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: картинка отправлена (turn %d, поз. %d, message_id %d, %s, %d байт)",
 			row.TurnID, row.Position, messageID, contentType, len(data))
 		return

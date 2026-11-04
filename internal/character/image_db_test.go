@@ -91,3 +91,19 @@ func TestApplyTurnWithoutImageHasNoPhotoDB(t *testing.T) {
 		t.Fatalf("пузырей картинки %d, хочу 0", photos)
 	}
 }
+
+func TestRecentHistoryIncludesSentPhotoDB(t *testing.T) {
+	f, ctx := newFixture(t)
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO delivery_outbox (turn_id, position, chat_id, payload, status)
+		VALUES (9101, 1, $1, '{"kind":"photo"}'::jsonb, 'sent')`, testChatID); err != nil {
+		t.Fatalf("отправленная картинка не вставлена: %v", err)
+	}
+	history, _, err := RecentHistoryWindow(ctx, f.pool, testChatID, 10, 0)
+	if err != nil {
+		t.Fatalf("история не прочитана: %v", err)
+	}
+	if len(history) != 1 || history[0].Role != "assistant" || history[0].Content != "[отправил картинку]" {
+		t.Fatalf("отправленная картинка не видна в истории: %+v", history)
+	}
+}

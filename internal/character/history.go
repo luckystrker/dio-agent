@@ -68,9 +68,14 @@ func RecentHistoryWindow(ctx context.Context, db DBTX, chatID int64, limit int, 
 		    AND status <> 'pending'
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL
-		  SELECT 'assistant' AS role, payload->>'text' AS content, created_at AS ts, id, '' AS author
+		  SELECT 'assistant' AS role,
+		         CASE WHEN payload->>'kind' = 'photo'
+		              THEN COALESCE(NULLIF(btrim(payload->>'text'), ''), '[отправил картинку]')
+		              ELSE payload->>'text' END AS content,
+		         created_at AS ts, id, '' AS author
 		  FROM delivery_outbox
-		  WHERE chat_id = $1 AND status = 'sent' AND payload->>'text' IS NOT NULL
+		  WHERE chat_id = $1 AND status = 'sent'
+		    AND (payload->>'text' IS NOT NULL OR payload->>'kind' = 'photo')
 		    AND ($3::bigint = 0 OR turn_id <> $3::bigint)
 		) timeline
 		ORDER BY ts DESC, id DESC, role ASC

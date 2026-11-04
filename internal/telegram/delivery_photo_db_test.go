@@ -103,6 +103,14 @@ func TestDeliveryLoopSendsPhoto(t *testing.T) {
 	if status != "sent" || telegramID == nil || *telegramID != 888 {
 		t.Fatalf("доставка фото: status=%s id=%v", status, telegramID)
 	}
+	// Байты после отправки удалены: sent терминален, база не хранит картинки вечно.
+	var imagesLeft int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_images WHERE outbox_id = $1`, id).Scan(&imagesLeft); err != nil {
+		t.Fatalf("outbox_images не прочитан: %v", err)
+	}
+	if imagesLeft != 0 {
+		t.Fatalf("байты картинки остались после отправки: %d", imagesLeft)
+	}
 	sent, name, fileType, data := stub.snapshot()
 	if sent != 1 || name != "photo.jpg" || fileType != "image/jpeg" || string(data) != "jpeg-байты" {
 		t.Fatalf("sendPhoto: вызовов=%d файл=%q тип=%q байты=%q", sent, name, fileType, data)

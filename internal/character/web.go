@@ -236,18 +236,23 @@ func toolResultText(result events.Event) string {
 // досчитан при сборке контекста) отвечает модели отказом, а не сетевым вызовом.
 type webUsageMW struct {
 	agomiddleware.Base
-	name      string
-	db        web.UsageDB
+	name   string
+	db     web.UsageDB
+	logger *log.Logger
+
+	mu        sync.Mutex
 	remaining int64
-	logger    *log.Logger
 }
 
 func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
 	if ev.Name != m.name {
 		return next(ev, cx)
 	}
+	m.mu.Lock()
 	m.remaining--
-	if m.remaining < 0 {
+	over := m.remaining < 0
+	m.mu.Unlock()
+	if over {
 		if m.logger != nil {
 			m.logger.Printf("веб: суточный лимит поисков исчерпан — вызов %q отклонён (36.1)", ev.Name)
 		}
