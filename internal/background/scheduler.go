@@ -88,6 +88,9 @@ type Deps struct {
 	Model           *character.ChatConfig      // nil — модель не настроена: фон не мыслит
 	DailyCallsLimit int64                      // дневной лимит пула background (§16); 0 — не ограничивать
 	ToolCallsLimit  int                        // лимит обращений к инструментам за ход (§11.2)
+	// Avatar — источник аватарок (34.2): getUserProfilePhotos + getFile. nil —
+	// проверки не запускаются (dry-run/тесты без Telegram).
+	Avatar AvatarSource
 	// Cognition — общий с worker'ом семафор модельных заданий (§5.2); nil — без него.
 	Cognition *runtime.CognitionLock
 	Logger    *log.Logger
@@ -116,6 +119,7 @@ type Scheduler struct {
 	model             *character.ChatConfig
 	dailyLimit        int64
 	toolLimit         int
+	avatar            AvatarSource
 	cognition         *runtime.CognitionLock
 	logger            *log.Logger
 	location          *time.Location
@@ -182,6 +186,7 @@ func New(deps Deps, opts Options) (*Scheduler, error) {
 		model:             deps.Model,
 		dailyLimit:        deps.DailyCallsLimit,
 		toolLimit:         deps.ToolCallsLimit,
+		avatar:            deps.Avatar,
 		cognition:         deps.Cognition,
 		logger:            logger,
 		location:          deps.Location,
@@ -350,6 +355,12 @@ func (s *Scheduler) Tick(ctx context.Context) error {
 		if err := s.maybeRunLifeEvent(ctx); err != nil {
 			s.logError("событие жизни: такт не выполнен: %v", err)
 		}
+	}
+
+	// Аватарка собеседника (34.2): первая проверка/смена не чаще раза в сутки.
+	// Вызов не задерживает ответ — проверка поставлена ходом и идёт в фоне.
+	if err := s.maybeCheckAvatars(ctx); err != nil {
+		s.logError("аватарки: такт не выполнен: %v", err)
 	}
 	return nil
 }

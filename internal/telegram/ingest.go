@@ -97,6 +97,7 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 		}
 		reactionText := reactionEventText(event.Reaction, event.ReactionAdded, quote)
 		text = &reactionText
+		event.Text = &reactionText
 		status = StatusJournalOnly
 		if found {
 			if event.ChatType == ChatPrivate {

@@ -382,6 +382,14 @@ func (a *App) Start(ctx context.Context) error {
 			w.Provider, w.MaxSearchPerTask, w.MaxFetchPerTask)
 	}
 
+	// Аватарки (34.2): живой Telegram — getUserProfilePhotos/getFile в фоне;
+	// dry-run и тесты без фетчера проверки не запускают.
+	var avatarSource background.AvatarSource
+	if tg := a.opts.Config.Telegram; tg != nil && !tg.DryRun && tg.BotToken != "" {
+		avatarSource = telegram.NewAvatarFetcher(tg.BotToken, tg.APIBase)
+		a.logger.Printf("аватарки: проверка при знакомстве и смене включена (не чаще раза в сутки)")
+	}
+
 	sched, err := background.New(background.Deps{
 		Pool:            pool,
 		Journal:         a.journal,
@@ -395,6 +403,7 @@ func (a *App) Start(ctx context.Context) error {
 		Persona:         persona,
 		PromptTemplate:  template,
 		Model:           model,
+		Avatar:          avatarSource,
 		DailyCallsLimit: backgroundCallsLimit(a.opts.Config),
 		ToolCallsLimit:  toolCallsLimit(a.opts.Config),
 		Cognition:       cognition,
