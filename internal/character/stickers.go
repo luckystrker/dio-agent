@@ -138,15 +138,19 @@ func (r *StickerRepo) List(ctx context.Context, db DBTX, limit int) ([]Sticker, 
 	return out, nil
 }
 
-// ByLabel — стикер по метке из TurnResult (#id). Нет такого — (nil, nil):
-// метка не из панели мягко обнуляется, как мусорная реакция при answer.
+// ByLabel — стикер по метке из TurnResult: номер коллекции (#id) или эмодзи
+// (этап 33.1, разбор — parseStickerRef). Нет такого — (nil, nil): метка не из
+// панели мягко обнуляется, как мусорная реакция при answer.
 func (r *StickerRepo) ByLabel(ctx context.Context, db DBTX, label string) (*Sticker, error) {
-	id, ok := ParseStickerLabel(label)
+	ref, ok := parseStickerRef(label)
 	if !ok {
 		return nil, nil
 	}
+	if ref.Emoji != "" {
+		return r.ByEmoji(ctx, db, ref.Emoji)
+	}
 	s, err := scanSticker(db.QueryRow(ctx,
-		`SELECT `+stickerColumns+` FROM stickers WHERE id = $1`, id))
+		`SELECT `+stickerColumns+` FROM stickers WHERE id = $1`, ref.ID))
 	if isNoRows(err) {
 		return nil, nil
 	}
@@ -301,7 +305,7 @@ func RenderStickerList(stickers []Sticker) string {
 	if len(stickers) == 0 {
 		return ""
 	}
-	lines := []string{"твои стикеры (отправить — поле sticker, метка):"}
+	lines := []string{"твои стикеры (отправить — поле sticker: номер #N или эмодзи):"}
 	total := 0
 	for _, s := range stickers {
 		line := stickerLabel(s.ID)

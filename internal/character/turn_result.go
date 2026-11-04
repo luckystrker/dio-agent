@@ -142,6 +142,9 @@ func ParseTurnResultWithHistory(raw []byte, history []HistoryMessage) (TurnResul
 }
 
 func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
+	// Сырые управляющие символы внутри строк (живой случай '\t') экранируем
+	// до разбора (этап 33.3): строгий JSON иначе теряет ход целиком.
+	raw = EscapeJSONControlChars(raw)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var r TurnResult

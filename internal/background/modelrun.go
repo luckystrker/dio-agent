@@ -33,7 +33,8 @@ const (
 		"Если за это время собеседник уже писал тебе на другую тему — лучше ignore."
 
 	exploreAddendum = "Ты изучаешь тему для себя (exploration). НИЧЕГО не отправляй собеседнику: " +
-		"decision=ignore, а находки оформи в memory (thought/preference/claim о теме)."
+		"decision=ignore, а находки оформи в memory (thought/preference/claim о теме). " +
+		"Ответ держи коротким: не больше 3 кандидатов памяти, каждый — до 400 символов; длинные конспекты не нужны — финал может оборваться по лимиту токенов."
 )
 
 // Ограничения proposal-контракта консолидации (§10.1: runtime проверяет
@@ -204,8 +205,7 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 	result, perr := parseTurnReply(first)
 	if perr != nil {
 		// Один repair-retry (§11.3): тот же контекст, модели показана ошибка.
-		fixed, ferr := first.Ask(ctx, fmt.Sprintf(
-			"Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr))
+		fixed, ferr := first.Ask(ctx, character.RepairHint(perr, "TurnResult"))
 		if ferr != nil {
 			return reasoningOut, ferr
 		}
@@ -287,8 +287,7 @@ func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system
 	}
 
 	// Один repair-retry (§11.3): тот же контекст, модели показана ошибка.
-	fixed, ferr := first.Ask(ctx, fmt.Sprintf(
-		"Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме ConsolidationProposal, без текста вокруг.", perr))
+	fixed, ferr := first.Ask(ctx, character.RepairHint(perr, "ConsolidationProposal"))
 	if ferr != nil {
 		return consolidationProposal{}, counting.stats(), ferr
 	}
@@ -412,6 +411,7 @@ func consolidationJSONSchema() map[string]any {
 // длины проверяются, strength/interest за границей 0..1 сжимаются до границы
 // (модель предлагает — runtime применяет; паритет сжатия дельт настроения).
 func parseConsolidationProposal(raw []byte) (consolidationProposal, error) {
+	raw = character.EscapeJSONControlChars(raw)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var p consolidationProposal

@@ -396,7 +396,7 @@ func truncateRawOutput(text string) string {
 // для известной ошибки «answer без сообщений» (21.7), иначе модель повторяет
 // тот же пустой answer.
 func repairHint(perr error) string {
-	hint := fmt.Sprintf("Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме TurnResult, без текста вокруг.", perr)
+	hint := RepairHint(perr, "TurnResult")
 	if strings.Contains(perr.Error(), "answer требует") {
 		hint += " decision=answer требует 1–4 сообщения; если текста нет — добавь sticker или reaction, иначе decision=react с эмодзи или ignore."
 	}
@@ -675,6 +675,10 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 	for _, rejected := range out.Apply.RejectedIntentions {
 		r.logf("ход %d: намерение %s %q отклонено — тема-мусор (%s, §14.1)",
 			in.TurnID, rejected.Kind, rejected.Topic, rejected.Reason)
+	}
+	for _, limited := range out.Apply.LimitedIntentions {
+		r.logf("ход %d: лимит инициатив исчерпан — намерение не создано (%s %q, §14.3)",
+			in.TurnID, limited.Kind, limited.Topic)
 	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
