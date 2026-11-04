@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/luckystrker/dio-agent/internal/web"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -104,11 +105,15 @@ type Config struct {
 	// Timezone — часовой пояс меток времени истории и панели состояния
 	// (AGENT_TIMEZONE, IANA, по умолчанию Europe/Moscow). LoadConfig всегда
 	// заполняет поле; nil — конфиг собран не через LoadConfig.
-	Timezone  *time.Location
-	Model     *ModelSettings
-	Telegram  *TelegramSettings
-	Embedding *EmbeddingSettings
-	Web       *WebSettings
+	Timezone *time.Location
+	// FFmpegPath — путь к ffmpeg для раскадровки гифок/кружков (FFMPEG_PATH,
+	// этап 35): явный путь, иначе PATH, иначе $HOME/.local/bin/ffmpeg.
+	// Пусто — раскадровка выключена, видео идёт превью-кадром.
+	FFmpegPath string
+	Model      *ModelSettings
+	Telegram   *TelegramSettings
+	Embedding  *EmbeddingSettings
+	Web        *WebSettings
 }
 
 // WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
@@ -197,6 +202,7 @@ func LoadConfig(env Getenv) (Config, error) {
 		DBMaxConns:  dbMaxConns,
 		MetricsPort: metricsPort,
 		Timezone:    timezone,
+		FFmpegPath:  parseFFmpegPath(env),
 		Model:       model,
 		Telegram:    telegram,
 		Embedding:   embedding,
@@ -206,6 +212,55 @@ func LoadConfig(env Getenv) (Config, error) {
 
 // DefaultTimezone — часовой пояс персонажа по умолчанию (AGENT_TIMEZONE).
 const DefaultTimezone = "Europe/Moscow"
+
+// parseFFmpegPath разрешает ffmpeg для раскадровки (этап 35): FFMPEG_PATH —
+// явный путь; пусто — поиск в PATH, затем $HOME/.local/bin/ffmpeg. Найденный
+// файл должен быть обычным исполняемым файлом. Несуществующий/неисполняемый
+// путь — раскадровка выключена (пусто), а не ошибка запуска: без ffmpeg
+// кружки/гифки живут превью-кадром.
+func parseFFmpegPath(env Getenv) string {
+	if raw := strings.TrimSpace(lookupOrEmpty(env, "FFMPEG_PATH")); raw != "" {
+		if executableFile(raw) {
+			return raw
+		}
+		return ""
+	}
+	if found := lookPathIn(lookupOrEmpty(env, "PATH"), "ffmpeg"); found != "" {
+		return found
+	}
+	if home := strings.TrimSpace(lookupOrEmpty(env, "HOME")); home != "" {
+		candidate := filepath.Join(home, ".local", "bin", "ffmpeg")
+		if executableFile(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// lookPathIn — поиск исполняемого файла в каталогах PATH из окружения процесса
+// (exec.LookPath читал бы реальный os.Getenv, а конфиг должен быть проверяем
+// с подменённым окружением).
+func lookPathIn(pathEnv, name string) string {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if executableFile(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// executableFile — обычный файл с битом исполнения.
+func executableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
 
 // parseMetricsPort читает порт HTTP-метрик (METRICS_PORT, этап 31): не задан
 // или пуст — сервер выключен (0, не ошибка); иное — целое 1..65535, любые

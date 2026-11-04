@@ -171,8 +171,25 @@ type telegramVoice struct {
 }
 
 type telegramVideoNote struct {
-	FileID   string `json:"file_id"`
-	Duration int    `json:"duration"`
+	FileID    string         `json:"file_id"`
+	Duration  int            `json:"duration"`
+	Thumbnail *telegramThumb `json:"thumbnail"`
+	Thumb     *telegramThumb `json:"thumb"` // устаревшее имя поля (Bot API < 6.6)
+}
+
+// previewFileID — превью кружка для модели (этап 35): нет ffmpeg — кадр
+// раскадровки не сделать, и хотя бы обложка кружка должна дойти.
+func (v *telegramVideoNote) previewFileID() string {
+	if v == nil {
+		return ""
+	}
+	if v.Thumbnail != nil && v.Thumbnail.FileID != "" {
+		return v.Thumbnail.FileID
+	}
+	if v.Thumb != nil {
+		return v.Thumb.FileID
+	}
+	return ""
 }
 
 // telegramPhotoSize — один размер из массива photo (Telegram отдаёт по возрастанию).

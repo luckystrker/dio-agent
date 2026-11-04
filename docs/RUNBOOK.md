@@ -310,6 +310,52 @@ curl -s 127.0.0.1:9100/stats | jq '.model, .memory_tools'
 `/metrics` — те же значения в Prometheus text exposition (`dio_*`); HELP не
 пишется, TYPE — да. Внешний агент и client_golang не нужны: scrape
 настраивается на стороне мониторинга, если он появится.
+### Раскадровка кружков и гифок (этап 35)
+
+Гифка (`animation`) и кружок (`video_note`) — это видео: персонаж смотрит их
+раскадровкой из 4–6 кадров, чтобы видеть движение, а не один кадр. Режет
+внешний `ffmpeg`; звук кружка не обрабатывается (голосовые не слушаются).
+
+Поставить `ffmpeg` (любой вариант):
+
+```bash
+# вариант А — из репозитория
+sudo apt update && sudo apt install -y ffmpeg
+
+# вариант Б — статическая сборка без зависимостей, в домашний каталог
+mkdir -p ~/.local/bin
+curl -fsSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
+  -o /tmp/ffmpeg.tar.xz
+tar -C /tmp -xf /tmp/ffmpeg.tar.xz
+cp /tmp/ffmpeg-*-static/ffmpeg ~/.local/bin/ffmpeg
+chmod +x ~/.local/bin/ffmpeg
+```
+
+Проверить и перезапустить службу:
+
+```bash
+ffmpeg -version | head -1
+# явный путь, если бинарник лежит не в PATH и не в ~/.local/bin:
+# echo 'FFMPEG_PATH=/opt/ffmpeg/ffmpeg' | sudo tee -a /opt/dio-agent/.env
+sudo systemctl restart dio-agent
+journalctl -u dio-agent --since "2 minutes ago" | grep раскадровка
+```
+
+В логе при старте — одна из двух строк:
+
+- `раскадровка: ffmpeg /usr/bin/ffmpeg (ffmpeg version …)` — работает;
+- `раскадровка выключена — нет ffmpeg, кружки/гифки по превью` — откат:
+  гифка идёт превью-кадром, кружок — своим thumbnail (если Telegram его дал).
+  Это не ошибка: всё остальное работает.
+
+Потолки: видео до 20 МиБ (предел Bot API `getFile`) и до 2 минут; ffmpeg —
+таймаут 15 с. Больше/дольше — превью-кадр. Кадры (`JPEG`, ≤512 px) идут
+модели обычными картинками: в тексте события видно
+`[гифка, раскадровка 5 кадров]` или
+`[кружок, 0:15, раскадровка 5 кадров — звук не слышишь]`. Общий потолок
+картинок хода — 6: явные фото/стикеры пачки берут не больше трёх, остаток
+делят раскадровки.
+
 ### Объединение сущностей (этап 32)
 
 Фоновая консолидация может предложить склейку «A = B» (`entity_merges` в

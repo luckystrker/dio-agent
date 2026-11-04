@@ -170,6 +170,12 @@ type Runner struct {
 	Now func() time.Time
 	// Photos — скачивание фото Telegram (vision §6.1); nil — модель видит текст.
 	Photos PhotoFetcher
+	// Videos — скачивание видео (гифка/кружок) для раскадровки (этап 35);
+	// nil — видео идёт превью-кадром.
+	Videos VideoFetcher
+	// Storyboard — внешний ffmpeg-каттер кадров (этап 35); nil — раскадровка
+	// выключена (нет ffmpeg), остаётся превью-кадр.
+	Storyboard StoryboardExtractor
 	// Typing — «печатает…» (§13.3); nil — не показывать.
 	Typing *TypingPulse
 
@@ -290,17 +296,29 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	}
 	// Панель состояния — первая часть финального пользовательского сообщения,
 	// перед пачкой (решение 2026-11-02): динамика не в system.
-	userText = composeUserText(bctx.StatePanel, userText)
+	plainUserText := composeUserText(bctx.StatePanel, userText)
 
-	// Картинки пачки (vision §6.1, этап 25): фото, статичные стикеры, превью
-	// анимированных стикеров и кадр гифки — до вызова модели; ошибки — текст.
-	images := CollectImages(ctx, in.Batch, r.Photos, telegram.MaxImagesPerTurn, func(format string, args ...any) {
+	// Картинки пачки (vision §6.1, этап 25) и раскадровка гифок/кружков
+	// (этап 35): фото, статичные стикеры, превью анимированных стикеров,
+	// кадры видео — до вызова модели; ошибки — откат на текст/превью.
+	visuals := CollectVisuals(ctx, in.Batch, r.Photos, r.Videos, r.Storyboard, telegram.MaxImagesPerTurn, func(format string, args ...any) {
 		r.logf("ход %d: "+format, append([]any{in.TurnID}, args...)...)
 	})
-	if len(images) > 0 {
-		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки)", in.TurnID, len(images))
+	images := visuals.Images
+	if len(visuals.StoryboardFrames) > 0 {
+		// Пометка «раскадровка N кадров» — в тексте события: модель должна
+		// знать, что видит кадры видео, а не отдельные картинки.
+		bctx.Batch = annotateStoryboards(bctx.Batch, in.Batch, visuals.StoryboardFrames)
+		userText = strings.Join(bctx.Batch, "\n")
+		if strings.TrimSpace(userText) == "" {
+			userText = "[сообщение без текста]"
+		}
 	}
-	result, repairs, llmCalls, reasoning, err := r.generate(ctx, in, bctx, userText, operation, images)
+	userText = composeUserText(bctx.StatePanel, userText)
+	if len(images) > 0 {
+		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки/раскадровка)", in.TurnID, len(images))
+	}
+	result, repairs, llmCalls, reasoning, err := r.generate(ctx, in, bctx, userText, plainUserText, operation, images)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
 	if errors.As(err, &invalidErr) {
@@ -395,7 +413,7 @@ type turnReasoning struct {
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток, число модельных вызовов и reasoning попыток.
-func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, operation string, images []Photo) (TurnResult, int, int, turnReasoning, error) {
+func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, fallbackText, operation string, images []Photo) (TurnResult, int, int, turnReasoning, error) {
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
@@ -496,11 +514,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// Honest fallback (25.1): провайдер не принял картинку (например,
 		// image/webp) — повтор без картинок, стикеры/гифки остаются текстом.
 		// Молча терять ответ нельзя, поэтому причина — в лог.
-		r.logf("ход %d: провайдер не принял картинку (%v) — повтор без картинок, стикеры/гифки остаются текстом", in.TurnID, err)
+		r.logf("ход %d: провайдер не принял картинку (%v) — повтор без картинок, стикеры/гифки/раскадровка остаются текстом", in.TurnID, err)
 		if a, err = newAgent(); err != nil {
 			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
 		}
-		reply, err = a.Ask(ctx, userText)
+		// Без картинок пометка раскадровки была бы ложью — берём текст до неё.
+		reply, err = a.Ask(ctx, fallbackText)
 	}
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err

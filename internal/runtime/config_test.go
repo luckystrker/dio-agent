@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -483,4 +485,98 @@ func TestLoadConfigMemoryPrefetch(t *testing.T) {
 	if !cfg.Model.MemoryPrefetch {
 		t.Fatalf("пустое MODEL_MEMORY_PREFETCH должно давать true")
 	}
+}
+
+// TestLoadConfigFFmpegPath — этап 35: FFMPEG_PATH явный, иначе поиск в PATH,
+// затем $HOME/.local/bin/ffmpeg. Несуществующий файл — раскадровка выключена
+// (пусто), а не ошибка запуска: кружки/гифки живут превью-кадром.
+func TestLoadConfigFFmpegPath(t *testing.T) {
+	makeExec := func(t *testing.T, dir, name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("файл: %v", err)
+		}
+		return path
+	}
+
+	t.Run("явный путь", func(t *testing.T) {
+		path := makeExec(t, t.TempDir(), "ffmpeg")
+		cfg, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL": "x",
+			"FFMPEG_PATH":  path,
+			"PATH":         "/nowhere",
+		}))
+		if err != nil {
+			t.Fatalf("конфиг: %v", err)
+		}
+		if cfg.FFmpegPath != path {
+			t.Fatalf("FFmpegPath = %q, хочу %q", cfg.FFmpegPath, path)
+		}
+	})
+
+	t.Run("явного пути нет — выключено", func(t *testing.T) {
+		cfg, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL": "x",
+			"FFMPEG_PATH":  filepath.Join(t.TempDir(), "нет"),
+			"PATH":         "/nowhere",
+			"HOME":         t.TempDir(),
+		}))
+		if err != nil {
+			t.Fatalf("конфиг: %v", err)
+		}
+		if cfg.FFmpegPath != "" {
+			t.Fatalf("FFmpegPath = %q, хочу пусто", cfg.FFmpegPath)
+		}
+	})
+
+	t.Run("поиск в PATH", func(t *testing.T) {
+		dir := t.TempDir()
+		path := makeExec(t, dir, "ffmpeg")
+		cfg, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL": "x",
+			"PATH":         "/nowhere:" + dir,
+			"HOME":         t.TempDir(),
+		}))
+		if err != nil {
+			t.Fatalf("конфиг: %v", err)
+		}
+		if cfg.FFmpegPath != path {
+			t.Fatalf("FFmpegPath = %q, хочу %q", cfg.FFmpegPath, path)
+		}
+	})
+
+	t.Run("домашний .local/bin", func(t *testing.T) {
+		home := t.TempDir()
+		bin := filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatalf("каталог: %v", err)
+		}
+		path := makeExec(t, bin, "ffmpeg")
+		cfg, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL": "x",
+			"PATH":         "/nowhere",
+			"HOME":         home,
+		}))
+		if err != nil {
+			t.Fatalf("конфиг: %v", err)
+		}
+		if cfg.FFmpegPath != path {
+			t.Fatalf("FFmpegPath = %q, хочу %q", cfg.FFmpegPath, path)
+		}
+	})
+
+	t.Run("нет нигде", func(t *testing.T) {
+		cfg, err := LoadConfig(envOf(map[string]string{
+			"DATABASE_URL": "x",
+			"PATH":         "/nowhere",
+			"HOME":         t.TempDir(),
+		}))
+		if err != nil {
+			t.Fatalf("конфиг: %v", err)
+		}
+		if cfg.FFmpegPath != "" {
+			t.Fatalf("FFmpegPath = %q, хочу пусто", cfg.FFmpegPath)
+		}
+	})
 }
