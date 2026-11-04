@@ -197,6 +197,24 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		out.GroupInvolved = involved
 	}
 
+	// --- дневной лимит инициатив личного чата (§14.3, этап 33.2): модель
+	// видит, что check_in/share уже не пройдут гейт фона. Сбой чтения не
+	// роняет ход — строки просто нет (как у карточки/вовлечённости).
+	initiativesExhausted := false
+	if chatType, cerr := ChatTypeOf(ctx, db, chatID); cerr != nil {
+		if a.Logger != nil {
+			a.Logger.Printf("контекст: тип чата для лимита инициатив не прочитан (строка панели пропущена): %v", cerr)
+		}
+	} else if chatType == "private" {
+		if usage, uerr := ReadInitiativeUsage(ctx, db, chatID); uerr != nil {
+			if a.Logger != nil {
+				a.Logger.Printf("контекст: лимит инициатив не прочитан (строка панели пропущена): %v", uerr)
+			}
+		} else {
+			initiativesExhausted = InitiativeDailyExhausted(usage)
+		}
+	}
+
 	// --- пачка: тексты с плейсхолдерами для пустых ---
 	out.Batch = batchTexts(batch)
 
@@ -244,6 +262,8 @@ func (a *Assembler) Assemble(ctx context.Context, db DBTX, persona Persona, scop
 		SaveSticker:   saveSticker,
 		MultiActor:    distinctActors(batch) > 1,
 		GroupInvolved: out.GroupInvolved,
+		// Строка «инициатив больше нельзя» (§14.3, этап 33.2).
+		InitiativesExhausted: initiativesExhausted,
 		// Подсказка «память доступна инструментами» — ровно когда они будут
 		// выданы планом хода (21.3): история урезана или карточка неполна.
 		MemoryTools: memoryToolsAvailable(a.Memory != nil, a.MemoryPrefetch, out.HistoryTrimmed, out.MemoryCardFitted),

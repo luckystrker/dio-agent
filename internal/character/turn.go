@@ -657,6 +657,10 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 		r.logf("ход %d: намерение %s %q отклонено — тема-мусор (%s, §14.1)",
 			in.TurnID, rejected.Kind, rejected.Topic, rejected.Reason)
 	}
+	for _, limited := range out.Apply.LimitedIntentions {
+		r.logf("ход %d: лимит инициатив исчерпан — намерение не создано (%s %q, §14.3)",
+			in.TurnID, limited.Kind, limited.Topic)
+	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
 		len(out.Apply.IntentionIDs), len(out.Apply.OutboxIDs), out.Recovered)

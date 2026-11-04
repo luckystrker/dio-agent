@@ -61,6 +61,10 @@ type ApplyResult struct {
 	RejectedIntentions []RejectedIntention
 	// RaisedIntentions — задержки, поднятые runtime до пола вида (26.2).
 	RaisedIntentions []RaisedIntention
+	// LimitedIntentions — инициативные предложения, не созданные из-за
+	// исчерпанного дневного лимита чата (§14.3, этап 33.2): фон всё равно
+	// отменил бы их, поэтому runtime не плодит мёртвые строки.
+	LimitedIntentions []LimitedIntention
 }
 
 // RejectedIntention — отклонённое предложение намерения с мусорной темой.
@@ -76,6 +80,13 @@ type RaisedIntention struct {
 	Topic string
 	From  float64
 	To    float64
+}
+
+// LimitedIntention — инициативное намерение, не созданное из-за дневного
+// лимита чата (§14.3, этап 33.2).
+type LimitedIntention struct {
+	Kind  string
+	Topic string
 }
 
 // DuplicateIntention — отклонённое живым дублем предложение намерения.
@@ -261,7 +272,27 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 
 	// --- намерения (§14.1): предложения модели + defer → reply_later (§11.2) ---
+	// Дневной лимит инициатив чата (§14.3, этап 33.2): тот же расчёт, что гейт
+	// фона. Исчерпан — новые check_in/share/reply_later не создаём: фон отменил
+	// бы их, а живая база копила десятки мёртвых строк за сутки.
+	initiativeLimitReached := false
+	if chatType, cerr := ChatTypeOf(ctx, tx, opts.ChatID); cerr != nil {
+		return ApplyResult{}, cerr
+	} else if chatType == "private" {
+		usage, uerr := ReadInitiativeUsage(ctx, tx, opts.ChatID)
+		if uerr != nil {
+			return ApplyResult{}, uerr
+		}
+		initiativeLimitReached = InitiativeDailyExhausted(usage)
+	}
 	for _, proposal := range opts.Result.Intentions {
+		// Инициативный вид при исчерпанном лимите — не создаём (33.2).
+		if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
+			res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
+				Kind: proposal.Kind, Topic: proposal.Topic,
+			})
+			continue
+		}
 		// Тема-мусор (26.2) отклоняется до создания строки: «placeholder1»,
 		// «:)» — не отложенное действие, а мусор в поле. Ход живёт, как при
 		// дубле (§14.1).
@@ -302,37 +333,45 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		}
 	}
 	if opts.Result.Decision == DecisionDefer {
-		topic, err := deferTopic(ctx, tx, opts.TurnID)
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		// defer модельный: тот же runtime-пол вида reply_later (26.2).
-		flooredDefer, floored := floorIntentionDelay("reply_later", *opts.Result.DeferHours)
-		var raisedDefer *RaisedIntention
-		if floored {
-			raisedDefer = &RaisedIntention{Kind: "reply_later", Topic: topic,
-				From: *opts.Result.DeferHours, To: flooredDefer}
-		}
-		id, created, dup, err := createIntention(ctx, tx, intentionRow{
-			kind:          "reply_later",
-			chatID:        opts.ChatID,
-			scopeID:       opts.ScopeID,
-			topic:         topic,
-			reason:        "decision=defer: персонаж отложил ответ (§11.2)",
-			delayHours:    flooredDefer,
-			relatedTurnID: opts.TurnID,
-		})
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		if created {
-			res.IntentionIDs = append(res.IntentionIDs, id)
-			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
-			if raisedDefer != nil {
-				res.RaisedIntentions = append(res.RaisedIntentions, *raisedDefer)
+		if initiativeLimitReached {
+			// reply_later — инициатива по §14.3 (гейт фона считает его так же):
+			// при исчерпанном лимите не создаём и его.
+			res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
+				Kind: "reply_later", Topic: "отложенный ответ",
+			})
+		} else {
+			topic, err := deferTopic(ctx, tx, opts.TurnID)
+			if err != nil {
+				return ApplyResult{}, err
 			}
-		} else if dup != nil {
-			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
+			// defer модельный: тот же runtime-пол вида reply_later (26.2).
+			flooredDefer, floored := floorIntentionDelay("reply_later", *opts.Result.DeferHours)
+			var raisedDefer *RaisedIntention
+			if floored {
+				raisedDefer = &RaisedIntention{Kind: "reply_later", Topic: topic,
+					From: *opts.Result.DeferHours, To: flooredDefer}
+			}
+			id, created, dup, err := createIntention(ctx, tx, intentionRow{
+				kind:          "reply_later",
+				chatID:        opts.ChatID,
+				scopeID:       opts.ScopeID,
+				topic:         topic,
+				reason:        "decision=defer: персонаж отложил ответ (§11.2)",
+				delayHours:    flooredDefer,
+				relatedTurnID: opts.TurnID,
+			})
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			if created {
+				res.IntentionIDs = append(res.IntentionIDs, id)
+				deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+				if raisedDefer != nil {
+					res.RaisedIntentions = append(res.RaisedIntentions, *raisedDefer)
+				}
+			} else if dup != nil {
+				res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
+			}
 		}
 	}
 
