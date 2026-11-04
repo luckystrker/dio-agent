@@ -213,6 +213,7 @@ func lifeEventJSONSchema() map[string]any {
 // с непустым основанием, лишние поля и хвост после JSON — ошибка (как у
 // TurnResult, §11.2). Числа сжимаются до ходового лимита позже, при применении.
 func parseLifeEventProposal(raw []byte) (lifeEventProposal, error) {
+	raw = character.EscapeJSONControlChars(raw)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var p lifeEventProposal
@@ -785,8 +786,7 @@ func (s *Scheduler) runLifeEventModel(ctx context.Context, operation, system, us
 	}
 
 	// Один repair-retry (§11.3): тот же контекст, модели показана ошибка.
-	fixed, ferr := first.Ask(ctx, fmt.Sprintf(
-		"Твой последний ответ не прошёл валидацию: %v. Верни строго один JSON-объект по схеме LifeEventProposal, без текста вокруг.", perr))
+	fixed, ferr := first.Ask(ctx, character.RepairHint(perr, "LifeEventProposal"))
 	if ferr != nil {
 		return lifeEventProposal{}, counting.stats(), ferr
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
@@ -29,8 +30,9 @@ type queryer interface {
 // паритет констант TS).
 const (
 	// MaxProactivePerChatPerDay — не более 2 инициативных последовательностей
-	// на личный чат в сутки.
-	MaxProactivePerChatPerDay = 2
+	// на личный чат в сутки (общий расчёт этапа 33.2: панель и применение хода
+	// берут то же число).
+	MaxProactivePerChatPerDay = character.InitiativePerChatPerDay
 	// MinProactiveGap — не менее 4 часов между инициативами.
 	MinProactiveGap = 4 * time.Hour
 	// MaxExplorationsPerDay — дневной лимит exploration (§16).
@@ -45,18 +47,7 @@ const (
 	KindExplore    = "explore"
 )
 
-// initiativeKinds — виды, способные отправить сообщение вне активного ответа:
-// учитываются в проактивных лимитах, если отправляются (§14.3).
-func initiativeKinds() []string { return []string{KindReplyLater, KindCheckIn, KindShare} }
-
-func isInitiativeKind(kind string) bool {
-	for _, k := range initiativeKinds() {
-		if k == kind {
-			return true
-		}
-	}
-	return false
-}
+func isInitiativeKind(kind string) bool { return character.IsInitiativeKind(kind) }
 
 // Intention — строка intentions (поля, нужные исполнению; §14.1).
 type Intention struct {
@@ -72,13 +63,8 @@ type Intention struct {
 	CreatedAt     time.Time
 }
 
-// proactiveUsage — сколько инициативных последовательностей чата «в деле»
-// (доставки отправлены или ещё ждут отправки; отменённые/неудачные не в счёт)
-// и когда была последняя (§14.3).
-type proactiveUsage struct {
-	Today int
-	Last  *time.Time
-}
+// proactiveUsage — общий с панелью и применением расчёт лимита этапа 33.2.
+type proactiveUsage = character.InitiativeUsage
 
 // ProactiveAllowed — чистая политика §14.3: только личные чаты, не больше
 // двух в сутки, не чаще раза в 4 часа. Группы выключены (isPrivate=false
@@ -292,20 +278,7 @@ func (r *IntentionRepo) ResetRunning(ctx context.Context) (int, error) {
 // ChatType возвращает тип чата по его событиям; событий нет — пусто (намерение
 // в чат без истории не пишем: нечем проверить даже private).
 func (r *IntentionRepo) ChatType(ctx context.Context, chatID int64) (string, error) {
-	var ct *string
-	err := r.pool.QueryRow(ctx,
-		`SELECT chat_type FROM social_events WHERE chat_id = $1 ORDER BY id DESC LIMIT 1`,
-		chatID).Scan(&ct)
-	if err != nil {
-		if isNoRows(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("намерения: тип чата не читается: %w", err)
-	}
-	if ct == nil {
-		return "", nil
-	}
-	return *ct, nil
+	return character.ChatTypeOf(ctx, r.pool, chatID)
 }
 
 // ChatMoved — «не закрылась ли тема / не был ли уже дан ответ» (§14.1): в чате
@@ -358,26 +331,8 @@ func (r *IntentionRepo) DuplicatePending(ctx context.Context, id int64, kind, to
 	return dup, nil
 }
 
-// ProactiveUsage считает использованный проактивный лимит чата: исполненные
-// инициативные намерения, чей ход породил живые доставки (отправлены или ещё
-// ждут), за сегодня и время последней (§14.3).
+// ProactiveUsage считает использованный проактивный лимит чата (§14.3):
+// общий расчёт этапа 33.2 — то же, что видит панель и применение хода.
 func (r *IntentionRepo) ProactiveUsage(ctx context.Context, chatID int64) (proactiveUsage, error) {
-	var usage proactiveUsage
-	err := r.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE i.updated_at >= date_trunc('day', now())),
-		       max(i.updated_at)
-		FROM intentions i
-		WHERE i.kind = ANY($1)
-		  AND i.target_chat_id = $2
-		  AND i.status = 'completed'
-		  AND i.related_turn_id IS NOT NULL
-		  AND EXISTS (
-		    SELECT 1 FROM delivery_outbox d
-		    WHERE d.turn_id = i.related_turn_id
-		      AND d.status NOT IN ('cancelled', 'failed'))`,
-		initiativeKinds(), chatID).Scan(&usage.Today, &usage.Last)
-	if err != nil {
-		return proactiveUsage{}, fmt.Errorf("намерения: проактивный лимит не читается: %w", err)
-	}
-	return usage, nil
+	return character.ReadInitiativeUsage(ctx, r.pool, chatID)
 }

@@ -19,8 +19,11 @@ import (
 // (Telegram-фото обычно 50–300 КБ).
 const MaxPhotoBytes = 6 << 20 // 6 MiB
 
-// MaxImagesPerTurn — больше трёх фото в один ход не тянем: контекст и деньги.
-const MaxImagesPerTurn = 3
+// MaxImagesPerTurn — общий потолок картинок хода: контекст и деньги. Явные
+// фото/стикеры по-прежнему берут не больше трёх (maxNonVideoImages в
+// character), а остаток занимает раскадровка гифок/кружков (4–6 кадров,
+// этап 35) — иначе одно видео не передать.
+const MaxImagesPerTurn = 6
 
 // PhotoFileIDFromUpdate — file_id крупнейшего PhotoSize из raw_update
 // (по площади; Telegram отдаёт размеры по возрастанию). Пусто — фото нет.
@@ -144,8 +147,15 @@ func mimeForFilePath(filePath string) string {
 	}
 }
 
-// downloadFile качает файл по пути из getFile (файловый хост Bot API).
+// downloadFile качает файл по пути из getFile (файловый хост Bot API) с
+// потолком фото; видео использует downloadFileLimit со своим потолком.
 func (c *Client) downloadFile(ctx context.Context, filePath string) ([]byte, error) {
+	return c.downloadFileLimit(ctx, filePath, MaxPhotoBytes)
+}
+
+// downloadFileLimit — скачивание с явным потолком байт (LimitReader читает на
+// байт больше, чтобы вызывающий отличил «ровно потолок» от «больше»).
+func (c *Client) downloadFileLimit(ctx context.Context, filePath string, limit int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.fileBase+"/"+escapeFilePath(filePath), nil)
 	if err != nil {
 		return nil, err
@@ -158,7 +168,7 @@ func (c *Client) downloadFile(ctx context.Context, filePath string) ([]byte, err
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("media: статус %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, MaxPhotoBytes+1))
+	return io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 }
 
 // escapeFilePath экранирует сегменты file_path, сохраняя слэши: Telegram

@@ -12,6 +12,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/background"
 	"github.com/luckystrker/dio-agent/internal/character"
+	"github.com/luckystrker/dio-agent/internal/media"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/metrics"
 	"github.com/luckystrker/dio-agent/internal/runtime"
@@ -47,6 +48,12 @@ type Options struct {
 	// PhotoFetcher — скачивание фото Telegram (vision §6.1); nil — без фото.
 	// Приложение строит само, если включён реальный Telegram.
 	PhotoFetcher character.PhotoFetcher
+	// VideoFetcher — скачивание видео Telegram (раскадровка §6.1, этап 35);
+	// nil — приложение строит из Config.Telegram, если включён реальный Telegram.
+	VideoFetcher character.VideoFetcher
+	// Storyboard — ffmpeg-раскадровка (этап 35); nil — из Config.FFmpegPath,
+	// пустой путь — раскадровка выключена (превью-кадр).
+	Storyboard character.StoryboardExtractor
 
 	// PersonaFile / PromptTemplate — пути к файлам §7.1 (по умолчанию
 	// config/ от рабочей директории; тесты указывают на корень репозитория —
@@ -282,8 +289,28 @@ func (a *App) Start(ctx context.Context) error {
 		runner.Photos = a.opts.PhotoFetcher
 	} else if tg := a.opts.Config.Telegram; tg != nil && !tg.DryRun && tg.BotToken != "" {
 		// Vision §6.1: реальный Telegram — фото качаются; dry-run — ход по тексту.
-		runner.Photos = telegram.NewMediaFetcher(tg.BotToken, tg.APIBase)
+		fetcher := telegram.NewMediaFetcher(tg.BotToken, tg.APIBase)
+		runner.Photos = fetcher
+		// Раскадровка гифок/кружков (этап 35): то же скачивание видео.
+		runner.Videos = fetcher
 	}
+	if a.opts.VideoFetcher != nil {
+		runner.Videos = a.opts.VideoFetcher
+	}
+	// Раскадровка (этап 35): внешний ffmpeg — необязательный инструмент.
+	// Нет пути — выключена, видео идёт превью-кадром; строка в логе при старте
+	// говорит оператору, что именно работает.
+	storyboard := a.opts.Storyboard
+	if storyboard == nil {
+		if path := a.opts.Config.FFmpegPath; path != "" {
+			extractor := media.NewExtractor(path)
+			storyboard = extractor
+			a.logger.Printf("раскадровка: ffmpeg %s (%s)", path, extractor.Version(ctx))
+		} else {
+			a.logger.Printf("раскадровка выключена — нет ffmpeg, кружки/гифки по превью")
+		}
+	}
+	runner.Storyboard = storyboard
 	var pulse *character.TypingPulse
 	if api != nil {
 		pulse = character.NewTypingPulse(api, 4*time.Second) // §13.3: ~раз в 4 с

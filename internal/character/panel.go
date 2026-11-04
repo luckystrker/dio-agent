@@ -105,6 +105,9 @@ type statePanelData struct {
 	// GroupInvolved — чат вовлечён (30.2): бот уже высказался, сейчас можно
 	// отвечать или молчать без обязательства.
 	GroupInvolved bool
+	// InitiativesExhausted — дневной лимит инициатив личного чата исчерпан
+	// (§14.3, этап 33.2): модель видит, что check_in/share планировать нельзя.
+	InitiativesExhausted bool
 }
 
 // sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
@@ -166,6 +169,9 @@ func buildStatePanel(d statePanelData) string {
 	}
 	if d.GroupInvolved {
 		lines = append(lines, "ты в разговоре группы — можешь ответить, поставить реакцию или промолчать")
+	}
+	if d.InitiativesExhausted {
+		lines = append(lines, "на сегодня инициатив больше нельзя — не планируй check_in/share")
 	}
 	lines = append(lines, statePanelClose)
 	return strings.Join(lines, "\n")

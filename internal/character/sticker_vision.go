@@ -1,7 +1,8 @@
 // Картинки пачки для модели (этап 25.1–25.2): фото, статичные стикеры, превью
-// анимированных/видео-стикеров и кадр гифки. Всё это — одна часть Ask
-// (events.ImageInput); смысл вложения модель знает из текста события
-// («[стикер 😂]», «[гифка]», «[голосовое, 0:42]»).
+// анимированных/видео-стикеров, кадр гифки и превью кружка (раскадровка видео —
+// storyboard.go, этап 35). Всё это — части Ask (events.ImageInput); смысл
+// вложения модель знает из текста события («[стикер 😂]», «[гифка]»,
+// «[кружок, 0:15]», «[голосовое, 0:42]»).
 package character
 
 import (
@@ -24,7 +25,11 @@ func imageFileIDFromBatchEvent(ev BatchEvent) string {
 	if sticker := telegram.StickerFromUpdate(ev.Raw); sticker != nil {
 		return sticker.ImageFileID()
 	}
-	return telegram.AnimationThumbnailFileID(ev.Raw)
+	// Гифка и кружок: без раскадровки модели идёт превью-кадр (этап 35).
+	if video := telegram.VideoFromUpdate(ev.Raw); video != nil {
+		return video.ThumbnailFileID
+	}
+	return ""
 }
 
 // CollectImages собирает до max картинок пачки: фото, стикеры, превью гифок.
