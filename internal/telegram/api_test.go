@@ -73,8 +73,21 @@ func TestClientGetUpdates(t *testing.T) {
 	if gotBody["offset"].(float64) != 10 || gotBody["timeout"].(float64) != 1 {
 		t.Fatalf("payload: %v", gotBody)
 	}
-	if allowed, ok := gotBody["allowed_updates"].([]any); !ok || len(allowed) != 2 {
+	allowed, ok := gotBody["allowed_updates"].([]any)
+	if !ok {
 		t.Fatalf("allowed_updates: %v", gotBody["allowed_updates"])
+	}
+	if len(allowed) != 3 {
+		t.Fatalf("allowed_updates: %v (хочу message, edited_message, message_reaction)", allowed)
+	}
+	foundReaction := false
+	for _, item := range allowed {
+		if item == "message_reaction" {
+			foundReaction = true
+		}
+	}
+	if !foundReaction {
+		t.Fatalf("allowed_updates без message_reaction: %v", allowed)
 	}
 }
 
