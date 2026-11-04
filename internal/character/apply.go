@@ -122,6 +122,19 @@ type ApplyOptions struct {
 	// Ошибка, оборачивающая ErrApplyAborted, откатывает транзакцию и возвращает
 	// Applied=false (применение уже сделано другим победителем).
 	Extra func(ctx context.Context, tx pgx.Tx) error
+	// Image — скачанная картинка хода (36.2): ложится в outbox_images в этой
+	// же транзакции, пузырь kind=photo — отдельным сообщением после текста.
+	// nil — картинки нет.
+	Image *OutboxImage
+}
+
+// OutboxImage — байты картинки для доставки sendPhoto (этап 36.2): скачаны
+// fetch-слоем §15 до транзакции применения и хранятся рядом со строкой outbox,
+// поэтому retry и рестарт не требуют повторного скачивания.
+type OutboxImage struct {
+	SourceURL   string
+	ContentType string
+	Bytes       []byte
 }
 
 // ApplyTurn применяет валидированный результат в одной транзакции.
@@ -166,7 +179,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	// --- доставка (§11.2, §13.1): сообщения, реакция, стикер ---
 	delivery := &DeliveryQueued{TurnID: opts.TurnID, ChatID: opts.ChatID}
 	position := 0
-	enqueue := func(payload map[string]any, queued QueuedDelivery) error {
+	enqueue := func(payload map[string]any, queued *QueuedDelivery) error {
 		id, err := enqueueOutbox(ctx, tx, opts.TurnID, opts.ChatID, position, payload)
 		if err != nil {
 			return err
@@ -174,7 +187,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		queued.ID = id
 		queued.Position = position
 		res.OutboxIDs = append(res.OutboxIDs, id)
-		delivery.Outbox = append(delivery.Outbox, queued)
+		delivery.Outbox = append(delivery.Outbox, *queued)
 		position++
 		return nil
 	}
@@ -182,7 +195,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	case DecisionAnswer:
 		for _, text := range opts.Result.Messages {
 			if err := enqueue(map[string]any{"kind": "message", "text": text},
-				QueuedDelivery{Kind: "message", Text: text}); err != nil {
+				&QueuedDelivery{Kind: "message", Text: text}); err != nil {
 				return ApplyResult{}, err
 			}
 		}
@@ -199,7 +212,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 				"kind":              "reaction",
 				"reaction":          opts.Result.Reaction,
 				"target_message_id": target,
-			}, QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
+			}, &QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
 				return ApplyResult{}, err
 			}
 		}
@@ -216,7 +229,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			"kind":              "reaction",
 			"reaction":          opts.Result.Reaction,
 			"target_message_id": target,
-		}, QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
+		}, &QueuedDelivery{Kind: "reaction", Reaction: opts.Result.Reaction}); err != nil {
 			return ApplyResult{}, err
 		}
 	}
@@ -242,7 +255,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			"kind":    "sticker",
 			"file_id": sticker.FileID,
 			"emoji":   sticker.Emoji,
-		}, QueuedDelivery{Kind: "sticker", FileID: sticker.FileID}); err != nil {
+		}, &QueuedDelivery{Kind: "sticker", FileID: sticker.FileID}); err != nil {
 			return ApplyResult{}, err
 		}
 	}
@@ -258,6 +271,23 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		}
 		res.SavedStickerID = savedID
 		res.DroppedStickerSave = dropped
+	}
+
+	// --- картинка (36.2): отдельный пузырь после сообщений хода; байты — в
+	// outbox_images той же транзакцией, чтобы доставка не зависела от сети.
+	if opts.Image != nil && len(opts.Image.Bytes) > 0 {
+		photo := &QueuedDelivery{Kind: "photo"}
+		if err := enqueue(map[string]any{
+			"kind":       "photo",
+			"source_url": opts.Image.SourceURL,
+		}, photo); err != nil {
+			return ApplyResult{}, err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO outbox_images (outbox_id, content_type, bytes) VALUES ($1, $2, $3)`,
+			photo.ID, opts.Image.ContentType, opts.Image.Bytes); err != nil {
+			return ApplyResult{}, fmt.Errorf("применение: байты картинки не сохранены: %w", err)
+		}
 	}
 
 	// --- память (§10.1): модель предлагает, runtime назначает источники и разрешение ---

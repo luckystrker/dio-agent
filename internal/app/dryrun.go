@@ -35,6 +35,11 @@ func (d *dryRunAPI) SendSticker(ctx context.Context, chatID int64, fileID string
 	return 0, nil
 }
 
+func (d *dryRunAPI) SendPhoto(ctx context.Context, chatID int64, filename, contentType string, data []byte) (int64, error) {
+	d.logger.Printf("dry-run: sendPhoto chat=%d: %s (%s, %d байт)", chatID, filename, contentType, len(data))
+	return 0, nil
+}
+
 func (d *dryRunAPI) SendChatAction(ctx context.Context, chatID int64, action string) error {
 	return nil
 }

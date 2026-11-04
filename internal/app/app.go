@@ -249,19 +249,40 @@ func (a *App) Start(ctx context.Context) error {
 	// ApplyTurn и двойной расход бюджета параллельно невозможны (M1).
 	cognition := runtime.NewCognitionLock()
 
+	// --- веб (этап 36): один тулсет на приложение — разговорный ход (§15,
+	// 36.1) и explore фона используют тот же fetch-слой §15 и те же лимиты.
+	var webset *web.Toolset
+	if w := a.opts.Config.Web; w != nil && w.Provider != "off" {
+		fetchBytes := w.FetchMaxBytes
+		if fetchBytes <= 0 {
+			fetchBytes = web.DefaultMaxBytes
+		}
+		ws, werr := web.NewToolset(
+			web.NewClient(fetchBytes, time.Duration(w.FetchTimeoutMs)*time.Millisecond),
+			w.Provider, w.APIKey, w.MaxResults)
+		if werr != nil {
+			return a.stopFailed(werr)
+		}
+		webset = ws
+		a.logger.Printf("веб-инструменты включены: поиск %s (лимиты %d/%d на задачу, разговор: %d поисков/сутки, §15/§16)",
+			w.Provider, w.MaxSearchPerTask, w.MaxFetchPerTask, character.WebSearchDailyLimit)
+	}
+
 	// --- когнитивный worker §5.2 ---
 	assembler := &character.Assembler{
-		Mood:            character.NewMoodRepo(),
-		Stickers:        character.NewStickerRepo(),
-		Relationships:   character.NewRelationshipRepo(),
-		PromptTemplate:  template,
-		HistoryMessages: historyMessages(a.opts.Config),
-		HistoryMaxChars: historyMaxChars(a.opts.Config),
-		Timezone:        a.opts.Config.Timezone,
-		Now:             a.opts.Now,
-		Memory:          toolset,
-		MemoryPrefetch:  memoryPrefetch(a.opts.Config),
-		Logger:          a.logger,
+		Mood:                character.NewMoodRepo(),
+		Stickers:            character.NewStickerRepo(),
+		Relationships:       character.NewRelationshipRepo(),
+		PromptTemplate:      template,
+		HistoryMessages:     historyMessages(a.opts.Config),
+		HistoryMaxChars:     historyMaxChars(a.opts.Config),
+		Timezone:            a.opts.Config.Timezone,
+		Now:                 a.opts.Now,
+		Memory:              toolset,
+		MemoryPrefetch:      memoryPrefetch(a.opts.Config),
+		Logger:              a.logger,
+		Web:                 webset,
+		WebDailySearchLimit: character.WebSearchDailyLimit,
 	}
 	runner := &character.Runner{
 		Pool:            pool,
@@ -277,6 +298,12 @@ func (a *App) Start(ctx context.Context) error {
 		Timezone:        a.opts.Config.Timezone,
 		Now:             a.opts.Now,
 		Logger:          a.logger,
+		Web:             webset,
+	}
+	if webset != nil {
+		// Картинки хода (36.2) — тот же fetch-слой: SSRF-проверки и потолок
+		// байт, модель приносит только URL из выдачи.
+		runner.ImageFetcher = webset.Client()
 	}
 	a.runner = runner
 
@@ -392,23 +419,6 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	// --- фон §14 ---
-	var webset *web.Toolset
-	if w := a.opts.Config.Web; w != nil && w.Provider != "off" {
-		fetchBytes := w.FetchMaxBytes
-		if fetchBytes <= 0 {
-			fetchBytes = web.DefaultMaxBytes
-		}
-		ws, werr := web.NewToolset(
-			web.NewClient(fetchBytes, time.Duration(w.FetchTimeoutMs)*time.Millisecond),
-			w.Provider, w.APIKey, w.MaxResults)
-		if werr != nil {
-			return a.stopFailed(werr)
-		}
-		webset = ws
-		a.logger.Printf("веб-инструменты включены: поиск %s (лимиты %d/%d на задачу, §15/§16)",
-			w.Provider, w.MaxSearchPerTask, w.MaxFetchPerTask)
-	}
-
 	sched, err := background.New(background.Deps{
 		Pool:            pool,
 		Journal:         a.journal,

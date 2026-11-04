@@ -33,10 +33,12 @@ import (
 	"github.com/luckystrker/ago/events"
 	agomiddleware "github.com/luckystrker/ago/middleware"
 	"github.com/luckystrker/ago/response"
+	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
+	"github.com/luckystrker/dio-agent/internal/web"
 )
 
 // sessionForChat — стабильный идентификатор разговора для провайдера: FNV-1a
@@ -178,6 +180,12 @@ type Runner struct {
 	Storyboard StoryboardExtractor
 	// Typing — «печатает…» (§13.3); nil — не показывать.
 	Typing *TypingPulse
+	// Web — веб-инструменты разговорного хода (36.1); nil/выключен — ход без
+	// веба. Тот же тулсет, что у explore фона: fetch-слой §15.
+	Web *web.Toolset
+	// ImageFetcher — скачивание картинки хода через fetch-слой §15 (36.2);
+	// nil — картинки не отправляются (image_url мягко обнуляется).
+	ImageFetcher ImageFetcher
 
 	Logger *log.Logger
 }
@@ -262,7 +270,10 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		// без нового LLM (§12.2, требование 9.7).
 		r.logf("ход %d: восстановление — применяю сохранённый результат без новой генерации", in.TurnID)
 		out.Recovered = true
-		return r.apply(ctx, in, *state.Output, out)
+		// Картинка восстановления: проверка «URL из выдачи» уже была сделана
+		// при генерации (model_output пишется после неё) — allowed nil.
+		image := r.resolveImage(ctx, in.TurnID, state.Output.ImageURL, nil)
+		return r.apply(ctx, in, *state.Output, image, out)
 	}
 
 	// --- Фаза 1: модель и turn_started ---
@@ -318,7 +329,10 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	if len(images) > 0 {
 		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки/раскадровка)", in.TurnID, len(images))
 	}
-	result, repairs, llmCalls, reasoning, err := r.generate(ctx, in, bctx, userText, plainUserText, operation, images)
+	// Адреса из выдачи веб-инструментов этого хода (36.2): image_url
+	// принимается только из них.
+	webURLs := newWebURLCollector()
+	result, repairs, llmCalls, reasoning, err := r.generate(ctx, in, bctx, userText, plainUserText, operation, images, webURLs)
 	out.LLMCalls = llmCalls
 	var invalidErr *invalidResultError
 	if errors.As(err, &invalidErr) {
@@ -346,8 +360,12 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		return out, fmt.Errorf("ход %d: model_output не записан: %w", in.TurnID, err)
 	}
 
+	// Картинка хода (36.2): проверка выдачи, скачивание через fetch-слой §15.
+	// Не прошло — мягко обнуляется с логом, ход живёт.
+	image := r.resolveImage(ctx, in.TurnID, result.ImageURL, webURLs.all())
+
 	// --- Фаза 4: применение одной транзакцией ---
-	return r.apply(ctx, in, result, out)
+	return r.apply(ctx, in, result, image, out)
 }
 
 // invalidResultError — ответ модели не прошёл валидацию §11.2 ни с первой,
@@ -413,13 +431,16 @@ type turnReasoning struct {
 // generate запускает ago-агента и добивается валидированного TurnResult
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток, число модельных вызовов и reasoning попыток.
-func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, fallbackText, operation string, images []Photo) (TurnResult, int, int, turnReasoning, error) {
+func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, fallbackText, operation string, images []Photo, webURLs *webURLCollector) (TurnResult, int, int, turnReasoning, error) {
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
 	// получает обычный вызов и может ответить финальным TurnResult.
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
 	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
+	// Веб (36.1): харнесс решает по конфигурации и суточному остатку,
+	// посчитанным при сборке контекста; модель решает, идти ли в поиск.
+	webOn := bctx.WebTools && r.Web != nil && r.Web.Enabled()
 	r.logMemoryTurn(in, bctx, plan)
 	// План инструментов памяти — durable событие журнала (этап 31.2):
 	// метрики §20 читают причины из базы, а не парсят логи. Сбой записи не
@@ -430,6 +451,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		Reason:      memoryToolsReason(r.MemoryPrefetch, bctx),
 		CardEntries: bctx.MemoryCardEntries,
 		CardFitted:  bctx.MemoryCardFitted,
+		WebEnabled:  webOn,
 	}); err != nil {
 		r.logf("ход %d: turn_plan не записан: %v", in.TurnID, err)
 	}
@@ -439,12 +461,17 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// в карточке панели (решение 2026-11-02).
 		cfg.ForcedTool = plan.ForcedTool
 	}
+	if webOn {
+		r.logf("ход %d: веб — инструменты вкл (остаток поисков на ход: %d, суточный лимит %d)",
+			in.TurnID, bctx.WebSearchesLeft, WebSearchDailyLimit)
+	}
 
 	// Middleware: бюджет §16 — внешний слой (резерв до всего остального);
 	// журналирование tool_call/tool_result — наружу лимита, чтобы отклонённые
 	// лимитом вызовы тоже были зафиксированы; typing §13.3 — на весь ход.
 	budgetMW := NewBudgetMiddleware(r.Budget, operation, r.DailyCallsLimit, r.Logger)
-	toolMW := NewToolLimitMiddleware(plan.Limit, r.Logger)
+	toolLimit := conversationToolLimit(plan.Enabled, plan.Limit, webOn, r.ToolCallsLimit)
+	toolMW := NewToolLimitMiddleware(toolLimit, r.Logger)
 	// Исчерпание лимита отключает инструменты на конфиге хода: следующий
 	// модельный вызов идёт без tools и без forced tool_choice (bug 2026-11-02).
 	toolMW.SetOnExhausted(cfg.DisableTools)
@@ -455,14 +482,45 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// repair): складывается отдельно от истории, только для журнала.
 	reasoning := NewReasoningCapture()
 	mws = append(mws, func() agomiddleware.Middleware { return reasoning })
-	if plan.Enabled {
+	if plan.Enabled || webOn {
 		mws = append(mws,
 			func() agomiddleware.Middleware { return &toolJournalMW{runner: r, turnID: in.TurnID} },
 			func() agomiddleware.Middleware { return toolMW },
 		)
 	}
+	if webOn {
+		// Бюджеты веба на ход (§15/§16): 2 поиска + 2 страницы; адреса выдачи
+		// собираются для проверки image_url (36.2); суточный счётчик — в базе.
+		searchName := r.Web.SearchToolName()
+		webBudget, err := web.BudgetMiddleware(searchName, WebSearchesPerTurn, WebFetchesPerTurn)
+		if err != nil {
+			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
+		}
+		mws = append(mws, webBudget...)
+		mws = append(mws,
+			func() agomiddleware.Middleware {
+				return &webUsageMW{name: searchName, db: r.Pool, remaining: bctx.WebSearchesLeft, logger: r.Logger}
+			},
+			func() agomiddleware.Middleware {
+				return &webResultMW{collector: webURLs, searchName: searchName}
+			},
+		)
+	}
 	if r.Typing != nil {
 		mws = append(mws, func() agomiddleware.Middleware { return NewTypingMiddleware(r.Typing, in.ChatID) })
+	}
+
+	// Инструменты хода: память (если выдана планом) и веб (если включён).
+	tools := make([]agotools.Tool, 0, memoryToolsLimit+WebSearchesPerTurn+WebFetchesPerTurn)
+	if plan.Enabled {
+		tools = append(tools, r.Memory.Tools()...)
+	}
+	if webOn {
+		webTools, werr := r.Web.Tools()
+		if werr != nil {
+			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, fmt.Errorf("ход %d: веб-инструменты не собраны: %w", in.TurnID, werr)
+		}
+		tools = append(tools, webTools...)
 	}
 
 	// newAgent — сборка запуска агента: откат «провайдер не принял картинку»
@@ -478,8 +536,8 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 				response.WithRawName("TurnResult"),
 				response.WithRawDescription("Цельный результат хода: решение, сообщения, кандидаты памяти, дельты состояния."))),
 		}
-		if plan.Enabled {
-			opts = append(opts, agent.WithTools(r.Memory.Tools()...))
+		if len(tools) > 0 {
+			opts = append(opts, agent.WithTools(tools...))
 		}
 		// История чата (§11.1 п.5): реплики прошлых ходов — настоящими user/
 		// assistant сообщениями до пачки, append-only (кэш префикса провайдера
@@ -607,7 +665,7 @@ func (m *toolJournalMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *eve
 }
 
 // apply — фаза 4: применение валидированного результата (одна транзакция).
-func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Outcome) (Outcome, error) {
+func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *OutboxImage, out Outcome) (Outcome, error) {
 	applyRes, err := ApplyTurn(ctx, r.Pool, ApplyOptions{
 		TurnID:  in.TurnID,
 		ChatID:  in.ChatID,
@@ -619,7 +677,9 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, out Out
 		Journal:         r.Journal,
 		// Разговорный ход сбрасывает скуку (этап 23.1).
 		BoredomReset: true,
-		Now:          r.now(),
+		// Картинка хода (36.2) — отдельным пузырём после сообщений.
+		Image: image,
+		Now:   r.now(),
 	})
 	if err != nil {
 		if errors.Is(err, runtime.ErrHistoryConflict) {

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -117,12 +118,16 @@ type TurnResult struct {
 	// runtime: неизвестная метка мягко обнуляется (этап 25.4).
 	Sticker string `json:"sticker,omitempty"`
 	// SaveSticker — сохранить стикер из текущей пачки (этап 25.5).
-	SaveSticker       *SaveStickerProposal `json:"save_sticker,omitempty"`
-	Intentions        []IntentionProposal  `json:"intentions,omitempty"`
-	DeferHours        *float64             `json:"defer_hours,omitempty"`
-	MoodDelta         *MoodDelta           `json:"mood_delta,omitempty"`
-	RelationshipDelta *RelationshipDelta   `json:"relationship_delta,omitempty"`
-	Reason            string               `json:"reason,omitempty"`
+	SaveSticker *SaveStickerProposal `json:"save_sticker,omitempty"`
+	// ImageURL — картинка хода (этап 36.2): полный http(s)-адрес, встреченный
+	// в результатах веб-инструментов ЭТОГО хода. Runtime проверяет и скачивает
+	// сам; картинка уходит отдельным пузырём после сообщений.
+	ImageURL          string              `json:"image_url,omitempty"`
+	Intentions        []IntentionProposal `json:"intentions,omitempty"`
+	DeferHours        *float64            `json:"defer_hours,omitempty"`
+	MoodDelta         *MoodDelta          `json:"mood_delta,omitempty"`
+	RelationshipDelta *RelationshipDelta  `json:"relationship_delta,omitempty"`
+	Reason            string              `json:"reason,omitempty"`
 }
 
 // ParseTurnResult разбирает и валидирует ответ модели: строгий JSON (неизвестные
@@ -331,6 +336,15 @@ func (r TurnResult) Validate() error {
 	if r.Sticker != "" && (strings.TrimSpace(r.Sticker) == "" || runeLen(r.Sticker) > maxStickerLabel) {
 		return fmt.Errorf("turnresult: sticker — метка из панели до %d символов, получено %q", maxStickerLabel, r.Sticker)
 	}
+	if r.ImageURL != "" {
+		if runeLen(r.ImageURL) > maxImageURLLen {
+			return fmt.Errorf("turnresult: image_url до %d символов, получено %d", maxImageURLLen, runeLen(r.ImageURL))
+		}
+		u, err := url.Parse(strings.TrimSpace(r.ImageURL))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("turnresult: image_url — полный http(s)-адрес картинки, получено %q", r.ImageURL)
+		}
+	}
 	if r.SaveSticker != nil {
 		note := strings.TrimSpace(r.SaveSticker.Note)
 		if note == "" || runeLen(note) > stickerNoteLimit {
@@ -447,6 +461,11 @@ func stripInertContradictions(r TurnResult) TurnResult {
 		// Стикер — внешнее действие, как реакция: при ignore/defer его не
 		// отправляем, мусорное поле не превращается в сюрприз в чате.
 		r.Sticker = ""
+	}
+	if r.Decision != DecisionAnswer {
+		// Картинка — отдельный пузырь после текста ответа (36.2): при react/
+		// ignore/defer отправлять её некуда — поле мягко обнуляется.
+		r.ImageURL = ""
 	}
 	for i := range r.Memory {
 		if r.Memory[i].Kind != "claim" {

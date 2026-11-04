@@ -210,6 +210,13 @@ func buildFamilies(snap Snapshot) []family {
 		family{name: "dio_memory_items_with_vectors", typ: "gauge", samples: []sample{{float64(snap.Memory.WithVectors), nil}}},
 	)
 
+	// Веб разговорного пула и картинки (этап 36.2).
+	fams = append(fams,
+		family{name: "dio_web_searches_today", typ: "gauge", samples: []sample{{float64(snap.Web.SearchesToday), nil}}},
+		family{name: "dio_web_searches_limit", typ: "gauge", samples: []sample{{float64(snap.Web.SearchesLimit), nil}}},
+		family{name: "dio_images_sent_24h", typ: "gauge", samples: []sample{{float64(snap.Web.ImagesSent24h), nil}}},
+	)
+
 	// Состояние самого сервера метрик.
 	fams = append(fams,
 		family{name: "dio_metrics_scrape_errors_total", typ: "counter", samples: []sample{{float64(snap.Server.ScrapeErrors), nil}}},

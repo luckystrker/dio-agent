@@ -39,6 +39,15 @@ const DefaultTimeout = 20 * time.Second
 // до 256 КиБ текста уходило целиком, без обрезки и без пометки.
 const MaxTextRunes = 10_000
 
+// MaxImageBytes — потолок скачиваемой картинки (этап 36.2): картинка уходит в
+// чат отдельным пузырём, больше 5 МиБ не тянем (Telegram всё равно сожмёт,
+// а память процесса и диск БД не резиновые).
+const MaxImageBytes = 5 << 20
+
+// maxPageImages — сколько ссылок на картинки страницы отдаём модели: список —
+// подсказка для image_url, а не каталог сайта.
+const maxPageImages = 20
+
 // truncationMarker — честная пометка обрезки в конце выдачи (блок 18.9).
 const truncationMarker = "[страница обрезана]"
 
@@ -107,6 +116,9 @@ type Client struct {
 	HTTP      *http.Client
 	MaxBytes  int64
 	UserAgent string
+	// ImageMaxBytes — потолок скачиваемой картинки (этап 36.2); 0 —
+	// MaxImageBytes. Отдельно от MaxBytes текстового fetch-слоя.
+	ImageMaxBytes int64
 
 	// insecureAllow отключает guard адресов — ТОЛЬКО тесты разрешённого пути
 	// (httptest слушает loopback, который §15 запрещает).
@@ -119,6 +131,9 @@ type Page struct {
 	ContentType string
 	Text        string
 	Bytes       int // скачано байт (после потолка)
+	// Images — абсолютные http(s)-адреса картинок страницы (og:image, img src):
+	// допустимые кандидаты для image_url хода (этап 36.2).
+	Images []string
 }
 
 // NewClient строит fetch-слой: guard на каждом соединении, лимит хопов,
@@ -222,8 +237,15 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("web: тело не дочитано: %w", err)
 	}
-	text := truncateMarked(ExtractText(decodeBody(body, charset)), MaxTextRunes)
-	return &Page{URL: resp.Request.URL.String(), ContentType: mediaType, Text: text, Bytes: len(body)}, nil
+	pageHTML := decodeBody(body, charset)
+	text := truncateMarked(ExtractText(pageHTML), MaxTextRunes)
+	return &Page{
+		URL:         resp.Request.URL.String(),
+		ContentType: mediaType,
+		Text:        text,
+		Bytes:       len(body),
+		Images:      ExtractImageURLs(pageHTML, resp.Request.URL.String()),
+	}, nil
 }
 
 // parseContentType — медиа-тип (нижний регистр, без пробелов) и charset из

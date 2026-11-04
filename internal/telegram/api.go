@@ -13,9 +13,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -135,6 +138,7 @@ type API interface {
 	GetMe(ctx context.Context) (BotIdentity, error)
 	SendMessage(ctx context.Context, chatID int64, text string) (int64, error)
 	SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error)
+	SendPhoto(ctx context.Context, chatID int64, filename, contentType string, data []byte) (int64, error)
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 	SetMessageReaction(ctx context.Context, chatID int64, messageID int64, emoji string) error
 }
@@ -232,6 +236,67 @@ func (c *Client) SendSticker(ctx context.Context, chatID int64, fileID string) (
 	return result.MessageID, nil
 }
 
+// SendPhoto отправляет картинку файлом (multipart, sendPhoto): модель называет
+// URL, байты качает и отдаёт runtime — Bot API не должен ходить по адресу
+// модели сам (этап 36.2).
+func (c *Client) SendPhoto(ctx context.Context, chatID int64, filename, contentType string, data []byte) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+	defer cancel()
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.WriteField("chat_id", strconv.FormatInt(chatID, 10)); err != nil {
+		return 0, fmt.Errorf("sendPhoto: chat_id не записан: %w", err)
+	}
+	header := make(textproto.MIMEHeader, 2)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="photo"; filename="%s"`, filename))
+	header.Set("Content-Type", contentType)
+	part, err := mw.CreatePart(header)
+	if err != nil {
+		return 0, fmt.Errorf("sendPhoto: часть multipart не создана: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return 0, fmt.Errorf("sendPhoto: файл не записан: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return 0, fmt.Errorf("sendPhoto: multipart не закрыт: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/sendPhoto", &buf)
+	if err != nil {
+		return 0, fmt.Errorf("sendPhoto: запрос не собран: %w", err)
+	}
+	req.Header.Set("content-type", mw.FormDataContentType())
+
+	raw, err := c.do(ctx, "sendPhoto", req, maxSmallBody)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || result.MessageID == 0 {
+		return 0, &APIError{Method: "sendPhoto", HTTPStatus: 200,
+			Description: "ответ без message_id"}
+	}
+	return result.MessageID, nil
+}
+
+// photoFilename — имя файла для sendPhoto по типу: Telegram определяет тип по
+// содержимому, но расширение помогает клиенту собеседника.
+func photoFilename(contentType string) string {
+	switch contentType {
+	case "image/png":
+		return "photo.png"
+	case "image/webp":
+		return "photo.webp"
+	case "image/gif":
+		return "photo.gif"
+	default:
+		return "photo.jpg"
+	}
+}
+
 // SendChatAction — «печатает…» и подобные (короткий fire-and-forget вызов
 // §13.3; решение глотать ошибки принимает вызывающий — пульс).
 func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string) error {
@@ -284,7 +349,14 @@ func (c *Client) call(ctx context.Context, method string, payload any, maxBody i
 		return nil, fmt.Errorf("%s: запрос не собран: %w", method, err)
 	}
 	req.Header.Set("content-type", "application/json")
+	return c.do(ctx, method, req, maxBody)
+}
 
+// do выполняет готовый запрос метода и возвращает result успешного ответа;
+// maxBody 0 — читать тело целиком. Общий путь JSON-методов и sendPhoto
+// (multipart): классификация «отправка не начиналась / исход неизвестен»
+// должна быть одинаковой у всех вызовов (§13.2).
+func (c *Client) do(ctx context.Context, method string, req *http.Request, maxBody int64) (json.RawMessage, error) {
 	// httptrace фиксирует, ушёл ли запрос в сеть: dial/DNS/отказ соединения
 	// до записи тела — это заведомо несостоявшаяся отправка (C2), её можно
 	// повторить; обрыв после записи — unknown.

@@ -79,6 +79,11 @@ func TurnResultJSONSchema() map[string]any {
 				"required":             []string{"note"},
 				"additionalProperties": false,
 			},
+			"image_url": map[string]any{
+				"type": "string", "minLength": 1, "maxLength": maxImageURLLen,
+				"description": "Необязательная картинка к ответу (одна за ход). Только полный http(s)-адрес, который ты видел в результатах поиска или web_fetch ЭТОГО хода " +
+					"(в том числе в списке «Картинки на странице»). Не придумывай адреса и не вставляй URL в сообщения: картинка уйдёт отдельным сообщением после текста.",
+			},
 			"intentions": map[string]any{
 				"type":     "array",
 				"maxItems": maxIntentions,

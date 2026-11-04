@@ -136,7 +136,7 @@ func (DeliveryQueued) Conversational() bool { return false }
 type QueuedDelivery struct {
 	ID       int64  `json:"id"`
 	Position int    `json:"position"`
-	Kind     string `json:"kind"` // message | reaction | sticker
+	Kind     string `json:"kind"` // message | reaction | sticker | photo
 	Text     string `json:"text,omitempty"`
 	Reaction string `json:"reaction,omitempty"`
 	FileID   string `json:"file_id,omitempty"` // стикер: file_id из коллекции
@@ -166,6 +166,9 @@ type TurnPlan struct {
 	Reason      string `json:"reason"`
 	CardEntries int    `json:"card_entries"`
 	CardFitted  bool   `json:"card_fitted"`
+	// WebEnabled — веб-инструменты выданы на этом ходе (этап 36.1): метрика
+	// доли ходов с вебом и наблюдаемость бюджета поисков.
+	WebEnabled bool `json:"web_enabled"`
 }
 
 func (TurnPlan) EventType() string    { return EventTypeTurnPlan }

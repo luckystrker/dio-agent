@@ -22,6 +22,7 @@ type Snapshot struct {
 	Stickers    StickersStats    `json:"stickers"`
 	LifeEvents  LifeEventsStats  `json:"life_events"`
 	Memory      MemoryStats      `json:"memory"`
+	Web         WebStats         `json:"web"`
 
 	// Server заполняет сам HTTP-сервер: это не состояние базы.
 	Server ServerStats `json:"server"`
@@ -173,6 +174,14 @@ type LifeEventsStats struct {
 type MemoryStats struct {
 	Active      int64 `json:"active"`
 	WithVectors int64 `json:"with_vectors"`
+}
+
+// WebStats — веб разговорного пула и картинки (этап 36): поиски за сегодня
+// (UTC) с лимитом и отправленные картинки за сутки.
+type WebStats struct {
+	SearchesToday int64 `json:"searches_today"`
+	SearchesLimit int64 `json:"searches_limit"`
+	ImagesSent24h int64 `json:"images_sent_24h"`
 }
 
 // ServerStats — состояние самого сервера метрик (единственные счётчики

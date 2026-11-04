@@ -17,6 +17,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/background"
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/web"
 )
 
 // Source — поставщик снимка. Юнит-тесты сервера подменяют его подделкой.
@@ -69,6 +70,7 @@ func (s *PgSource) Snapshot(ctx context.Context) (Snapshot, error) {
 		{"стикеры", s.collectStickers},
 		{"события жизни", s.collectLifeEvents},
 		{"память", s.collectMemory},
+		{"веб и картинки", s.collectWeb},
 	}
 	for _, step := range steps {
 		if err := step.fn(ctx, &snap, now); err != nil {
@@ -568,6 +570,25 @@ func (s *PgSource) collectLifeEvents(ctx context.Context, snap *Snapshot, _ time
 		  AND ref LIKE 'life_event:%'
 		  AND created_at >= now() - interval '24 hours'`).
 		Scan(&snap.LifeEvents.Last24h)
+}
+
+// collectWeb — веб разговорного пула и отправленные картинки (этап 36.2):
+// источник — web_usage (суточный счётчик поисков) и delivery_outbox
+// (подтверждённые sendPhoto), поэтому цифры переживают рестарт.
+func (s *PgSource) collectWeb(ctx context.Context, snap *Snapshot, _ time.Time) error {
+	snap.Web.SearchesLimit = character.WebSearchDailyLimit
+	if err := s.pool.QueryRow(ctx, `
+		SELECT coalesce(sum(count), 0) FROM web_usage
+		WHERE kind = $1 AND period = (now() AT TIME ZONE 'UTC')::date`,
+		web.UsageSearch).Scan(&snap.Web.SearchesToday); err != nil {
+		return err
+	}
+	return s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM delivery_outbox
+		WHERE payload->>'kind' = 'photo'
+		  AND status = 'sent'
+		  AND updated_at >= now() - interval '24 hours'`).
+		Scan(&snap.Web.ImagesSent24h)
 }
 
 func (s *PgSource) collectMemory(ctx context.Context, snap *Snapshot, _ time.Time) error {

@@ -285,6 +285,39 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: стикер отправлен (turn %d, поз. %d, message_id %d)",
 			row.TurnID, row.Position, messageID)
+	case "photo":
+		// Байты картинки — в outbox_images (36.2): ошибка чтения до отправки
+		// возвращает строку в очередь, пропавшие байты — терминальный failed.
+		contentType, data, found, ierr := l.repo.Image(ctx, row.ID)
+		if ierr != nil {
+			l.requeueOnDBError(ctx, row, ierr.Error())
+			return
+		}
+		if !found || len(data) == 0 {
+			qctx, cancel := l.persistCtx()
+			defer cancel()
+			if ferr := l.repo.MarkFailed(qctx, row.ID, "картинка без байтов в outbox_images"); ferr != nil {
+				l.requeueOnDBError(ctx, row, ferr.Error())
+			}
+			return
+		}
+		messageID, err := l.api.SendPhoto(ctx, row.ChatID, photoFilename(contentType), contentType, data)
+		if err != nil {
+			l.handleSendError(ctx, row, err)
+			return
+		}
+		qctx, cancel := l.persistCtx()
+		err = l.repo.MarkSent(qctx, row.ID, &messageID)
+		cancel()
+		if err != nil {
+			l.markUnknownAfterDBError(ctx, row, err.Error())
+			return
+		}
+		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
+		l.logger.Printf("delivery: картинка отправлена (turn %d, поз. %d, message_id %d, %s, %d байт)",
+			row.TurnID, row.Position, messageID, contentType, len(data))
+		return
 	case "reaction":
 		if row.TargetMessageID == 0 || row.Reaction == "" {
 			qctx, cancel := l.persistCtx()

@@ -108,6 +108,12 @@ type statePanelData struct {
 	// InitiativesExhausted — дневной лимит инициатив личного чата исчерпан
 	// (§14.3, этап 33.2): модель видит, что check_in/share планировать нельзя.
 	InitiativesExhausted bool
+	// WebTools — веб-инструменты выданы на этом ходе (36.1): подсказка, что
+	// идти в веб стоит только за свежим фактом.
+	WebTools bool
+	// WebExhausted — суточный лимит поисков разговорного пула исчерпан (36.1):
+	// инструменты не выдаются, панель говорит об этом прямо.
+	WebExhausted bool
 }
 
 // sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
@@ -172,6 +178,12 @@ func buildStatePanel(d statePanelData) string {
 	}
 	if d.InitiativesExhausted {
 		lines = append(lines, "на сегодня инициатив больше нельзя — не планируй check_in/share")
+	}
+	if d.WebTools && !d.WebExhausted {
+		lines = append(lines, "веб доступен инструментами (поиск и web_fetch) — только если нужен свежий факт, которого нет в истории и памяти, или тебя прямо просят поискать/найти/скинуть")
+	}
+	if d.WebExhausted {
+		lines = append(lines, "поиск на сегодня исчерпан — веб-инструменты на этом ходе не выдаются")
 	}
 	lines = append(lines, statePanelClose)
 	return strings.Join(lines, "\n")
