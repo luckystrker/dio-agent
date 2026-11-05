@@ -207,14 +207,18 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 				}
 				if !other {
 					until := nextDailySlot(s.now(), s.location, initiativeDailySlotHour)
-					if rerr := s.intentions.Release(ctx, it.ID, until); rerr != nil {
-						return out, rerr
+					// Срок намерения может истечь раньше слота: переносить
+					// некуда, честно отменяем, а не оставляем мёртвый pending.
+					if canDeferTo(until, it.ExpiresAt) {
+						if rerr := s.intentions.Release(ctx, it.ID, until); rerr != nil {
+							return out, rerr
+						}
+						_ = task.Cancel("отложено: " + reason)
+						out.Outcome = "deferred"
+						out.Detail = reason + "; перенесено на " + until.Format("02.01 15:04")
+						out.Latency = s.now().Sub(started)
+						return out, nil
 					}
-					_ = task.Cancel("отложено: " + reason)
-					out.Outcome = "deferred"
-					out.Detail = reason + "; перенесено на " + until.Format("02.01 15:04")
-					out.Latency = s.now().Sub(started)
-					return out, nil
 				}
 			}
 			_ = task.Cancel(reason)
@@ -499,6 +503,12 @@ const initiativeDailySlotHour = 10
 // намерение не отменяется, а переносится на следующий дневной слот.
 func dailyLimitDeferral(reason string) bool {
 	return strings.HasPrefix(reason, "достигнут дневной лимит инициатив")
+}
+
+// canDeferTo — перенос на until имеет смысл, только если намерение ещё не
+// истечёт к этому моменту; иначе получится мёртвый pending.
+func canDeferTo(until time.Time, expires *time.Time) bool {
+	return expires == nil || until.Before(*expires)
 }
 
 // nextDailySlot — ближайший час hour в поясе персонажа строго после now.

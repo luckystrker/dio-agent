@@ -395,3 +395,20 @@ func TestDailyLimitDeferral(t *testing.T) {
 		}
 	}
 }
+
+// TestCanDeferTo — перенос только до срока истечения намерения.
+func TestCanDeferTo(t *testing.T) {
+	now := time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC)
+	until := now.Add(24 * time.Hour)
+	if !canDeferTo(until, nil) {
+		t.Fatal("без expires_at перенос должен быть разрешён")
+	}
+	later := until.Add(time.Hour)
+	if !canDeferTo(until, &later) {
+		t.Fatal("срок позже слота — перенос разрешён")
+	}
+	earlier := until.Add(-time.Hour)
+	if canDeferTo(until, &earlier) {
+		t.Fatal("срок раньше слота — переносить нельзя")
+	}
+}
