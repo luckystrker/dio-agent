@@ -126,6 +126,10 @@ type ApplyOptions struct {
 	// же транзакции, пузырь kind=photo — отдельным сообщением после текста.
 	// nil — картинки нет.
 	Image *OutboxImage
+	// ImageNotes — описания картинок пачки (37.1), уже сопоставленные с
+	// событиями этого хода: пишутся в social_events.image_note в той же
+	// транзакции. Память из них не создаётся.
+	ImageNotes []EventImageNote
 }
 
 // OutboxImage — байты картинки для доставки sendPhoto (этап 36.2): скачаны
@@ -135,6 +139,9 @@ type OutboxImage struct {
 	SourceURL   string
 	ContentType string
 	Bytes       []byte
+	// Alt — подпись картинки со страницы (37.1): история вспоминает
+	// отправленную картинку как «[отправил картинку: alt]».
+	Alt string
 }
 
 // ApplyTurn применяет валидированный результат в одной транзакции.
@@ -175,6 +182,19 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 
 	res := ApplyResult{Applied: true}
+
+	// --- описания картинок (37.1): в события ЭТОГО хода, не в память. ---
+	for _, note := range opts.ImageNotes {
+		if strings.TrimSpace(note.Note) == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE social_events SET image_note = $1, image_kind = $2
+			WHERE id = $3 AND turn_id = $4`,
+			strings.TrimSpace(note.Note), note.Kind, note.EventID, opts.TurnID); err != nil {
+			return ApplyResult{}, fmt.Errorf("применение: описание картинки не сохранено: %w", err)
+		}
+	}
 
 	// --- доставка (§11.2, §13.1): сообщения, реакция, стикер ---
 	delivery := &DeliveryQueued{TurnID: opts.TurnID, ChatID: opts.ChatID}
@@ -280,6 +300,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if err := enqueue(map[string]any{
 			"kind":       "photo",
 			"source_url": opts.Image.SourceURL,
+			"alt":        opts.Image.Alt,
 		}, photo); err != nil {
 			return ApplyResult{}, err
 		}

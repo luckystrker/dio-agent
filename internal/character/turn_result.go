@@ -46,6 +46,10 @@ const (
 	minDeferHours        = 0.05
 	maxDeferHours        = 168
 	minDelayHours        = 0.05
+	// maxImageNotes — не больше картинок хода (telegram.MaxImagesPerTurn = 6).
+	maxImageNotes = 6
+	// maxImageNoteLength — короткая фраза об одной картинке (этап 37.1).
+	maxImageNoteLength = 200
 )
 
 // Действия хода (§11.2). В JSON-схеме — decision.
@@ -122,7 +126,11 @@ type TurnResult struct {
 	// ImageURL — картинка хода (этап 36.2): полный http(s)-адрес, встреченный
 	// в результатах веб-инструментов ЭТОГО хода. Runtime проверяет и скачивает
 	// сам; картинка уходит отдельным пузырём после сообщений.
-	ImageURL          string              `json:"image_url,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	// ImageNotes — описания картинок пачки (этап 37.1), по порядку нумерации
+	// в тексте хода: одна короткая фраза на картинку (кадры одного видео —
+	// одна фраза). Runtime сохраняет их в события; это не память.
+	ImageNotes        []string            `json:"image_notes,omitempty"`
 	Intentions        []IntentionProposal `json:"intentions,omitempty"`
 	DeferHours        *float64            `json:"defer_hours,omitempty"`
 	MoodDelta         *MoodDelta          `json:"mood_delta,omitempty"`
@@ -319,6 +327,14 @@ func (r TurnResult) Validate() error {
 	if len(r.Notes) > maxNotes {
 		return fmt.Errorf("turnresult: не более %d заметок, получено %d", maxNotes, len(r.Notes))
 	}
+	if len(r.ImageNotes) > maxImageNotes {
+		return fmt.Errorf("turnresult: не более %d описаний картинок, получено %d", maxImageNotes, len(r.ImageNotes))
+	}
+	for _, note := range r.ImageNotes {
+		if runeLen(note) > maxImageNoteLength {
+			return fmt.Errorf("turnresult: описание картинки до %d символов, получено %d", maxImageNoteLength, runeLen(note))
+		}
+	}
 	if len(r.Memory) > maxMemories {
 		return fmt.Errorf("turnresult: не более %d кандидатов памяти, получено %d", maxMemories, len(r.Memory))
 	}
@@ -442,6 +458,11 @@ func stripInertContradictions(r TurnResult) TurnResult {
 	// Пустая/пробельная метка — мусор, как недопустимая реакция при answer:
 	// ход не должен падать из-за «sticker":" "» (живой смоук 2026-11-05).
 	r.Sticker = strings.TrimSpace(r.Sticker)
+	for i := range r.ImageNotes {
+		// Позиции описаний не сдвигаем: пустая фраза — «картинку не описываю»,
+		// а не повод сопоставить следующую фразу другой картинке (37.1).
+		r.ImageNotes[i] = strings.TrimSpace(r.ImageNotes[i])
+	}
 	if r.Decision != DecisionDefer {
 		r.DeferHours = nil
 	}

@@ -29,6 +29,9 @@ type HistoryMessage struct {
 	// У assistant-реплик пусто: метка времени без автора не провоцирует
 	// модель писать «Дио:» в ответе.
 	Author string `json:"author,omitempty"`
+	// Label — короткая стабильная метка сообщения (#m<telegram_message_id>):
+	// по ней модель отвечает реплаем (37.2). У реплик без Telegram id пусто.
+	Label string `json:"label,omitempty"`
 }
 
 // RecentHistory — последние limit сообщений чата (обе стороны) в хронологическом
@@ -54,24 +57,30 @@ func RecentHistoryWindow(ctx context.Context, db DBTX, chatID int64, limit int, 
 		return nil, false, nil
 	}
 	rows, err := db.Query(ctx, `
-		SELECT role, content, ts, author FROM (
+		SELECT role, content, kind, note, note_kind, msg_id, payload, ts, author FROM (
 		  SELECT 'user' AS role,
-		         CASE WHEN kind = 'photo'
-		              THEN COALESCE(NULLIF(btrim(text), ''), '[фото]')
-		              ELSE text END AS content,
+		         COALESCE(text, '') AS content,
+		         kind,
+		         COALESCE(image_note, '') AS note,
+		         COALESCE(image_kind, '') AS note_kind,
+		         COALESCE(telegram_message_id, 0) AS msg_id,
+		         NULL::jsonb AS payload,
 		         occurred_at AS ts,
 		         id,
 		         COALESCE(NULLIF(btrim(actor_name), ''), 'user:' || COALESCE(actor_id::text, '0')) AS author
 		  FROM social_events
-		  WHERE chat_id = $1 AND (text IS NOT NULL OR kind = 'photo')
+		  WHERE chat_id = $1 AND (text IS NOT NULL OR kind = 'photo' OR image_note IS NOT NULL)
 		    AND kind IN ('message', 'reply', 'mention', 'sticker', 'photo', 'reaction')
 		    AND status <> 'pending'
 		    AND ($3::bigint = 0 OR turn_id IS NULL OR turn_id <> $3::bigint)
 		  UNION ALL
 		  SELECT 'assistant' AS role,
-		         CASE WHEN payload->>'kind' = 'photo'
-		              THEN COALESCE(NULLIF(btrim(payload->>'text'), ''), '[отправил картинку]')
-		              ELSE payload->>'text' END AS content,
+		         COALESCE(payload->>'text', '') AS content,
+		         COALESCE(payload->>'kind', 'message') AS kind,
+		         '' AS note,
+		         '' AS note_kind,
+		         COALESCE(telegram_message_id, 0) AS msg_id,
+		         payload,
 		         created_at AS ts, id, '' AS author
 		  FROM delivery_outbox
 		  WHERE chat_id = $1 AND status = 'sent'
@@ -87,10 +96,23 @@ func RecentHistoryWindow(ctx context.Context, db DBTX, chatID int64, limit int, 
 
 	out := make([]HistoryMessage, 0, limit)
 	for rows.Next() {
-		var m HistoryMessage
-		if err := rows.Scan(&m.Role, &m.Content, &m.At, &m.Author); err != nil {
+		var (
+			m       HistoryMessage
+			kind    string
+			note    string
+			noteKd  string
+			msgID   int64
+			payload []byte
+		)
+		if err := rows.Scan(&m.Role, &m.Content, &kind, &note, &noteKd, &msgID, &payload, &m.At, &m.Author); err != nil {
 			return nil, false, fmt.Errorf("history: строка не читается: %w", err)
 		}
+		if m.Role == "assistant" && kind == "photo" {
+			m.Content = renderAssistantPhoto(payload)
+		} else if m.Role == "user" {
+			m.Content = renderIncomingContent(kind, m.Content, noteKd, note)
+		}
+		m.Label = MessageLabel(msgID)
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -140,6 +162,9 @@ func historyMessageCost(m HistoryMessage) int {
 		return size
 	}
 	size += utf8.RuneCountInString(formatHistoryTime(m.At, nil)) + 3 // «[» + метка + «] »
+	if m.Label != "" {
+		size += utf8.RuneCountInString(m.Label) + 1
+	}
 	if m.Role == "user" && m.Author != "" {
 		size += utf8.RuneCountInString(sanitizePanelValue(m.Author, 80)) + len(": ")
 	}
@@ -185,6 +210,9 @@ func renderHistoryLine(m HistoryMessage, loc *time.Location) string {
 		return content
 	}
 	stamp := "[" + formatHistoryTime(m.At, loc) + "] "
+	if m.Label != "" {
+		stamp += m.Label + " "
+	}
 	if author := sanitizePanelValue(m.Author, 80); m.Role == "user" && author != "" {
 		return stamp + author + ": " + content
 	}

@@ -458,7 +458,7 @@ func TestTurnRecoveryWithoutNewGeneration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("turn_started не записан: %v", err)
 	}
-	if err := f.journal.WriteModelOutput(ctx, turnID, valid, nil, 0, "", ""); err != nil {
+	if err := f.journal.WriteModelOutput(ctx, turnID, valid, nil, 0, "", "", nil); err != nil {
 		t.Fatalf("model_output не записан: %v", err)
 	}
 
@@ -512,7 +512,7 @@ func TestTurnRecoveryInvalidModelOutputSkips(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("turn_started не записан: %v", err)
 	}
-	if err := f.journal.WriteModelOutput(ctx, turnID, TurnResult{Decision: DecisionDefer}, nil, 0, "", ""); err != nil {
+	if err := f.journal.WriteModelOutput(ctx, turnID, TurnResult{Decision: DecisionDefer}, nil, 0, "", "", nil); err != nil {
 		t.Fatalf("битой model_output не записан: %v", err)
 	}
 
@@ -895,11 +895,11 @@ func TestTurnHistoryReachesModel(t *testing.T) {
 	if len(evs) < 3 {
 		t.Fatalf("на проводе %d событий, want >= 3 (реплика + ответ + пачка)", len(evs))
 	}
-	if got := reqText(0); !strings.HasSuffix(got, "] Коля: я короче решил всё переписать") {
+	if got := reqText(0); !strings.HasSuffix(got, "] #m4242 Коля: я короче решил всё переписать") {
 		t.Fatalf("первая реплика истории без метки/автора: %q", got)
 	}
 	resp, ok := events.AsValue(evs[1]).(events.ModelResponse)
-	if !ok || !strings.HasSuffix(resp.Content(), "] а что переписываешь?") {
+	if !ok || !strings.HasSuffix(resp.Content(), "] #m555000 а что переписываешь?") {
 		t.Fatalf("второе событие не ответ ассистента с меткой: %T %q", events.AsValue(evs[1]), resp.Content())
 	}
 	if got := reqText(2); !strings.HasPrefix(got, statePanelOpen) || !strings.HasSuffix(got, "ну там пару сервисов") {

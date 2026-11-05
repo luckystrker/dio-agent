@@ -12,6 +12,7 @@ package character
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/luckystrker/dio-agent/internal/media"
 	"github.com/luckystrker/dio-agent/internal/telegram"
@@ -40,10 +41,12 @@ type StoryboardExtractor interface {
 }
 
 // Visuals — картинки хода и сведения о раскадровках: EventID → число кадров,
-// реально ушедших модели (для пометки в тексте события).
+// реально ушедших модели (для пометки в тексте события), и позиции нумерации
+// картинок (этап 37.1: по ним сопоставляются image_notes).
 type Visuals struct {
 	Images           []Photo
 	StoryboardFrames map[int64]int
+	Groups           []ImageGroup
 }
 
 // visualSlot — место события в порядке пачки: обычная картинка или видео.
@@ -141,7 +144,9 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 	}
 
 	// Разворачиваем слоты в порядке пачки: текст Ask и картинки сохраняют
-	// последовательность событий.
+	// последовательность событий. Нумерация описаний идёт по группам: кадры
+	// одного видео — одна позиция (этап 37.1).
+	imageNumber := 1
 	for _, slot := range slots {
 		if len(slot.frames) > 0 {
 			for _, frame := range slot.frames {
@@ -151,6 +156,12 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 				}
 				out.Images = append(out.Images, Photo{FileID: slot.video.FileID, Data: frame.Data, Mime: mime})
 			}
+			kind, label := videoGroupKindLabel(slot.video)
+			out.Groups = append(out.Groups, ImageGroup{
+				EventID: slot.event.EventID, Kind: kind, First: imageNumber,
+				Count: len(slot.frames), Label: label,
+			})
+			imageNumber += len(slot.frames)
 			continue
 		}
 		if slot.fileID == "" || slot.dropped || photos == nil {
@@ -162,8 +173,66 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 			continue
 		}
 		out.Images = append(out.Images, Photo{FileID: slot.fileID, Data: pm.Data(), Mime: pm.Mime})
+		kind, label := imageGroupKindLabel(slot)
+		out.Groups = append(out.Groups, ImageGroup{
+			EventID: slot.event.EventID, Kind: kind, First: imageNumber, Count: 1, Label: label,
+		})
+		imageNumber++
 	}
 	return out
+}
+
+// imageGroupKindLabel — вид и подпись позиции для обычной картинки (фото,
+// стикер или превью видео, если раскадровка недоступна).
+func imageGroupKindLabel(slot visualSlot) (kind, label string) {
+	author := groupAuthor(slot.event)
+	if slot.video != nil {
+		videoKind, _ := videoGroupKindLabel(slot.video)
+		if videoKind == imageKindVideoNote {
+			return videoKind, "превью кружка" + authorSuffix(author)
+		}
+		return videoKind, "превью гифки" + authorSuffix(author)
+	}
+	if sticker := telegram.StickerFromUpdate(slot.event.Raw); sticker != nil {
+		label = "стикер"
+		if sticker.Emoji != "" {
+			label += " " + sticker.Emoji
+		}
+		return imageKindSticker, label + authorSuffix(author)
+	}
+	return imageKindPhoto, "фото" + authorSuffix(author)
+}
+
+// videoGroupKindLabel — вид и подпись позиции раскадровки: кадры одного
+// видео описываются одной фразой.
+func videoGroupKindLabel(info *telegram.VideoInfo) (kind, label string) {
+	if info == nil {
+		return imageKindGIF, "кадры гифки"
+	}
+	switch info.Kind {
+	case telegram.VideoKindVideoNote:
+		return imageKindVideoNote, "кадры кружка " + storyboardDuration(info.Duration)
+	default:
+		return imageKindGIF, "кадры гифки"
+	}
+}
+
+// groupAuthor — имя автора события для подписи позиции («фото от Данила»).
+func groupAuthor(ev BatchEvent) string {
+	if name := strings.TrimSpace(ev.ActorName); name != "" {
+		return name
+	}
+	if ev.ActorID != 0 {
+		return fmt.Sprintf("user:%d", ev.ActorID)
+	}
+	return ""
+}
+
+func authorSuffix(author string) string {
+	if author == "" {
+		return ""
+	}
+	return " от " + author
 }
 
 // previewFileID — превью видео для отката: у гифки и кружка это thumbnail.

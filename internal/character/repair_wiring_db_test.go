@@ -61,10 +61,10 @@ func TestRepairContinuationCarriesHistoryAndHintDB(t *testing.T) {
 	if len(wire) != 5 {
 		t.Fatalf("на проводе repair-вызова %d сообщений (%+v), хочу 5: история (2) + пачка + неудачный ответ + repair-инструкция", len(wire), wire)
 	}
-	if wire[0].role != "user" || !strings.HasSuffix(wire[0].text, "] Коля: обсуждали старые пластинки") {
+	if wire[0].role != "user" || !strings.HasSuffix(wire[0].text, "] #m4242 Коля: обсуждали старые пластинки") {
 		t.Fatalf("реплика истории потеряна: %+v", wire[0])
 	}
-	if wire[1].role != "assistant" || !strings.HasSuffix(wire[1].text, "] ага, пластинки это святое") {
+	if wire[1].role != "assistant" || !strings.HasSuffix(wire[1].text, "] #m570001 ага, пластинки это святое") {
 		t.Fatalf("ответ истории потерян: %+v", wire[1])
 	}
 	if wire[2].role != "user" || !strings.HasSuffix(wire[2].text, "а помнишь, что я люблю?") {

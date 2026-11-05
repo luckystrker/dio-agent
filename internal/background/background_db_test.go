@@ -336,7 +336,7 @@ func interruptedInitiative(t *testing.T, f *fixture, ctx context.Context, it Int
 	}
 	if err := f.journal.WriteModelOutput(ctx, turnID, run.Result,
 		map[string]any{"calls": run.Stats.Calls, "tokens": run.Stats.Tokens}, run.Repairs,
-		run.Reasoning, run.ReasoningRepair); err != nil {
+		run.Reasoning, run.ReasoningRepair, nil); err != nil {
 		t.Fatalf("model_output не записан: %v", err)
 	}
 	if err := f.wal.StepDone(ctx, unitID, stepGenerate, map[string]any{"decision": run.Result.Decision}); err != nil {

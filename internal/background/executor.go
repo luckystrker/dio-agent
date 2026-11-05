@@ -385,7 +385,7 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			// ход применением сохранённого результата без новой генерации.
 			if err := s.journal.WriteModelOutput(ctx, turnID, run.Result,
 				map[string]any{"calls": run.Stats.Calls, "tokens": run.Stats.Tokens}, run.Repairs,
-				run.Reasoning, run.ReasoningRepair); err != nil {
+				run.Reasoning, run.ReasoningRepair, nil); err != nil {
 				return out, err
 			}
 		} else {

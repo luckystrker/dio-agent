@@ -134,6 +134,9 @@ type Page struct {
 	// Images — абсолютные http(s)-адреса картинок страницы (og:image, img src):
 	// допустимые кандидаты для image_url хода (этап 36.2).
 	Images []string
+	// ImageAlt — подписи картинок (alt/title/og:image:alt) по адресу; истории
+	// нужно имя отправленной картинки (этап 37.1), если разметка его даёт.
+	ImageAlt map[string]string
 }
 
 // NewClient строит fetch-слой: guard на каждом соединении, лимит хопов,
@@ -239,12 +242,22 @@ func (c *Client) Fetch(ctx context.Context, rawURL string) (*Page, error) {
 	}
 	pageHTML := decodeBody(body, charset)
 	text := truncateMarked(ExtractText(pageHTML), MaxTextRunes)
+	pageImages := ExtractPageImages(pageHTML, resp.Request.URL.String())
+	urls := make([]string, 0, len(pageImages))
+	alts := make(map[string]string, len(pageImages))
+	for _, img := range pageImages {
+		urls = append(urls, img.URL)
+		if img.Alt != "" {
+			alts[img.URL] = img.Alt
+		}
+	}
 	return &Page{
 		URL:         resp.Request.URL.String(),
 		ContentType: mediaType,
 		Text:        text,
 		Bytes:       len(body),
-		Images:      ExtractImageURLs(pageHTML, resp.Request.URL.String()),
+		Images:      urls,
+		ImageAlt:    alts,
 	}, nil
 }
 

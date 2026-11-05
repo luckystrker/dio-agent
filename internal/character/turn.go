@@ -272,8 +272,8 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		out.Recovered = true
 		// Картинка восстановления: проверка «URL из выдачи» уже была сделана
 		// при генерации (model_output пишется после неё) — allowed nil.
-		image := r.resolveImage(ctx, in.TurnID, state.Output.ImageURL, nil)
-		return r.apply(ctx, in, *state.Output, image, out)
+		image := r.resolveImage(ctx, in.TurnID, state.Output.ImageURL, "", nil)
+		return r.apply(ctx, in, *state.Output, image, state.ImageNotes, out)
 	}
 
 	// --- Фаза 1: модель и turn_started ---
@@ -326,6 +326,12 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		}
 	}
 	userText = composeUserText(bctx.StatePanel, userText)
+	// Нумерация картинок (37.1): модель должна знать, какой номер у какой
+	// картинки, чтобы вернуть image_notes по позициям. В откате без картинок
+	// (провайдер не принял media) этой пометки нет — fallbackText прежний.
+	if line := ImageNumberingLine(visuals.Groups); line != "" {
+		userText += "\n\n" + line
+	}
 	if len(images) > 0 {
 		r.logf("ход %d: картинок в запросе модели: %d (фото/стикеры/гифки/раскадровка)", in.TurnID, len(images))
 	}
@@ -355,17 +361,20 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	}
 
 	// --- Фаза 3: model_output ДО применения (§12.1) ---
+	// Описания картинок сопоставляются с событиями пачки в том же порядке
+	// нумерации, что видел модель (37.1); в память они не идут.
+	imageNotes := ImageNotesForEvents(visuals.Groups, result.ImageNotes)
 	if err := r.Journal.WriteModelOutput(ctx, in.TurnID, result, nil, repairs,
-		reasoning.First, reasoning.Repair); err != nil {
+		reasoning.First, reasoning.Repair, imageNotes); err != nil {
 		return out, fmt.Errorf("ход %d: model_output не записан: %w", in.TurnID, err)
 	}
 
 	// Картинка хода (36.2): проверка выдачи, скачивание через fetch-слой §15.
 	// Не прошло — мягко обнуляется с логом, ход живёт.
-	image := r.resolveImage(ctx, in.TurnID, result.ImageURL, webURLs.all())
+	image := r.resolveImage(ctx, in.TurnID, result.ImageURL, webURLs.altFor(result.ImageURL), webURLs.all())
 
 	// --- Фаза 4: применение одной транзакцией ---
-	return r.apply(ctx, in, result, image, out)
+	return r.apply(ctx, in, result, image, imageNotes, out)
 }
 
 // invalidResultError — ответ модели не прошёл валидацию §11.2 ни с первой,
@@ -568,6 +577,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// скачивалось, но в вызов модели уходил только текст; этап 25 добавил
 	// стикеры и превью гифок).
 	reply, err := a.Ask(ctx, askMsgs(userText, images)...)
+	mediaFallback := false
 	if err != nil && len(images) > 0 && looksLikeMediaRejection(err) {
 		// Honest fallback (25.1): провайдер не принял картинку (например,
 		// image/webp) — повтор без картинок, стикеры/гифки остаются текстом.
@@ -578,6 +588,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		}
 		// Без картинок пометка раскадровки была бы ложью — берём текст до неё.
 		reply, err = a.Ask(ctx, fallbackText)
+		mediaFallback = true
 	}
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
@@ -607,6 +618,11 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 				firstReasoning: reasoningOut.First, repairReasoning: reasoningOut.Repair,
 			}
 		}
+	}
+	if mediaFallback {
+		// Модель видела только текст: придуманные описания картинок были бы
+		// ложью, картинок в запросе нет (37.1).
+		result.ImageNotes = nil
 	}
 	return result, repairs, budgetMW.callCount(), reasoningOut, nil
 }
@@ -665,7 +681,7 @@ func (m *toolJournalMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *eve
 }
 
 // apply — фаза 4: применение валидированного результата (одна транзакция).
-func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *OutboxImage, out Outcome) (Outcome, error) {
+func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *OutboxImage, imageNotes []EventImageNote, out Outcome) (Outcome, error) {
 	applyRes, err := ApplyTurn(ctx, r.Pool, ApplyOptions{
 		TurnID:  in.TurnID,
 		ChatID:  in.ChatID,
@@ -679,7 +695,9 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *
 		BoredomReset: true,
 		// Картинка хода (36.2) — отдельным пузырём после сообщений.
 		Image: image,
-		Now:   r.now(),
+		// Описания картинок пачки (37.1) — в события этого хода.
+		ImageNotes: imageNotes,
+		Now:        r.now(),
 	})
 	if err != nil {
 		if errors.Is(err, runtime.ErrHistoryConflict) {

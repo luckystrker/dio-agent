@@ -95,7 +95,7 @@ func TestSpec15PendingAnswerNotInConversation(t *testing.T) {
 	if len(wire) != 2 {
 		t.Fatalf("на проводе %d сообщений (%+v), хочу 2: реплика ходa 1 и пачка — pending-ответ просочился в разговор?", len(wire), wire)
 	}
-	if wire[0].role != "user" || !strings.HasSuffix(wire[0].text, "] Коля: я решил всё переписать") {
+	if wire[0].role != "user" || !strings.HasSuffix(wire[0].text, "] #m4242 Коля: я решил всё переписать") {
 		t.Fatalf("реплика ходa 1 потеряна (метка/автор): %+v", wire[0])
 	}
 	if wire[1].role != "user" || !strings.HasPrefix(wire[1].text, statePanelOpen) || !strings.HasSuffix(wire[1].text, "ну там пару сервисов") {

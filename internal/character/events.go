@@ -87,6 +87,9 @@ type ModelOutput struct {
 	Repairs         int             `json:"repairs,omitempty"` // сколько repair-попыток потребовалось
 	Reasoning       string          `json:"reasoning,omitempty"`
 	ReasoningRepair string          `json:"reasoning_repair,omitempty"`
+	// ImageNotes — сопоставленные с событиями описания картинок (этап 37.1):
+	// восстановление хода применяет те же описания, не скачивая картинки снова.
+	ImageNotes []EventImageNote `json:"image_notes,omitempty"`
 }
 
 func (ModelOutput) EventType() string    { return EventTypeModelOutput }

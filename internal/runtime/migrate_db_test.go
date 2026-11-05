@@ -82,7 +82,7 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 		t.Fatalf("первое применение миграций: %v", err)
 	}
 	if first.Applied != 22 || first.Skipped != 0 {
-		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 22/0", first.Applied, first.Skipped)
+		t.Errorf("первый прогон: applied=%d skipped=%d, хочу 23/0", first.Applied, first.Skipped)
 	}
 
 	// 2. Повторное применение: идемпотентно, без ошибок и без записей.
@@ -100,7 +100,7 @@ func TestMigrationsApplyTwiceOnCleanDatabase(t *testing.T) {
 		t.Fatalf("schema_migrations не читается: %v", err)
 	}
 	if appliedCount != 22 {
-		t.Errorf("записей в schema_migrations = %d, хочу 22", appliedCount)
+		t.Errorf("записей в schema_migrations = %d, хочу 23", appliedCount)
 	}
 
 	// Частичный индекс очереди ходов (16.9): worker опрашивает

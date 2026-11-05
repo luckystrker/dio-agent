@@ -26,6 +26,13 @@ func TurnResultJSONSchema() map[string]any {
 				"items":    map[string]any{"type": "string", "minLength": 1, "maxLength": maxNoteLength},
 				"maxItems": maxNotes,
 			},
+			"image_notes": map[string]any{
+				"type":     "array",
+				"maxItems": maxImageNotes,
+				"description": "Описания картинок входящего сообщения по порядку нумерации («Картинки в сообщении: 1 — …; 2–6 — …»): одна короткая фраза " +
+					"на номер. Кадры одного видео — одно описание на всё видео. Коротко, что видно, без оценок. Нет картинок — не заполняй поле.",
+				"items": map[string]any{"type": "string", "maxLength": maxImageNoteLength},
+			},
 			"memory": map[string]any{
 				"type":     "array",
 				"maxItems": maxMemories,

@@ -179,7 +179,7 @@ func TestAssemblerHistoryStableLabels(t *testing.T) {
 			t.Fatalf("история нестабильна: реплика[%d] = %q, хочу %q", i, got, want)
 		}
 	}
-	if line := renderHistoryLine(first.History[0], loc); line != "[пн 02.11 15:40] Коля: как дела?" {
+	if line := renderHistoryLine(first.History[0], loc); line != "[пн 02.11 15:40] #m601 Коля: как дела?" {
 		t.Fatalf("метка/автор неверны: %q", line)
 	}
 	// Панель: пауза от последней реплики истории (ответ в 15:42, сейчас 16:40).

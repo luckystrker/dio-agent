@@ -38,13 +38,31 @@ var (
 // адреса страницы, data:/javascript:/ftp: отбрасываются, дубли схлопываются,
 // список ограничен maxPageImages. Функция чистая — тестируется без сети.
 func ExtractImageURLs(pageHTML, baseURL string) []string {
+	images := ExtractPageImages(pageHTML, baseURL)
+	out := make([]string, 0, len(images))
+	for _, img := range images {
+		out = append(out, img.URL)
+	}
+	return out
+}
+
+// PageImage — картинка страницы: адрес и подпись (alt/title/og:image:alt),
+// если она есть в разметке. Подпись нужна истории: отправленная ботом
+// картинка вспоминается как «[отправил картинку: alt]» (37.1).
+type PageImage struct {
+	URL string
+	Alt string
+}
+
+// ExtractPageImages — то же, что ExtractImageURLs, но с подписями.
+func ExtractPageImages(pageHTML, baseURL string) []PageImage {
 	base, err := neturl.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
 		return nil
 	}
-	seen := make(map[string]struct{})
-	out := make([]string, 0, maxPageImages)
-	add := func(raw string) {
+	seen := make(map[string]int) // URL → индекс в out
+	out := make([]PageImage, 0, maxPageImages)
+	add := func(raw, alt string) {
 		if len(out) >= maxPageImages {
 			return
 		}
@@ -62,13 +80,33 @@ func ExtractImageURLs(pageHTML, baseURL string) []string {
 		}
 		abs.Fragment = ""
 		key := abs.String()
-		if _, ok := seen[key]; ok {
+		alt = strings.TrimSpace(html.UnescapeString(alt))
+		if idx, ok := seen[key]; ok {
+			if out[idx].Alt == "" {
+				out[idx].Alt = alt
+			}
 			return
 		}
-		seen[key] = struct{}{}
-		out = append(out, key)
+		seen[key] = len(out)
+		out = append(out, PageImage{URL: key, Alt: alt})
 	}
 
+	// og:image:alt относится к основной картинке страницы: запоминаем текст
+	// и отдаём его первой og:image/twitter:image.
+	ogAlt := ""
+	for _, tag := range metaTagRe.FindAllString(pageHTML, -1) {
+		attrs := parseTagAttrs(tag)
+		kind := strings.ToLower(attrs["property"])
+		if kind == "" {
+			kind = strings.ToLower(attrs["name"])
+		}
+		if kind == "og:image:alt" || kind == "twitter:image:alt" {
+			if ogAlt == "" {
+				ogAlt = attrs["content"]
+			}
+		}
+	}
+	usedOGAlt := false
 	for _, tag := range metaTagRe.FindAllString(pageHTML, -1) {
 		attrs := parseTagAttrs(tag)
 		kind := strings.ToLower(attrs["property"])
@@ -77,7 +115,12 @@ func ExtractImageURLs(pageHTML, baseURL string) []string {
 		}
 		switch kind {
 		case "og:image", "og:image:url", "og:image:secure_url", "twitter:image":
-			add(attrs["content"])
+			alt := ""
+			if !usedOGAlt {
+				alt = ogAlt
+				usedOGAlt = true
+			}
+			add(attrs["content"], alt)
 		}
 	}
 	for _, tag := range imgTagRe.FindAllString(pageHTML, -1) {
@@ -86,7 +129,11 @@ func ExtractImageURLs(pageHTML, baseURL string) []string {
 		if strings.TrimSpace(src) == "" {
 			src = attrs["data-src"]
 		}
-		add(src)
+		alt := attrs["alt"]
+		if strings.TrimSpace(alt) == "" {
+			alt = attrs["title"]
+		}
+		add(src, alt)
 	}
 	return out
 }

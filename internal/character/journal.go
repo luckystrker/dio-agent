@@ -132,7 +132,7 @@ func (j *TurnJournal) WriteToolResultFor(ctx context.Context, turnID int64, ev *
 // reasoning/reasoningRepair — рассуждение модели первой и repair-попытки (26.3);
 // пустые строки в событие не попадают (omitempty).
 func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result TurnResult,
-	usage map[string]any, repairs int, reasoning, reasoningRepair string) error {
+	usage map[string]any, repairs int, reasoning, reasoningRepair string, imageNotes []EventImageNote) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("журнал хода: результат не сериализуется: %w", err)
@@ -143,6 +143,7 @@ func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result
 		Repairs:         repairs,
 		Reasoning:       truncateReasoning(reasoning),
 		ReasoningRepair: truncateReasoning(reasoningRepair),
+		ImageNotes:      imageNotes,
 	})
 }
 
@@ -201,6 +202,9 @@ type TurnState struct {
 	Skipped             bool // turn_skipped — терминальный пропуск
 	Failed              bool // turn_failed — терминальный провал (29.1)
 	FailReason          string
+	// ImageNotes — описания картинок, сопоставленные с событиями пачки при
+	// генерации (этап 37.1): восстановление применяет их без новых картинок.
+	ImageNotes []EventImageNote
 }
 
 // LoadTurnState читает состояние хода из журнала (§12.2: recovery есть
@@ -237,6 +241,7 @@ func stateOfEvents(evs []events.Event) TurnState {
 			}
 			st.Usage = e.Usage
 			st.Repairs = e.Repairs
+			st.ImageNotes = e.ImageNotes
 		case DeltasApplied:
 			st.Applied = true
 		case DeliveryQueued:

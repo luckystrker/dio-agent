@@ -106,7 +106,7 @@ func TestResolveImageOnlyFromThisTurn(t *testing.T) {
 	r := newImageTestRunner(fetcher)
 
 	// URL не встречался в выдаче этого хода — картинка не скачивается и не уходит.
-	if img := r.resolveImage(context.Background(), 1, "https://evil.example.com/x.jpg", map[string]bool{"https://cdn.example.com/a.jpg": true}); img != nil {
+	if img := r.resolveImage(context.Background(), 1, "https://evil.example.com/x.jpg", "", map[string]bool{"https://cdn.example.com/a.jpg": true}); img != nil {
 		t.Fatalf("URL не из выдачи принят: %+v", img)
 	}
 	if len(fetcher.got) != 0 {
@@ -114,7 +114,7 @@ func TestResolveImageOnlyFromThisTurn(t *testing.T) {
 	}
 
 	// Встречался — скачивается через fetch-слой.
-	img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", map[string]bool{"https://cdn.example.com/a.jpg": true})
+	img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", map[string]bool{"https://cdn.example.com/a.jpg": true})
 	if img == nil || img.ContentType != "image/jpeg" || string(img.Bytes) != "jpeg" {
 		t.Fatalf("картинка из выдачи не скачана: %+v", img)
 	}
@@ -126,19 +126,19 @@ func TestResolveImageOnlyFromThisTurn(t *testing.T) {
 func TestResolveImageSoftFailures(t *testing.T) {
 	// Сбой скачивания не роняет ход: картинки просто нет.
 	r := newImageTestRunner(&fakeImageFetcher{err: errors.New("SSRF")})
-	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", nil); img != nil {
+	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", nil); img != nil {
 		t.Fatalf("сбой скачивания должен мягко обнулить картинку: %+v", img)
 	}
 
 	// Fetch-слой не настроен — ход живёт без картинки.
 	r = newImageTestRunner(nil)
-	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", nil); img != nil {
+	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", nil); img != nil {
 		t.Fatalf("без fetch-слоя картинки быть не может: %+v", img)
 	}
 
 	// Пустой URL — ничего не делаем.
 	r = newImageTestRunner(&fakeImageFetcher{})
-	if img := r.resolveImage(context.Background(), 1, "  ", nil); img != nil {
+	if img := r.resolveImage(context.Background(), 1, "  ", "", nil); img != nil {
 		t.Fatalf("пустой image_url дал картинку: %+v", img)
 	}
 }

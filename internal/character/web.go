@@ -96,18 +96,33 @@ type ImageFetcher interface {
 type webURLCollector struct {
 	mu   sync.Mutex
 	urls map[string]struct{}
+	alts map[string]string
 }
 
 func newWebURLCollector() *webURLCollector {
-	return &webURLCollector{urls: make(map[string]struct{})}
+	return &webURLCollector{urls: make(map[string]struct{}), alts: make(map[string]string)}
 }
 
 func (c *webURLCollector) add(text string) {
-	for _, u := range collectToolResultURLs(text) {
-		c.mu.Lock()
+	urls := collectToolResultURLs(text)
+	alts := collectToolResultURLAlts(text)
+	c.mu.Lock()
+	for _, u := range urls {
 		c.urls[normalizeCandidateURL(u)] = struct{}{}
-		c.mu.Unlock()
 	}
+	for u, alt := range alts {
+		if _, ok := c.alts[u]; !ok {
+			c.alts[u] = alt
+		}
+	}
+	c.mu.Unlock()
+}
+
+// altFor — подпись картинки из выдачи хода (alt со страницы); пусто — нет.
+func (c *webURLCollector) altFor(rawURL string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.alts[normalizeCandidateURL(rawURL)]
 }
 
 // all — множество адресов, встретившихся в выдаче хода (для проверки image_url).
@@ -125,6 +140,36 @@ func (c *webURLCollector) all() map[string]bool {
 // инструмента: поиск отдаёт JSON со ссылками, web_fetch — текст и список
 // картинок. Точную проверку (SSRF, content-type) делает fetch-слой.
 var urlCandidateRe = regexp.MustCompile(`https?://[^\s"'<>\[\]{}]+`)
+
+// collectToolResultURLAlts — подписи картинок из строк выдачи «URL — alt»
+// (web_fetch, этап 37.1): адрес и текст после него до конца строки.
+func collectToolResultURLAlts(text string) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(text, "\n") {
+		loc := urlCandidateRe.FindStringIndex(line)
+		if loc == nil {
+			continue
+		}
+		raw := line[loc[0]:loc[1]]
+		u := normalizeCandidateURL(raw)
+		if u == "" || u != raw {
+			// Хвостовая пунктуация уже срезана — подпись начинается сразу
+			// после адреса в исходной строке.
+			raw = u
+		}
+		if raw == "" {
+			continue
+		}
+		tail := strings.TrimSpace(line[loc[1]:])
+		tail = strings.TrimPrefix(tail, "—")
+		tail = strings.TrimSpace(tail)
+		if tail == "" {
+			continue
+		}
+		out[normalizeCandidateURL(raw)] = tail
+	}
+	return out
+}
 
 // collectToolResultURLs — адреса из результата инструмента без хвостовой
 // пунктуации (точка в конце предложения не часть URL).
@@ -271,7 +316,7 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 // выдаче этого хода (allowed nil — восстановление сохранённого model_output,
 // проверка была сделана при генерации), скачивание — fetch-слоем §15. Любая
 // проблема мягко обнуляет картинку: ход живёт, в лог — причина.
-func (r *Runner) resolveImage(ctx context.Context, turnID int64, rawURL string, allowed map[string]bool) *OutboxImage {
+func (r *Runner) resolveImage(ctx context.Context, turnID int64, rawURL, alt string, allowed map[string]bool) *OutboxImage {
 	u := normalizeCandidateURL(strings.TrimSpace(rawURL))
 	if u == "" {
 		return nil
@@ -294,5 +339,6 @@ func (r *Runner) resolveImage(ctx context.Context, turnID int64, rawURL string, 
 		return nil
 	}
 	r.logf("ход %d: картинка к отправке: %s (%s, %d байт)", turnID, img.URL, img.ContentType, len(img.Bytes))
-	return &OutboxImage{SourceURL: img.URL, ContentType: img.ContentType, Bytes: img.Bytes}
+	alt = strings.TrimSpace(alt)
+	return &OutboxImage{SourceURL: img.URL, ContentType: img.ContentType, Bytes: img.Bytes, Alt: alt}
 }
