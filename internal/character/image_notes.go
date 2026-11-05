@@ -148,6 +148,16 @@ func withSpace(text string) string {
 	return " " + text
 }
 
+// truncateRunesText режет текст по рунам; длинный alt страницы не должен
+// раздувать историю.
+func truncateRunesText(text string, max int) string {
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	return string(runes[:max-1]) + "…"
+}
+
 // renderAssistantPhoto — отправленная ботом картинка в истории (этап 36.2):
 // краткое описание со страницы (alt), иначе домен источника.
 func renderAssistantPhoto(payload []byte) string {
@@ -157,7 +167,7 @@ func renderAssistantPhoto(payload []byte) string {
 	}
 	_ = json.Unmarshal(payload, &p)
 	if alt := strings.TrimSpace(p.Alt); alt != "" {
-		return "[отправил картинку: " + alt + "]"
+		return "[отправил картинку: " + truncateRunesText(alt, maxImageNoteLength) + "]"
 	}
 	if u, err := url.Parse(strings.TrimSpace(p.SourceURL)); err == nil && u.Host != "" {
 		return "[отправил картинку: " + u.Host + "]"

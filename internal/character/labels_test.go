@@ -96,3 +96,21 @@ func TestBatchTextsCarryStableLabels(t *testing.T) {
 		t.Fatalf("строка истории = %q", line)
 	}
 }
+
+// TestParseTurnResultStripsCopiedLabel — модель копирует строку истории
+// целиком: служебная метка и автор срезаются, в чат уходит только текст.
+func TestParseTurnResultStripsCopiedLabel(t *testing.T) {
+	history := []HistoryMessage{{Role: "user", Author: "Коля", Content: "привет"}}
+	got, err := ParseTurnResultWithHistory(
+		[]byte(`{"decision":"answer","messages":["[пн 02.11 17:02] #m123 Коля: привет"]}`), history)
+	if err != nil {
+		t.Fatalf("разбор: %v", err)
+	}
+	if got.Messages[0] != "привет" {
+		t.Fatalf("скопированная метка/автор не срезаны: %q", got.Messages[0])
+	}
+	// Служебная метка без текста — пустое сообщение уходит в repair.
+	if _, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["#m123"]}`)); err == nil {
+		t.Fatal("ответ из одной метки принят как сообщение")
+	}
+}

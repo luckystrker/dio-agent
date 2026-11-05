@@ -161,8 +161,12 @@ func collectToolResultURLAlts(text string) map[string]string {
 			continue
 		}
 		tail := strings.TrimSpace(line[loc[1]:])
-		tail = strings.TrimPrefix(tail, "—")
-		tail = strings.TrimSpace(tail)
+		if !strings.HasPrefix(tail, "—") {
+			// Подпись идёт только в формате списка web_fetch «URL — текст»;
+			// произвольный хвост строки поиска подписью не считается.
+			continue
+		}
+		tail = strings.TrimSpace(strings.TrimPrefix(tail, "—"))
 		if tail == "" {
 			continue
 		}

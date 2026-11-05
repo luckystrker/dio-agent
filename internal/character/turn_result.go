@@ -204,6 +204,7 @@ func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
 	// истории в ответ (решение 2026-11-02): срезаем до валидации, чтобы
 	// опустевшее сообщение ушло в repair, а не в чат.
 	r.Messages = stripLeadingHistoryStamps(r.Messages)
+	r.Messages = stripLeadingMessageLabels(r.Messages)
 	r.Messages = stripCopiedAuthors(r.Messages, history)
 	if err := r.Validate(); err != nil {
 		return TurnResult{}, err
@@ -226,6 +227,20 @@ func stripLeadingHistoryStamps(messages []string) []string {
 			continue
 		}
 		messages[i] = m[loc[1]:]
+	}
+	return messages
+}
+
+// messageLabelPrefixRe — ведущая служебная метка сообщения (#m<id>) в начале
+// скопированной из истории строки. Срезается только канонический вид метки.
+var messageLabelPrefixRe = regexp.MustCompile(`^\s*#m\d+(?:\s+|$)`)
+
+// stripLeadingMessageLabels убирает скопированную метку сообщения перед
+// валидацией: метка служебная, в ответе её быть не должно. Автор «Коля: …»
+// после среза метки снимается следующей чисткой (stripCopiedAuthors).
+func stripLeadingMessageLabels(messages []string) []string {
+	for i, m := range messages {
+		messages[i] = messageLabelPrefixRe.ReplaceAllString(m, "")
 	}
 	return messages
 }
