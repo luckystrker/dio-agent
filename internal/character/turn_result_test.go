@@ -173,6 +173,37 @@ func TestWantForcedTool(t *testing.T) {
 	}
 }
 
+// TestTurnResultJunkImageURLInert — мусорный image_url не роняет ответ:
+// текст уходит без картинки (2026-11-05).
+func TestTurnResultJunkImageURLInert(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["ок"],"image_url":": "}`))
+	if err != nil {
+		t.Fatalf("мусорный image_url отвергнут: %v", err)
+	}
+	if r.ImageURL != "" {
+		t.Fatalf("image_url не вычищен: %q", r.ImageURL)
+	}
+	r, err = ParseTurnResult([]byte(`{"decision":"answer","messages":["ок"],"image_url":"https://example.com/a.jpg"}`))
+	if err != nil {
+		t.Fatalf("годный image_url отвергнут: %v", err)
+	}
+	if r.ImageURL != "https://example.com/a.jpg" {
+		t.Fatalf("годный image_url потерян: %q", r.ImageURL)
+	}
+}
+
+// TestTurnResultBlankStickerInert — пробельная метка стикера не роняет ход:
+// вычищается до валидации, как мусорная реакция при answer (2026-11-05).
+func TestTurnResultBlankStickerInert(t *testing.T) {
+	r, err := ParseTurnResult([]byte(`{"decision":"answer","messages":["ок"],"sticker":" "}`))
+	if err != nil {
+		t.Fatalf("пробельная метка стикера отвергнута: %v", err)
+	}
+	if r.Sticker != "" {
+		t.Fatalf("метка стикера не вычищена: %q", r.Sticker)
+	}
+}
+
 // TestTurnResultAnswerMediaOnly — answer без текста допустим, если доставляет
 // стикер или реакцию (2026-11-03: ответ стикером на гифку уходил в скип).
 func TestTurnResultAnswerMediaOnly(t *testing.T) {

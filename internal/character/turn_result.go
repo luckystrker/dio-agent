@@ -438,6 +438,10 @@ var doubleColonRe = regexp.MustCompile(`"\s*::`)
 // полях не меняет смысла результата, а слабые модели кладут его стабильно
 // (живой смоук 2026-10-30). Содержательные нарушения Validate — терминальны.
 func stripInertContradictions(r TurnResult) TurnResult {
+	// Метка стикера — номер или эмодзи из панели, не текст с пробелами.
+	// Пустая/пробельная метка — мусор, как недопустимая реакция при answer:
+	// ход не должен падать из-за «sticker":" "» (живой смоук 2026-11-05).
+	r.Sticker = strings.TrimSpace(r.Sticker)
 	if r.Decision != DecisionDefer {
 		r.DeferHours = nil
 	}
@@ -466,6 +470,19 @@ func stripInertContradictions(r TurnResult) TurnResult {
 		// Картинка — отдельный пузырь после текста ответа (36.2): при react/
 		// ignore/defer отправлять её некуда — поле мягко обнуляется.
 		r.ImageURL = ""
+	} else {
+		// Мусорная картинка не роняет ответ: модель ставит в image_url
+		// заглушки вроде ": " (живой смоук 2026-11-05). Неразбираемый адрес
+		// вычищается, текст уходит без картинки; опасные схемы и пустой хост
+		// остаются ошибкой валидации — их не глотаем.
+		r.ImageURL = strings.TrimSpace(r.ImageURL)
+		if r.ImageURL != "" {
+			u, err := url.Parse(r.ImageURL)
+			if err != nil || (u.Scheme == "" && u.Host == "") {
+				// Не адрес, а заглушка/относительный путь — вычищаем.
+				r.ImageURL = ""
+			}
+		}
 	}
 	for i := range r.Memory {
 		if r.Memory[i].Kind != "claim" {

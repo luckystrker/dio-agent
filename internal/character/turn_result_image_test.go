@@ -20,7 +20,7 @@ func TestParseTurnResultImageURL(t *testing.T) {
 		`{"decision":"answer","messages":["x"],"image_url":"javascript:alert(1)"}`,
 		`{"decision":"answer","messages":["x"],"image_url":"file:///etc/passwd"}`,
 		`{"decision":"answer","messages":["x"],"image_url":"https://"}`,
-		`{"decision":"answer","messages":["x"],"image_url":"` + strings.Repeat("a", maxImageURLLen+1) + `"}`,
+		`{"decision":"answer","messages":["x"],"image_url":"https://example.com/` + strings.Repeat("a", maxImageURLLen+1) + `"}`,
 	} {
 		if _, err := ParseTurnResult([]byte(bad)); err == nil {
 			t.Fatalf("недопустимый image_url принят: %s", bad)
