@@ -336,3 +336,62 @@ func TestParseConsolidationProposal(t *testing.T) {
 		}
 	})
 }
+
+// TestNextDailySlot — перенос намерения после дневного лимита: ближайший
+// слот 10:00 в поясе персонажа строго после now.
+func TestNextDailySlot(t *testing.T) {
+	loc, err := time.LoadLocation("Asia/Novosibirsk")
+	if err != nil {
+		t.Fatalf("зона не загружена: %v", err)
+	}
+	cases := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "после слота — завтра",
+			now:  time.Date(2026, 11, 5, 13, 41, 0, 0, loc),
+			want: time.Date(2026, 11, 6, 10, 0, 0, 0, loc),
+		},
+		{
+			name: "до слота — сегодня",
+			now:  time.Date(2026, 11, 5, 5, 0, 0, 0, loc),
+			want: time.Date(2026, 11, 5, 10, 0, 0, 0, loc),
+		},
+		{
+			name: "ровно слот — завтра",
+			now:  time.Date(2026, 11, 5, 10, 0, 0, 0, loc),
+			want: time.Date(2026, 11, 6, 10, 0, 0, 0, loc),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nextDailySlot(tc.now, loc, initiativeDailySlotHour); !got.Equal(tc.want) {
+				t.Fatalf("nextDailySlot = %s, хочу %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDailyLimitDeferral — под deferral попадает только дневной лимит, не
+// «чат активен» и не истёкший срок.
+func TestDailyLimitDeferral(t *testing.T) {
+	for _, reason := range []string{
+		"достигнут дневной лимит инициатив (2/сутки, §14.3)",
+		"достигнут дневной лимит инициатив (4/сутки, §14.3)",
+	} {
+		if !dailyLimitDeferral(reason) {
+			t.Fatalf("причина %q должна переноситься", reason)
+		}
+	}
+	for _, reason := range []string{
+		"чат активен — инициатива неуместна (§14.3)",
+		"между инициативами прошло меньше 4h (§14.3)",
+		"срок истёк (expiresAt)",
+	} {
+		if dailyLimitDeferral(reason) {
+			t.Fatalf("причина %q не должна переноситься", reason)
+		}
+	}
+}

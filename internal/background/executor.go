@@ -196,6 +196,27 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			return out, gerr
 		}
 		if cancelled {
+			// Дневной лимит не должен съедать намерение навсегда: первое по
+			// очереди переносим на ближайший дневной слот, остальные отменяем.
+			// Иначе после дня с двумя инициативами наступает тишина, пока
+			// человек сам не напишет (живой смоук 2026-11-04).
+			if dailyLimitDeferral(reason) {
+				other, herr := s.intentions.HasOtherPending(ctx, it.TargetChatID, it.ID)
+				if herr != nil {
+					return out, herr
+				}
+				if !other {
+					until := nextDailySlot(s.now(), s.location, initiativeDailySlotHour)
+					if rerr := s.intentions.Release(ctx, it.ID, until); rerr != nil {
+						return out, rerr
+					}
+					_ = task.Cancel("отложено: " + reason)
+					out.Outcome = "deferred"
+					out.Detail = reason + "; перенесено на " + until.Format("02.01 15:04")
+					out.Latency = s.now().Sub(started)
+					return out, nil
+				}
+			}
 			_ = task.Cancel(reason)
 			_, _ = s.intentions.Cancel(ctx, it.ID, reason)
 			out.Outcome, out.Detail = "cancelled", reason
@@ -468,6 +489,30 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 	out.Outcome = "completed"
 	out.Latency = s.now().Sub(started)
 	return out, nil
+}
+
+// initiativeDailySlotHour — час (в поясе персонажа), на который переносится
+// намерение, упёршееся в дневной лимит инициатив: 10:00, уже вне тихого блока.
+const initiativeDailySlotHour = 10
+
+// dailyLimitDeferral — причина гейта «дневной лимит инициатив»: такое
+// намерение не отменяется, а переносится на следующий дневной слот.
+func dailyLimitDeferral(reason string) bool {
+	return strings.HasPrefix(reason, "достигнут дневной лимит инициатив")
+}
+
+// nextDailySlot — ближайший час hour в поясе персонажа строго после now.
+// Рано утром это сегодня, после слота — завтра.
+func nextDailySlot(now time.Time, loc *time.Location, hour int) time.Time {
+	if loc == nil {
+		loc = now.Location()
+	}
+	n := now.In(loc)
+	slot := time.Date(n.Year(), n.Month(), n.Day(), hour, 0, 0, 0, loc)
+	if !slot.After(n) {
+		slot = slot.AddDate(0, 0, 1)
+	}
+	return slot
 }
 
 // runGates — проверка актуальности перед запуском (§14.1) и проактивная

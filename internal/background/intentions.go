@@ -162,6 +162,26 @@ func (r *IntentionRepo) Release(ctx context.Context, id int64, notBefore time.Ti
 	return nil
 }
 
+// HasOtherPending — есть ли в чате другое ожидающее сообщение-намерение
+// (pending: reply_later/check_in/share). Нужно гейту лимита: на следующие
+// сутки переносим только одно намерение, иначе отменённые за день копятся и
+// завтра устраивают очередь. Running не считаем: в одном такте их может быть
+// несколько, и первый же Release станет pending для остальных. Explore —
+// внутреннее действие, сообщений не шлёт, дорогу инициативе не занимает.
+func (r *IntentionRepo) HasOtherPending(ctx context.Context, chatID, excludeID int64) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM intentions
+		  WHERE target_chat_id = $1 AND status = 'pending' AND id <> $2
+		    AND kind IN ('reply_later', 'check_in', 'share')
+		)`, chatID, excludeID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("намерения: живые намерения чата не прочитаны: %w", err)
+	}
+	return exists, nil
+}
+
 // Cancel отменяет намерение с причиной; терминальные статусы не трогает.
 // Связанный ход инициативы (related_turn_id, ещё created) помечается skipped —
 // иначе ход-сирота навсегда оседает created без событий (блок 18.7).
