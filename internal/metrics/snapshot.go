@@ -105,6 +105,10 @@ type QueueStats struct {
 type Deliveries struct {
 	Total   DeliveryStatusCounts `json:"total"`
 	Last24h DeliveryStatusCounts `json:"last_24h"`
+	// RepliesSent24h / ForwardsSent24h — ответы реплаем и пересылки за сутки
+	// (этапы 37.2–37.3): редкие действия, видимые в outbox.
+	RepliesSent24h  int64 `json:"replies_sent_24h"`
+	ForwardsSent24h int64 `json:"forwards_sent_24h"`
 }
 
 // DeliveryStatusCounts — счётчики статусов delivery_outbox (§13.2).

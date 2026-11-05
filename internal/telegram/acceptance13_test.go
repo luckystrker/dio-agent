@@ -343,7 +343,7 @@ func TestAcc13TransportErrorHidesToken(t *testing.T) {
 	srv.Close() // порт закрыт → отказ соединения, URL с токеном попадает в url.Error
 
 	client := NewClient("sekret-token-abc", srv.URL, nil)
-	_, err := client.SendMessage(context.Background(), 1, "привет")
+	_, err := client.SendMessage(context.Background(), 1, "привет", 0)
 	if err == nil {
 		t.Fatal("ожидалась ошибка транспорта, получен успех")
 	}
@@ -362,7 +362,7 @@ func TestAcc13RedactionKeepsDeadlineClassification(t *testing.T) {
 		return nil, fmt.Errorf("post %s: %w", r.URL.String(), context.DeadlineExceeded)
 	})
 	client := NewClient("sekret-token-abc", "http://botapi.invalid", &http.Client{Transport: rt})
-	_, err := client.SendMessage(context.Background(), 1, "привет")
+	_, err := client.SendMessage(context.Background(), 1, "привет", 0)
 	if err == nil {
 		t.Fatal("ожидалась ошибка, получен успех")
 	}

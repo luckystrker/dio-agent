@@ -65,6 +65,21 @@ type ApplyResult struct {
 	// исчерпанного дневного лимита чата (§14.3, этап 33.2): фон всё равно
 	// отменил бы их, поэтому runtime не плодит мёртвые строки.
 	LimitedIntentions []LimitedIntention
+	// SkippedReplies — реплаи, не отправленные из-за неизвестной/чужой метки
+	// (37.2): сообщение уходит без реплая, причина — в лог оператора.
+	SkippedReplies []SkippedReply
+	// SkippedForward — пересылка не создана (37.3): метка не найдена или
+	// относится к другому чату; ход живёт, причина — в лог.
+	SkippedForward *SkippedReply
+	// ForwardOutboxID — id пузыря пересылки; 0 — пересылки не было.
+	ForwardOutboxID int64
+}
+
+// SkippedReply — реплай, который не удалось привязать к сообщению этого чата.
+type SkippedReply struct {
+	Index  int
+	Ref    string
+	Reason string
 }
 
 // RejectedIntention — отклонённое предложение намерения с мусорной темой.
@@ -183,6 +198,24 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 
 	res := ApplyResult{Applied: true}
 
+	// Реплаи (37.2): метка → Telegram message_id только этого чата (событие
+	// пользователя или доставленный ответ бота). Неизвестная метка — сообщение
+	// уходит без реплая, ход живёт; чужая метка так же не проходит.
+	replyTargets := make(map[int]int64, len(opts.Result.ReplyToByMessage))
+	for _, reply := range opts.Result.ReplyToByMessage {
+		messageID, ok, rerr := resolveMessageLabel(ctx, tx, opts.ChatID, reply.Ref)
+		if rerr != nil {
+			return ApplyResult{}, rerr
+		}
+		if !ok {
+			res.SkippedReplies = append(res.SkippedReplies, SkippedReply{
+				Index: reply.Index, Ref: reply.Ref, Reason: "метка не найдена в этом чате",
+			})
+			continue
+		}
+		replyTargets[reply.Index] = messageID
+	}
+
 	// --- описания картинок (37.1): в события ЭТОГО хода, не в память. ---
 	for _, note := range opts.ImageNotes {
 		if strings.TrimSpace(note.Note) == "" {
@@ -213,9 +246,12 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 	switch opts.Result.Decision {
 	case DecisionAnswer:
-		for _, text := range opts.Result.Messages {
-			if err := enqueue(map[string]any{"kind": "message", "text": text},
-				&QueuedDelivery{Kind: "message", Text: text}); err != nil {
+		for i, text := range opts.Result.Messages {
+			payload := map[string]any{"kind": "message", "text": text}
+			if target := replyTargets[i+1]; target > 0 {
+				payload["reply_to_message_id"] = target
+			}
+			if err := enqueue(payload, &QueuedDelivery{Kind: "message", Text: text}); err != nil {
 				return ApplyResult{}, err
 			}
 		}
@@ -308,6 +344,30 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			`INSERT INTO outbox_images (outbox_id, content_type, bytes) VALUES ($1, $2, $3)`,
 			photo.ID, opts.Image.ContentType, opts.Image.Bytes); err != nil {
 			return ApplyResult{}, fmt.Errorf("применение: байты картинки не сохранены: %w", err)
+		}
+	}
+
+	// --- пересылка (37.3): только сообщение ЭТОГО чата; пузырь после
+	// сообщений/остальных действий хода. Неизвестная/чужая метка мягко
+	// обнуляется с логом — ход живёт.
+	if strings.TrimSpace(opts.Result.Forward) != "" {
+		messageID, ok, ferr := resolveMessageLabel(ctx, tx, opts.ChatID, opts.Result.Forward)
+		if ferr != nil {
+			return ApplyResult{}, ferr
+		}
+		if !ok {
+			res.SkippedForward = &SkippedReply{
+				Index: 0, Ref: opts.Result.Forward, Reason: "метка не найдена в этом чате",
+			}
+		} else {
+			forward := &QueuedDelivery{Kind: "forward"}
+			if err := enqueue(map[string]any{
+				"kind":               "forward",
+				"forward_message_id": messageID,
+			}, forward); err != nil {
+				return ApplyResult{}, err
+			}
+			res.ForwardOutboxID = forward.ID
 		}
 	}
 
@@ -547,6 +607,29 @@ func enqueueOutbox(ctx context.Context, tx pgx.Tx, turnID, chatID int64, positio
 		return 0, fmt.Errorf("применение: строка outbox не перечитана: %w", err)
 	}
 	return id, nil
+}
+
+// resolveMessageLabel — метка #m<id> → Telegram message_id, но только если
+// сообщение принадлежит ЭТОМУ чату (37.2, §9.1): событие пользователя или
+// подтверждённо доставленный ответ бота. Метка из другого чата не проходит —
+// реплай между чатами запрещён.
+func resolveMessageLabel(ctx context.Context, tx pgx.Tx, chatID int64, raw string) (int64, bool, error) {
+	messageID, ok := ParseMessageLabel(raw)
+	if !ok {
+		return 0, false, nil
+	}
+	var found bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM social_events WHERE chat_id = $1 AND telegram_message_id = $2
+		) OR EXISTS (
+		  SELECT 1 FROM delivery_outbox
+		  WHERE chat_id = $1 AND telegram_message_id = $2 AND status = 'sent'
+		)`, chatID, messageID).Scan(&found)
+	if err != nil {
+		return 0, false, fmt.Errorf("применение: метка %q не проверена: %w", raw, err)
+	}
+	return messageID, found, nil
 }
 
 // reactionTarget находит Telegram message_id первого события хода (цель реакции).

@@ -19,14 +19,14 @@ func TestDryRunAPILogsSends(t *testing.T) {
 	api := &dryRunAPI{logger: log.New(&buf, "", 0)}
 	ctx := context.Background()
 
-	if _, err := api.SendMessage(ctx, 42, "привет"); err != nil {
+	if _, err := api.SendMessage(ctx, 42, "привет", 0); err != nil {
 		t.Fatalf("sendMessage упал: %v", err)
 	}
 	if err := api.SetMessageReaction(ctx, 42, 7, "👀"); err != nil {
 		t.Fatalf("setMessageReaction упал: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "sendMessage chat=42: привет") {
+	if !strings.Contains(out, "sendMessage chat=42 reply_to=0: привет") {
 		t.Fatalf("sendMessage не попал в лог: %q", out)
 	}
 	if !strings.Contains(out, "setMessageReaction chat=42 message=7: 👀") {
@@ -48,7 +48,7 @@ func TestBuildTelegramAPIDryRunNilLogger(t *testing.T) {
 	if stub.logger == nil {
 		t.Fatal("логгер заглушки не подставлен: первая отправка запанирует")
 	}
-	if _, err := stub.SendMessage(context.Background(), 1, "без логгера"); err != nil {
+	if _, err := stub.SendMessage(context.Background(), 1, "без логгера", 0); err != nil {
 		t.Fatalf("sendMessage упал: %v", err)
 	}
 }
@@ -65,7 +65,7 @@ func TestBuildTelegramAPIDryRunUsesAppLogger(t *testing.T) {
 	if !ok {
 		t.Fatalf("dry-run должен собрать dryRunAPI, собрано %T", api)
 	}
-	if _, err := stub.SendMessage(context.Background(), 1, "проверка лога"); err != nil {
+	if _, err := stub.SendMessage(context.Background(), 1, "проверка лога", 0); err != nil {
 		t.Fatalf("sendMessage упал: %v", err)
 	}
 	if !strings.Contains(buf.String(), "проверка лога") {

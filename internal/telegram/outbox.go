@@ -48,19 +48,29 @@ type OutboxItem struct {
 	FileID string
 	// TargetMessageID — цель реакции; 0 — не задана.
 	TargetMessageID int64
-	Status          OutboxStatus
-	Attempts        int
+	// ReplyToMessageID — сообщение этого чата для reply_parameters (37.2);
+	// 0 — реплая нет.
+	ReplyToMessageID int64
+	// ForwardMessageID — сообщение этого чата для forwardMessage (37.3).
+	ForwardMessageID int64
+	Status           OutboxStatus
+	Attempts         int
 }
 
 // outboxPayload — формат delivery_outbox.payload (пишет character.ApplyTurn):
-// {"kind":"message","text":…} | {"kind":"reaction","reaction":…,"target_message_id":…}
-// | {"kind":"sticker","file_id":…,"emoji":…}.
+// {"kind":"message","text":…,"reply_to_message_id":…} |
+// {"kind":"reaction","reaction":…,"target_message_id":…} |
+// {"kind":"sticker","file_id":…,"emoji":…} |
+// {"kind":"forward","forward_message_id":…} |
+// {"kind":"photo","source_url":…,"alt":…}.
 type outboxPayload struct {
-	Kind            string `json:"kind"`
-	Text            string `json:"text"`
-	Reaction        string `json:"reaction"`
-	TargetMessageID int64  `json:"target_message_id"`
-	FileID          string `json:"file_id"`
+	Kind             string `json:"kind"`
+	Text             string `json:"text"`
+	Reaction         string `json:"reaction"`
+	TargetMessageID  int64  `json:"target_message_id"`
+	FileID           string `json:"file_id"`
+	ReplyToMessageID int64  `json:"reply_to_message_id"`
+	ForwardMessageID int64  `json:"forward_message_id"`
 }
 
 func decodePayload(raw []byte) outboxPayload {
@@ -178,6 +188,8 @@ func scanItems(ctx context.Context, q pgx.Tx, sql string, args ...any) ([]Outbox
 		p := decodePayload(payload)
 		item.Kind, item.Text, item.Reaction, item.TargetMessageID = p.Kind, p.Text, p.Reaction, p.TargetMessageID
 		item.FileID = p.FileID
+		item.ReplyToMessageID = p.ReplyToMessageID
+		item.ForwardMessageID = p.ForwardMessageID
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {

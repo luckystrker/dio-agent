@@ -37,7 +37,7 @@ func TestClientSendMessage(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":777,"chat":{"id":42}}}`))
 	})
 
-	messageID, err := client.SendMessage(context.Background(), 42, "привет")
+	messageID, err := client.SendMessage(context.Background(), 42, "привет", 0)
 	if err != nil {
 		t.Fatalf("sendMessage не удался: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestClient429HonorsRetryAfter(t *testing.T) {
 	})
 
 	start := time.Now()
-	_, err := client.SendMessage(context.Background(), 1, "x")
+	_, err := client.SendMessage(context.Background(), 1, "x", 0)
 	if err == nil {
 		t.Fatalf("429 должен давать ошибку")
 	}
@@ -134,7 +134,7 @@ func TestClientConfirmedErrors(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"chat not found"}`))
 	})
-	_, err := client.SendMessage(context.Background(), 1, "x")
+	_, err := client.SendMessage(context.Background(), 1, "x", 0)
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 400 || apiErr.RetryAfter != 0 {
 		t.Fatalf("подтверждённая 400: %v", err)
@@ -149,7 +149,7 @@ func TestClientOkFalseOnHTTP200(t *testing.T) {
 	client, _ := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ok":false,"description":"internal reason"}`))
 	})
-	_, err := client.SendMessage(context.Background(), 1, "x")
+	_, err := client.SendMessage(context.Background(), 1, "x", 0)
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.HTTPStatus != 200 {
 		t.Fatalf("ok=false при HTTP 200 должен быть ошибкой: %v", err)
@@ -164,7 +164,7 @@ func TestClientCallTimeout(t *testing.T) {
 	client.sendTimeout = 50 * time.Millisecond // таймаут на каждый вызов (§9.5)
 
 	start := time.Now()
-	_, err := client.SendMessage(context.Background(), 1, "x")
+	_, err := client.SendMessage(context.Background(), 1, "x", 0)
 	if err == nil {
 		t.Fatalf("таймаут должен давать ошибку")
 	}
@@ -230,7 +230,7 @@ func TestClientErrorHidesToken(t *testing.T) {
 	})
 	client.sendTimeout = 50 * time.Millisecond
 
-	_, err := client.SendMessage(context.Background(), 1, "x")
+	_, err := client.SendMessage(context.Background(), 1, "x", 0)
 	if err == nil {
 		t.Fatal("таймаут должен давать ошибку")
 	}

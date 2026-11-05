@@ -103,7 +103,7 @@ func (s *stubAPI) GetMe(ctx context.Context) (telegram.BotIdentity, error) {
 	return telegram.BotIdentity{}, nil
 }
 
-func (s *stubAPI) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
+func (s *stubAPI) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
 	s.mu.Lock()
 	hook := s.onSendMessage
 	if hook == nil {
@@ -121,6 +121,15 @@ func (s *stubAPI) SendMessage(ctx context.Context, chatID int64, text string) (i
 		s.mu.Unlock()
 	}
 	return id, err
+}
+
+func (s *stubAPI) ForwardMessage(ctx context.Context, chatID int64, fromChatID int64, messageID int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.msgID++
+	id := s.msgID
+	s.calls = append(s.calls, stubCall{Method: "forwardMessage", ChatID: chatID, Text: "", MessageID: id})
+	return id, nil
 }
 
 func (s *stubAPI) SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error) {

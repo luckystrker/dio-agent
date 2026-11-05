@@ -100,11 +100,14 @@ func TestSnapshotFromDatabase(t *testing.T) {
 	}
 
 	// Доставки.
-	if snap.Deliveries.Total.Sent != 2 || snap.Deliveries.Total.Pending != 1 {
+	if snap.Deliveries.Total.Sent != 4 || snap.Deliveries.Total.Pending != 1 {
 		t.Errorf("доставки всего = %+v", snap.Deliveries.Total)
 	}
-	if snap.Deliveries.Last24h.Sent != 2 {
+	if snap.Deliveries.Last24h.Sent != 4 {
 		t.Errorf("доставки за сутки = %+v", snap.Deliveries.Last24h)
+	}
+	if snap.Deliveries.RepliesSent24h != 1 || snap.Deliveries.ForwardsSent24h != 1 {
+		t.Errorf("реплаи/пересылки за сутки = %d/%d", snap.Deliveries.RepliesSent24h, snap.Deliveries.ForwardsSent24h)
 	}
 
 	// Инициативы и лимиты §14.3.
@@ -219,6 +222,8 @@ func seedMetricsFixture(t *testing.T, ctx context.Context, pool *runtime.Pool) {
 		`INSERT INTO delivery_outbox (turn_id, position, chat_id, payload, status, created_at, updated_at) VALUES
 		   (7001, 0, 777, '{"kind":"message","text":"привет"}', 'sent', now() - interval '10 minutes', now() - interval '8 minutes'),
 		   (7001, 1, 777, '{"kind":"sticker","file_id":"f1"}', 'sent', now() - interval '10 minutes', now() - interval '8 minutes'),
+		   (7001, 2, 777, '{"kind":"message","text":"реплай","reply_to_message_id":55}', 'sent', now() - interval '10 minutes', now() - interval '8 minutes'),
+		   (7001, 3, 777, '{"kind":"forward","forward_message_id":44}', 'sent', now() - interval '10 minutes', now() - interval '8 minutes'),
 		   (7002, 0, 777, '{"kind":"message","text":"ещё"}', 'pending', now() - interval '2 minutes', now() - interval '2 minutes')`,
 		`INSERT INTO budget_counters (pool, period, reserved_calls, actual_calls, actual_tokens) VALUES
 		   ('conversation', (now() AT TIME ZONE 'UTC')::date, 4, 3, 1000),

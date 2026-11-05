@@ -136,9 +136,10 @@ type BotIdentity struct {
 type API interface {
 	GetUpdates(ctx context.Context, offset int64, timeoutSec int) ([]Update, error)
 	GetMe(ctx context.Context) (BotIdentity, error)
-	SendMessage(ctx context.Context, chatID int64, text string) (int64, error)
+	SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error)
 	SendSticker(ctx context.Context, chatID int64, fileID string) (int64, error)
 	SendPhoto(ctx context.Context, chatID int64, filename, contentType string, data []byte) (int64, error)
+	ForwardMessage(ctx context.Context, chatID int64, fromChatID int64, messageID int64) (int64, error)
 	SendChatAction(ctx context.Context, chatID int64, action string) error
 	SetMessageReaction(ctx context.Context, chatID int64, messageID int64, emoji string) error
 }
@@ -197,12 +198,22 @@ func (c *Client) GetMe(ctx context.Context) (BotIdentity, error) {
 	return BotIdentity{ID: result.ID, Username: result.Username}, nil
 }
 
-// SendMessage отправляет текст и возвращает Telegram message_id.
-func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
+// SendMessage отправляет текст и возвращает Telegram message_id. replyTo > 0 —
+// ответ реплаем на сообщение этого же чата (этап 37.2, Bot API 7+):
+// reply_parameters с allow_sending_without_reply — удалённое сообщение не
+// роняет ответ.
+func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.sendTimeout)
 	defer cancel()
 
-	raw, err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text}, maxSmallBody)
+	payload := map[string]any{"chat_id": chatID, "text": text}
+	if replyTo > 0 {
+		payload["reply_parameters"] = map[string]any{
+			"message_id":                  replyTo,
+			"allow_sending_without_reply": true,
+		}
+	}
+	raw, err := c.call(ctx, "sendMessage", payload, maxSmallBody)
 	if err != nil {
 		return 0, err
 	}
@@ -211,6 +222,29 @@ func (c *Client) SendMessage(ctx context.Context, chatID int64, text string) (in
 	}
 	if err := json.Unmarshal(raw, &result); err != nil || result.MessageID == 0 {
 		return 0, &APIError{Method: "sendMessage", HTTPStatus: 200,
+			Description: "ответ без message_id"}
+	}
+	return result.MessageID, nil
+}
+
+// ForwardMessage пересылает сообщение (этап 37.3). fromChatID всегда равен
+// chatID: пересылка между чатами запрещена (§9.1). Возвращает id нового
+// сообщения в целевом чате.
+func (c *Client) ForwardMessage(ctx context.Context, chatID int64, fromChatID int64, messageID int64) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.sendTimeout)
+	defer cancel()
+
+	raw, err := c.call(ctx, "forwardMessage", map[string]any{
+		"chat_id": chatID, "from_chat_id": fromChatID, "message_id": messageID,
+	}, maxSmallBody)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || result.MessageID == 0 {
+		return 0, &APIError{Method: "forwardMessage", HTTPStatus: 200,
 			Description: "ответ без message_id"}
 	}
 	return result.MessageID, nil

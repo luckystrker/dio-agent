@@ -348,8 +348,18 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: реакция %s поставлена (turn %d, сообщение %d)",
 			row.Reaction, row.TurnID, row.TargetMessageID)
-	default:
-		messageID, err := l.api.SendMessage(ctx, row.ChatID, row.Text)
+	case "forward":
+		// Пересылка внутри того же чата (37.3): from_chat_id == chat_id —
+		// между чатами запрещено (§9.1), метка уже проверена применением.
+		if row.ForwardMessageID == 0 {
+			qctx, cancel := l.persistCtx()
+			defer cancel()
+			if ferr := l.repo.MarkFailed(qctx, row.ID, "пересылка без message_id"); ferr != nil {
+				l.requeueOnDBError(ctx, row, ferr.Error())
+			}
+			return
+		}
+		messageID, err := l.api.ForwardMessage(ctx, row.ChatID, row.ChatID, row.ForwardMessageID)
 		if err != nil {
 			l.handleSendError(ctx, row, err)
 			return
@@ -363,8 +373,25 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 		}
 		l.noteSent(row)
 		l.markGroupInvolvement(row.ChatID)
-		l.logger.Printf("delivery: отправлено (turn %d, поз. %d, message_id %d)",
-			row.TurnID, row.Position, messageID)
+		l.logger.Printf("delivery: переслано внутри чата (turn %d, поз. %d, исходное %d → message_id %d)",
+			row.TurnID, row.Position, row.ForwardMessageID, messageID)
+	default:
+		messageID, err := l.api.SendMessage(ctx, row.ChatID, row.Text, row.ReplyToMessageID)
+		if err != nil {
+			l.handleSendError(ctx, row, err)
+			return
+		}
+		qctx, cancel := l.persistCtx()
+		err = l.repo.MarkSent(qctx, row.ID, &messageID)
+		cancel()
+		if err != nil {
+			l.markUnknownAfterDBError(ctx, row, err.Error())
+			return
+		}
+		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
+		l.logger.Printf("delivery: отправлено (turn %d, поз. %d, message_id %d, reply_to %d)",
+			row.TurnID, row.Position, messageID, row.ReplyToMessageID)
 	}
 }
 

@@ -26,6 +26,21 @@ func TurnResultJSONSchema() map[string]any {
 				"items":    map[string]any{"type": "string", "minLength": 1, "maxLength": maxNoteLength},
 				"maxItems": maxNotes,
 			},
+			"reply_to_by_message": map[string]any{
+				"type":     "array",
+				"maxItems": maxMessageReplies,
+				"description": "Необязательно: ответить реплаем на конкретное сообщение. index — номер твоего сообщения в messages (с 1), ref — метка вида #m123 " +
+					"из истории или пачки. Реплай возможен только на сообщение этого чата; неизвестная метка — сообщение уйдёт без реплая.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"index": map[string]any{"type": "integer", "minimum": 1, "maximum": maxMessages},
+						"ref":   map[string]any{"type": "string", "minLength": 1, "maxLength": maxMessageLabelLen},
+					},
+					"required":             []string{"index", "ref"},
+					"additionalProperties": false,
+				},
+			},
 			"image_notes": map[string]any{
 				"type":     "array",
 				"maxItems": maxImageNotes,
@@ -90,6 +105,11 @@ func TurnResultJSONSchema() map[string]any {
 				"type": "string", "minLength": 1, "maxLength": maxImageURLLen,
 				"description": "Необязательная картинка к ответу (одна за ход). Только полный http(s)-адрес, который ты видел в результатах поиска или web_fetch ЭТОГО хода " +
 					"(в том числе в списке «Картинки на странице»). Не придумывай адреса и не вставляй URL в сообщения: картинка уйдёт отдельным сообщением после текста.",
+			},
+			"forward": map[string]any{
+				"type": "string", "minLength": 1, "maxLength": maxMessageLabelLen,
+				"description": "Необязательно: переслать в этот же чат старое сообщение по метке (#m123). Только сообщение этого чата, одна пересылка за ход. " +
+					"Пересылай редко — когда к месту напомнить старое сообщение.",
 			},
 			"intentions": map[string]any{
 				"type":     "array",

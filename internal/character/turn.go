@@ -763,6 +763,18 @@ func (r *Runner) apply(ctx context.Context, in Input, result TurnResult, image *
 		r.logf("ход %d: лимит инициатив исчерпан — намерение не создано (%s %q, §14.3)",
 			in.TurnID, limited.Kind, limited.Topic)
 	}
+	// Реплаи (37.2): неизвестная метка / чужой чат — сообщение ушло без
+	// реплая; молчаливая потеря видна оператору.
+	for _, skipped := range out.Apply.SkippedReplies {
+		r.logf("ход %d: реплай к сообщению %d (%q) не отправлен — %s",
+			in.TurnID, skipped.Index, skipped.Ref, skipped.Reason)
+	}
+	// Пересылка (37.3): метка не найдена / чужой чат — пересылки нет.
+	if skipped := out.Apply.SkippedForward; skipped != nil {
+		r.logf("ход %d: пересылка %q не создана — %s", in.TurnID, skipped.Ref, skipped.Reason)
+	} else if out.Apply.ForwardOutboxID != 0 {
+		r.logf("ход %d: пересылка внутри чата поставлена в outbox (%d)", in.TurnID, out.Apply.ForwardOutboxID)
+	}
 	r.logf("ход %d выполнен: decision=%s сообщений=%d памяти=%d намерений=%d доставки=%d recovered=%v",
 		in.TurnID, result.Decision, len(result.Messages), len(out.Apply.MemoryIDs),
 		len(out.Apply.IntentionIDs), len(out.Apply.OutboxIDs), out.Recovered)

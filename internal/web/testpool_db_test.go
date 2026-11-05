@@ -59,7 +59,7 @@ func newTestPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
-	if applied := applyMigrations(t, ctx, pool); applied != 22 {
+	if applied := applyMigrations(t, ctx, pool); applied != 23 {
 		t.Fatalf("миграции: применено %d, хочу 23", applied)
 	}
 	return pool

@@ -41,6 +41,8 @@ func TestPrometheusExposition(t *testing.T) {
 		`dio_deliveries_total{status="sent"} 10`,
 		`dio_deliveries_total{status="unknown"} 1`,
 		`dio_deliveries_24h{status="sent"} 4`,
+		`dio_deliveries_replies_24h 0`,
+		`dio_deliveries_forwards_24h 0`,
 		`dio_intentions_created_24h{kind="share"} 2`,
 		`dio_intentions_completed_24h{kind="share"} 1`,
 		`dio_proactive_used_today{chat_id="777"} 1`,

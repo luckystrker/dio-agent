@@ -242,14 +242,16 @@ func TestProactiveCaps(t *testing.T) {
 		t.Fatalf("после паузы инициатива должна исполниться, статус %s", st)
 	}
 
-	// 4) третья за сутки — дневной лимит (§14.3: не более 2).
+	// 4) третья за сутки — дневной лимит (§14.3: не более 2). С 2026-11-05
+	// (af3e0a9) первая в очереди инициатива не отменяется навсегда, а
+	// переносится на следующий дневной слот — статус остаётся pending.
 	d := f.createIntention(t, ctx, KindCheckIn, "просто скучаю", -6, bgChatID)
 	f.setNow(f.now.Add(5 * time.Hour))
 	if err := f.sched.Tick(ctx); err != nil {
 		t.Fatalf("такт 4 не удался: %v", err)
 	}
-	if st := f.intentionStatus(t, ctx, d); st != "cancelled" {
-		t.Fatalf("третья инициатива за сутки должна быть отменена, статус %s", st)
+	if st := f.intentionStatus(t, ctx, d); st != "pending" {
+		t.Fatalf("третья инициатива за сутки должна быть перенесена (pending), статус %s", st)
 	}
 
 	// 5) check_in в группу — никогда (30.3); share/reply_later в группу имеют

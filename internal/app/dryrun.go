@@ -25,8 +25,13 @@ func (d *dryRunAPI) GetMe(ctx context.Context) (telegram.BotIdentity, error) {
 	return telegram.BotIdentity{}, nil
 }
 
-func (d *dryRunAPI) SendMessage(ctx context.Context, chatID int64, text string) (int64, error) {
-	d.logger.Printf("dry-run: sendMessage chat=%d: %s", chatID, text)
+func (d *dryRunAPI) SendMessage(ctx context.Context, chatID int64, text string, replyTo int64) (int64, error) {
+	d.logger.Printf("dry-run: sendMessage chat=%d reply_to=%d: %s", chatID, replyTo, text)
+	return 0, nil
+}
+
+func (d *dryRunAPI) ForwardMessage(ctx context.Context, chatID int64, fromChatID int64, messageID int64) (int64, error) {
+	d.logger.Printf("dry-run: forwardMessage chat=%d from=%d message=%d", chatID, fromChatID, messageID)
 	return 0, nil
 }
 

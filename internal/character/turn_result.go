@@ -50,6 +50,8 @@ const (
 	maxImageNotes = 6
 	// maxImageNoteLength — короткая фраза об одной картинке (этап 37.1).
 	maxImageNoteLength = 200
+	// maxMessageReplies — реплаи только к своим сообщениям ответа (их ≤4).
+	maxMessageReplies = 4
 )
 
 // Действия хода (§11.2). В JSON-схеме — decision.
@@ -104,6 +106,14 @@ type RelationshipDelta struct {
 	Reason   string   `json:"reason"`
 }
 
+// MessageReply — реплай к одному из сообщений ответа (этап 37.2): index —
+// номер в messages с 1, ref — метка сообщения этого чата (#m<id>). Отдельный
+// массив яснее слабой модели, чем messages-объекты, и не ломает схему строк.
+type MessageReply struct {
+	Index int    `json:"index"`
+	Ref   string `json:"ref"`
+}
+
 // SaveStickerProposal — предложение сохранить присланный стикер в коллекцию
 // (этап 25.5): модель даёт только заметку «когда уместен», file_id берёт
 // runtime из пачки — придумать стикер модель не может.
@@ -118,6 +128,14 @@ type TurnResult struct {
 	Notes    []string          `json:"notes,omitempty"`
 	Memory   []MemoryCandidate `json:"memory,omitempty"`
 	Reaction string            `json:"reaction,omitempty"`
+	// ReplyToByMessage — необязательные реплаи к сообщениям ответа по меткам
+	// истории/пачки (этап 37.2). Runtime шлёт reply_parameters только если
+	// метка — сообщение ЭТОГО чата; иначе сообщение уходит без реплая.
+	ReplyToByMessage []MessageReply `json:"reply_to_by_message,omitempty"`
+	// Forward — метка сообщения ЭТОГО чата для пересылки в него же (этап 37.3,
+	// §9.1: между чатами нельзя). Одна пересылка за ход; неизвестная метка
+	// мягко обнуляется с логом.
+	Forward string `json:"forward,omitempty"`
 	// Sticker — метка стикера из коллекции в панели («#3»). Отправляет
 	// runtime: неизвестная метка мягко обнуляется (этап 25.4).
 	Sticker string `json:"sticker,omitempty"`
@@ -319,6 +337,17 @@ func (r TurnResult) Validate() error {
 	if len(r.Messages) > maxMessages {
 		return fmt.Errorf("turnresult: не более %d сообщений, получено %d", maxMessages, len(r.Messages))
 	}
+	if len(r.ReplyToByMessage) > maxMessageReplies {
+		return fmt.Errorf("turnresult: не более %d реплаев, получено %d", maxMessageReplies, len(r.ReplyToByMessage))
+	}
+	for _, reply := range r.ReplyToByMessage {
+		if runeLen(reply.Ref) > maxMessageLabelLen {
+			return fmt.Errorf("turnresult: метка реплая до %d символов, получено %q", maxMessageLabelLen, reply.Ref)
+		}
+	}
+	if runeLen(r.Forward) > maxMessageLabelLen {
+		return fmt.Errorf("turnresult: метка пересылки до %d символов, получено %q", maxMessageLabelLen, r.Forward)
+	}
 	for _, n := range r.Notes {
 		if runeLen(n) == 0 || runeLen(n) > maxNoteLength {
 			return fmt.Errorf("turnresult: заметка должна быть от 1 до %d символов, получено %d", maxNoteLength, runeLen(n))
@@ -510,7 +539,42 @@ func stripInertContradictions(r TurnResult) TurnResult {
 			r.Memory[i].Confidence = nil // confidence осмыслен только у claim
 		}
 	}
+	// Реплаи (37.2): только к существующим сообщениям ответа; индекс/пустая
+	// метка — мусор формы, ход живёт без реплая.
+	r.ReplyToByMessage = sanitizeMessageReplies(r.ReplyToByMessage, len(r.Messages), r.Decision == DecisionAnswer)
+	// Пересылка (37.3) — действие, как стикер: при ignore/defer её нет;
+	// answer/react могут позвать переслать старое сообщение этого же чата.
+	r.Forward = strings.TrimSpace(r.Forward)
+	if r.Decision != DecisionAnswer && r.Decision != DecisionReact {
+		r.Forward = ""
+	}
 	return r
+}
+
+// sanitizeMessageReplies оставляет реплаи к реальным сообщениям ответа:
+// индекс 1..count, непустая метка, первая запись на индекс. Мусор отбрасывается
+// до Validate — слабая модель не должна ронять ответ неверным индексом.
+func sanitizeMessageReplies(replies []MessageReply, messageCount int, allowed bool) []MessageReply {
+	if !allowed || len(replies) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(replies))
+	out := make([]MessageReply, 0, len(replies))
+	for _, reply := range replies {
+		ref := strings.TrimSpace(reply.Ref)
+		if ref == "" || reply.Index < 1 || reply.Index > messageCount {
+			continue
+		}
+		if _, ok := seen[reply.Index]; ok {
+			continue
+		}
+		seen[reply.Index] = struct{}{}
+		out = append(out, MessageReply{Index: reply.Index, Ref: ref})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var (

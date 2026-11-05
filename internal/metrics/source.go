@@ -376,7 +376,18 @@ func (s *PgSource) collectDeliveries(ctx context.Context, snap *Snapshot, _ time
 		addDelivery(&snap.Deliveries.Total, status, total)
 		addDelivery(&snap.Deliveries.Last24h, status, last24h)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	// Реплаи и пересылки за сутки (37.2–37.3): только подтверждённые sent.
+	return s.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE payload->>'kind' = 'message'
+		                           AND NULLIF(payload->>'reply_to_message_id', '') IS NOT NULL),
+		       count(*) FILTER (WHERE payload->>'kind' = 'forward')
+		FROM delivery_outbox
+		WHERE status = 'sent' AND updated_at >= now() - interval '24 hours'`).
+		Scan(&snap.Deliveries.RepliesSent24h, &snap.Deliveries.ForwardsSent24h)
 }
 
 func addDelivery(counts *DeliveryStatusCounts, status string, n int64) {

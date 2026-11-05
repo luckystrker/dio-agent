@@ -25,6 +25,7 @@ import (
 type telegramStub struct {
 	mu        sync.Mutex
 	messages  []map[string]any
+	forwards  []map[string]any
 	reactions []map[string]any
 	// sendMessage — поведение; nil — успешный ответ с порядковым message_id.
 	sendMessage func(body map[string]any) (int, string) // (status, body)
@@ -54,6 +55,11 @@ func (s *telegramStub) server(t *testing.T) *httptest.Server {
 			s.reactions = append(s.reactions, body)
 			s.mu.Unlock()
 			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case r.URL.Path == "/botTESTTOKEN/forwardMessage":
+			s.mu.Lock()
+			s.forwards = append(s.forwards, body)
+			s.mu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":888}}`))
 		default:
 			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
 		}
@@ -187,12 +193,15 @@ func TestDeliveryLoopTimeoutBecomesUnknownAndCancelsDependents(t *testing.T) {
 	pool := newTestPool(t)
 	ctx := context.Background()
 	stub := &telegramStub{sendMessage: func(map[string]any) (int, string) {
-		time.Sleep(300 * time.Millisecond) // дольше таймаута клиента
+		time.Sleep(2 * time.Second) // дольше таймаута клиента
 		return 200, `{"ok":true,"result":{"message_id":1}}`
 	}}
 	server := stub.server(t)
 	client := NewClient("TESTTOKEN", server.URL, server.Client())
-	client.sendTimeout = 50 * time.Millisecond
+	// Запас на запись тела под нагрузкой: слишком короткий таймаут мог
+	// сработать до записи запроса (dial/TLS), и политика честно видела
+	// retry_wait вместо unknown — тест проверяет исход таймаута после отправки.
+	client.sendTimeout = 500 * time.Millisecond
 	repo := NewOutboxRepo(pool)
 
 	id0 := insertOutbox(t, pool, 130, 42, 0, `{"kind":"message","text":"неизвестно"}`)
@@ -747,5 +756,72 @@ func TestDeliveryLoopSendsSticker(t *testing.T) {
 	}
 	if status != "sent" || telegramID == nil || *telegramID != 555 {
 		t.Fatalf("стикер: статус %q message_id %v, хочу sent/555", status, telegramID)
+	}
+}
+
+// TestDeliveryLoopSendsReply — 37.2: payload reply_to_message_id уходит в
+// Bot API как reply_parameters с allow_sending_without_reply.
+func TestDeliveryLoopSendsReply(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+
+	id := insertOutbox(t, pool, 160, 42, 0,
+		`{"kind":"message","text":"ответ","reply_to_message_id":9001}`)
+	loop := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil, DeliveryOptions{BubbleGap: time.Millisecond})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	msgs := stub.sentMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("sendMessage вызван %d раз", len(msgs))
+	}
+	params, ok := msgs[0]["reply_parameters"].(map[string]any)
+	if !ok || params["message_id"] != float64(9001) || params["allow_sending_without_reply"] != true {
+		t.Fatalf("reply_parameters = %v", msgs[0]["reply_parameters"])
+	}
+	var status string
+	if err := pool.QueryRow(ctx, `SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	if status != "sent" {
+		t.Fatalf("статус %q, хочу sent", status)
+	}
+}
+
+// TestDeliveryLoopForwardsWithinChat — 37.3: forwardMessage идёт с
+// from_chat_id == chat_id, новый message_id фиксируется в outbox.
+func TestDeliveryLoopForwardsWithinChat(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &telegramStub{}
+	server := stub.server(t)
+	client := NewClient("TESTTOKEN", server.URL, server.Client())
+
+	id := insertOutbox(t, pool, 170, 42, 0, `{"kind":"forward","forward_message_id":1234}`)
+	loop := NewDeliveryLoop(pool, NewOutboxRepo(pool), client, nil, DeliveryOptions{BubbleGap: time.Millisecond})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	stub.mu.Lock()
+	forwards := append([]map[string]any{}, stub.forwards...)
+	stub.mu.Unlock()
+	if len(forwards) != 1 {
+		t.Fatalf("forwardMessage вызван %d раз", len(forwards))
+	}
+	if forwards[0]["chat_id"] != float64(42) || forwards[0]["from_chat_id"] != float64(42) || forwards[0]["message_id"] != float64(1234) {
+		t.Fatalf("payload пересылки: %v", forwards[0])
+	}
+	var status string
+	var telegramID *int64
+	if err := pool.QueryRow(ctx,
+		`SELECT status, telegram_message_id FROM delivery_outbox WHERE id = $1`, id).
+		Scan(&status, &telegramID); err != nil {
+		t.Fatalf("outbox: %v", err)
+	}
+	if status != "sent" || telegramID == nil || *telegramID != 888 {
+		t.Fatalf("пересылка: статус %q message_id %v, хочу sent/888", status, telegramID)
 	}
 }
