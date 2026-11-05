@@ -60,7 +60,7 @@ func countIntentions(t *testing.T, ctx context.Context, f *fixture) int {
 	return n
 }
 
-func TestApplySkipsInitiativesAtDailyLimit(t *testing.T) {
+func TestApplyKeepsOneInitiativeAtDailyLimit(t *testing.T) {
 	f, ctx := newFixture(t)
 	seedExhaustedInitiativeLimit(t, ctx, f)
 	f.seedTurn(t, ctx, 801, "привет")
@@ -77,14 +77,14 @@ func TestApplySkipsInitiativesAtDailyLimit(t *testing.T) {
 	if !out.Apply.Applied {
 		t.Fatalf("ход не применился: %+v", out)
 	}
-	if len(out.Apply.IntentionIDs) != 0 {
-		t.Fatalf("при исчерпанном лимите созданы намерения: %v", out.Apply.IntentionIDs)
+	if len(out.Apply.IntentionIDs) != 1 {
+		t.Fatalf("при исчерпанном лимите должно остаться одно намерение, получено: %v", out.Apply.IntentionIDs)
 	}
-	if len(out.Apply.LimitedIntentions) != 2 {
-		t.Fatalf("ограниченных намерений %d, хочу 2: %+v", len(out.Apply.LimitedIntentions), out.Apply.LimitedIntentions)
+	if len(out.Apply.LimitedIntentions) != 1 {
+		t.Fatalf("ограниченных намерений %d, хочу 1: %+v", len(out.Apply.LimitedIntentions), out.Apply.LimitedIntentions)
 	}
-	if n := countIntentions(t, ctx, f); n != 2 {
-		t.Fatalf("намерений в чате %d, хочу только 2 исполненных: %v", n, n)
+	if n := countIntentions(t, ctx, f); n != 3 {
+		t.Fatalf("намерений в чате %d, хочу 2 исполненных + 1 ожидающее: %v", n, n)
 	}
 }
 

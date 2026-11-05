@@ -304,7 +304,10 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	// --- намерения (§14.1): предложения модели + defer → reply_later (§11.2) ---
 	// Дневной лимит инициатив чата (§14.3, этап 33.2): тот же расчёт, что гейт
 	// фона. Исчерпан — новые check_in/share/reply_later не создаём: фон отменил
-	// бы их, а живая база копила десятки мёртвых строк за сутки.
+	// бы их, а живая база копила десятки мёртвых строк за сутки. Исключение —
+	// одна инициатива, если в чате нет ни одной ожидающей: фон при наступлении
+	// срока перенесёт её на следующий слот (dailyLimitDeferral), иначе после
+	// дня с двумя инициативами наступает тишина, пока человек сам не напишет.
 	initiativeLimitReached := false
 	if chatType, cerr := ChatTypeOf(ctx, tx, opts.ChatID); cerr != nil {
 		return ApplyResult{}, cerr
@@ -315,14 +318,8 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		}
 		initiativeLimitReached = InitiativeDailyExhausted(usage)
 	}
+	limitSlotReserved := false
 	for _, proposal := range opts.Result.Intentions {
-		// Инициативный вид при исчерпанном лимите — не создаём (33.2).
-		if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
-			res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
-				Kind: proposal.Kind, Topic: proposal.Topic,
-			})
-			continue
-		}
 		// Тема-мусор (26.2) отклоняется до создания строки: «placeholder1»,
 		// «:)» — не отложенное действие, а мусор в поле. Ход живёт, как при
 		// дубле (§14.1).
@@ -331,6 +328,26 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 				Kind: proposal.Kind, Topic: proposal.Topic, Reason: reason,
 			})
 			continue
+		}
+		if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
+			if limitSlotReserved {
+				res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
+					Kind: proposal.Kind, Topic: proposal.Topic,
+				})
+				continue
+			}
+			pending, perr := hasPendingMessageIntention(ctx, tx, opts.ChatID)
+			if perr != nil {
+				return ApplyResult{}, perr
+			}
+			if pending {
+				res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
+					Kind: proposal.Kind, Topic: proposal.Topic,
+				})
+				continue
+			}
+			// Свободного слота нет, но очередь пуста — эту инициативу ставим;
+			// фон перенесёт её на следующий день, когда упрётся в лимит.
 		}
 		// Runtime-пол задержки по виду (26.2): модель путает часы с минутами,
 		// runtime поднимает до пола, а не отклоняет намерение.
@@ -355,6 +372,9 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+			if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
+				limitSlotReserved = true
+			}
 			if raised != nil {
 				res.RaisedIntentions = append(res.RaisedIntentions, *raised)
 			}
@@ -754,4 +774,22 @@ func saveStickerFromBatch(ctx context.Context, tx pgx.Tx, turnID int64, note str
 		return id, false, nil
 	}
 	return 0, len(stickers) > 0, nil
+}
+
+// hasPendingMessageIntention — есть ли в чате ожидающее сообщение-намерение
+// (reply_later/check_in/share). Нужно apply-гейту лимита: одну инициативу
+// ставим в очередь, только если другой уже нет, иначе за день копится
+// несколько мёртвых строк. Explore сообщений не шлёт и слот не занимает.
+func hasPendingMessageIntention(ctx context.Context, tx pgx.Tx, chatID int64) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM intentions
+		  WHERE target_chat_id = $1 AND status = 'pending'
+		    AND kind IN ('reply_later', 'check_in', 'share')
+		)`, chatID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("применение: ожидающие намерения чата не прочитаны: %w", err)
+	}
+	return exists, nil
 }
