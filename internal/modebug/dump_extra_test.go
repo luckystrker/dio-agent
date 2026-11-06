@@ -180,7 +180,7 @@ func TestRecordFileName(t *testing.T) {
 	}{
 		{Record{TurnID: 246, Call: 1}, "turn-246-call-1.json"},
 		{Record{Task: "intention:42", Call: 2}, "bg-intention-42-call-2.json"},
-		{Record{Task: "", Call: 3}, "unknown-call-3.json"},
+		{Record{Task: "", Call: 3}, "bg-unknown-call-3.json"},
 		{Record{TurnID: 7, Task: "и фоном", Call: 4}, "turn-7-call-4.json"},
 	}
 	for _, tc := range cases {

@@ -166,6 +166,15 @@ func TestMessageGarbageReasonNoFalsePositives(t *testing.T) {
 		"разобрал JSON по схеме",
 		"поправил TurnResult",
 		"у меня TurnResult не проходит",
+		// второй критик: разговор про сами поля схемы — не брак.
+		"у defer_hours максимум 168 часов",
+		"поле image_url теперь необязательное",
+		"поправил save_sticker в схеме",
+		"reply_to_by_message сломался, смотри лог",
+		"поле \"messages\" — массив строк",
+		"В TurnResult есть поле \"messages\"",
+		"если \"messages\" пустой, будет ignore",
+		`формат: {"decision":"answer","messages":["ок"]}`,
 	}
 	for _, text := range normal {
 		if reason := MessageGarbageReason(text); reason != "" {

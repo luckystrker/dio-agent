@@ -518,8 +518,10 @@ func TestTransportRedactsUserinfoInError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("дампер не создан: %v", err)
 	}
-	full := "https://user:userpass@gw.example/v1?api_key=secret-value"
-	failing := failingRT{err: &url.Error{Op: "Post", URL: "https://user:***@gw.example/v1?api_key=secret-value", Err: errors.New("timeout")}}
+	full := "https://user:userpass@gw.example/v1?api_key=secret-value&access_key=secret-two"
+	// net/http маскирует пароль как ***: точная замена URL не сработает, работают
+	// регулярки; ?access_key= — типовое имя шлюза (критик 2026-11-06).
+	failing := failingRT{err: &url.Error{Op: "Post", URL: "https://user:***@gw.example/v1?api_key=secret-value&access_key=secret-two", Err: errors.New("timeout")}}
 	tr := &Transport{Base: failing, Dumper: d}
 
 	ctx := WithCall(context.Background(), NewCall("turn", "13"))
@@ -531,7 +533,7 @@ func TestTransportRedactsUserinfoInError(t *testing.T) {
 		t.Fatal("ошибка транспорта потеряна")
 	}
 	rec, _, _ := readRecord(t, dumpDir)
-	for _, secret := range []string{"userpass", "secret-value"} {
+	for _, secret := range []string{"userpass", "secret-value", "secret-two"} {
 		if strings.Contains(rec.Error, secret) {
 			t.Fatalf("секрет %q в error дампа: %s", secret, rec.Error)
 		}

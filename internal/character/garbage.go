@@ -206,10 +206,10 @@ func isLatin(r rune) bool { return unicode.IsLetter(r) && r <= 0x024F }
 
 // fieldTokenGarbage — имя поля схемы в «форматном» окружении. Живая речь не
 // должна выкидываться: «no reason to worry», «no memory of that, confidence is
-// high», «REASON: опоздал» — не брак. Признаки формата: сообщение состоит
-// только из имени поля (и пунктуации); два разных поля, КАЖДОЕ в JSON-
-// окружении; имя с подчёркиванием (mood_delta, image_url…); JSON-знак рядом;
-// `поле: значение-формата`; склейка с не-латиницей («messagesекафедра»).
+// high», «у defer_hours максимум 168 часов», «поле "messages" — массив строк»,
+// «REASON: опоздал» — не брак. Признаки формата: сообщение состоит только из
+// имени поля (и пунктуации); имя с подчёркиванием, JSON-знак рядом или
+// `поле: значение-формата` при ОТСУТСТВИИ прозы; склейка с не-латиницей.
 func fieldTokenGarbage(text string) string {
 	matches := schemaFieldRe.FindAllStringIndex(text, -1)
 	if len(matches) == 0 {
@@ -220,43 +220,61 @@ func fieldTokenGarbage(text string) string {
 	if !speechContent(schemaFieldRe.ReplaceAllString(text, "")) {
 		return token
 	}
-	distinct := make(map[string]struct{}, len(matches))
-	for _, m := range matches {
-		distinct[strings.ToLower(text[m[0]:m[1]])] = struct{}{}
-	}
-	if len(distinct) >= 2 && allTokensFormatted(text, matches) {
-		return token
-	}
-	if strings.Contains(token, "_") {
-		return token
-	}
 	prev, _ := utf8.DecodeLastRuneInString(text[:matches[0][0]])
 	next, _ := utf8.DecodeRuneInString(text[matches[0][1]:])
-	if jsonSign(prev) || jsonSign(next) {
+	// Склейка с кириллицей — формат всегда: «messagesекафедра».
+	if (prev != 0 && unicode.IsLetter(prev) && !isLatin(prev)) ||
+		(next != 0 && unicode.IsLetter(next) && !isLatin(next)) {
+		return token
+	}
+	// Есть живая проза вне имён полей — это разговор (в т.ч. про схему/код).
+	if proseWordCount(text, matches) > 0 {
+		return ""
+	}
+	// Остались только имена полей + JSON-знаки/значения формата.
+	if strings.Contains(token, "_") || jsonSign(prev) || jsonSign(next) {
 		return token
 	}
 	if next == ':' && colonValueFormatted(text, matches[0][1]) {
 		return token
 	}
-	if (prev != 0 && unicode.IsLetter(prev) && !isLatin(prev)) ||
-		(next != 0 && unicode.IsLetter(next) && !isLatin(next)) {
-		return token
-	}
 	return ""
 }
 
-// allTokensFormatted — каждое имя поля стоит в JSON-окружении: иначе два
-// случайных английских слова («memory», «confidence») — не формат.
-func allTokensFormatted(text string, matches [][]int) bool {
+// formatValues — значения полей схемы: после `поле:` это формат, а не проза.
+var formatValues = map[string]struct{}{
+	"answer": {}, "react": {}, "ignore": {}, "defer": {},
+	"null": {}, "true": {}, "false": {}, "none": {},
+}
+
+// proseWordCount — сколько «живых» слов (≥3 букв) вне имён полей схемы и
+// служебных значений. Одно такое слово — уже разговор, а не формат.
+func proseWordCount(text string, matches [][]int) int {
+	masked := []byte(text)
 	for _, m := range matches {
-		prev, _ := utf8.DecodeLastRuneInString(text[:m[0]])
-		next, _ := utf8.DecodeRuneInString(text[m[1]:])
-		if jsonSign(prev) || jsonSign(next) || (next == ':' && colonValueFormatted(text, m[1])) {
-			continue
+		for i := m[0]; i < m[1] && i < len(masked); i++ {
+			masked[i] = ' '
 		}
-		return false
 	}
-	return true
+	count := 0
+	var word []rune
+	flush := func() {
+		if len(word) >= 3 {
+			if _, isValue := formatValues[strings.ToLower(string(word))]; !isValue {
+				count++
+			}
+		}
+		word = word[:0]
+	}
+	for _, r := range string(masked) {
+		if unicode.IsLetter(r) {
+			word = append(word, r)
+		} else {
+			flush()
+		}
+	}
+	flush()
+	return count
 }
 
 // garbageMessages — причины брака для непустого списка сообщений.

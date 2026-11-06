@@ -6,6 +6,8 @@
 # иначе правило цепляет каталог cmd/agent/ (B0 ревью 2026-11-06)
 /agent
 /agent.exe
+/cmd/agent/agent
+/cmd/agent/agent.exe
 evals/results/
 
 # Локальный мусор Windows-инструментов

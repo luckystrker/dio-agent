@@ -17,9 +17,10 @@ import (
 const Retention = 3 * 24 * time.Hour
 
 // Record — один модельный вызов как он был на проводе. Request и Response —
-// сырые тела (json.RawMessage — байт-в-байт, не пересобранные); для
+// тела как ушли/пришли (JSON нормализуется при сериализации дампа); для
 // стрим-ответа Response — объект со склеенным текстом/reasoning и сырыми
-// чанками (ограниченно). Ключ API в файл не попадает никогда.
+// чанками (ограниченно). Ключ API не пишется в url/headers/error; тело
+// ответа — как его вернул провайдер (эхо шлюза не редактируем).
 type Record struct {
 	// TurnID — номер разговорного хода (0 — фоновая задача).
 	TurnID int64 `json:"turn_id,omitempty"`
@@ -118,6 +119,7 @@ func (d *Dumper) Write(rec Record) {
 	tmp := name + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
+		_ = os.Remove(tmp) // temp уже зарезервирован createTemp — не оставляем мусор
 		d.log("дамп модели: файл %s не создан: %v", tmp, err)
 		return
 	}
@@ -147,7 +149,7 @@ func (d *Dumper) Write(rec Record) {
 
 // recordFileName — turn-<id>-call-<n>.json / bg-<task>-call-<n>.json.
 func recordFileName(rec Record) string {
-	prefix := "unknown"
+	prefix := "bg-unknown"
 	switch {
 	case rec.TurnID > 0:
 		prefix = fmt.Sprintf("turn-%d", rec.TurnID)

@@ -69,7 +69,6 @@ func TestMessageGarbageReasonEmptyAndFragments(t *testing.T) {
 		`{"decision":"x"`:  "decision",
 		"MESSAGES":         "MESSAGES",
 		"Decision: answer": "Decision",
-		"mood_delta и всё": "mood_delta",
 	}
 	for text, want := range garbage {
 		reason := MessageGarbageReason(text)

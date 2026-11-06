@@ -126,8 +126,11 @@ func replay(args []string) error {
 		if err != nil {
 			return err
 		}
-		for _, warning := range warnings {
-			fmt.Printf("предупреждение: %s\n", warning)
+		if i == 1 {
+			// Абляции одинаковы для всех прогонов — предупреждение один раз.
+			for _, warning := range warnings {
+				fmt.Printf("предупреждение: %s\n", warning)
+			}
 		}
 		reply, err := rep.Send(context.Background(), dump.URL, body, dump.Headers)
 		if err != nil {

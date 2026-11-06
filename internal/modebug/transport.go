@@ -141,9 +141,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// reasoning_content — единственное место, где он есть в не-стрим ответе:
 	// ago v0.6.0 читает только message.reasoning (40.3).
-	if call != nil {
-		call.AddReasoning(reasoningFromResponse(data))
-	}
+	// call здесь всегда не nil (ранний pass-through выше).
+	call.AddReasoning(reasoningFromResponse(data))
 	if dump {
 		t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, dumpPayload(data), nil))
 	}
@@ -233,8 +232,10 @@ func sensitiveHeader(name string) bool {
 // ошибки: *url.Error может не совпасть с исходным URL строкой (net/http
 // маскирует пароль как ***), поэтому query и userinfo правятся регулярками.
 var (
-	sensitiveQueryInTextRe = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|apikey|token|secret|password|passwd|signature|sig|auth)[^=&\s"']*=)[^&\s"']+`)
-	userinfoInTextRe       = regexp.MustCompile(`://[^/\s@]+@`)
+	// Любой query-параметр в тексте: решение «секрет или нет» принимает
+	// sensitiveQueryParam — один список правил для url и error (критик 2).
+	queryParamInTextRe = regexp.MustCompile(`([?&])([^=&\s"']+)=([^&\s"']+)`)
+	userinfoInTextRe   = regexp.MustCompile(`://[^/\s@]+@`)
 )
 
 // redactErrorMessage — текст транспортной ошибки без секретов: точная замена
@@ -246,7 +247,13 @@ func redactErrorMessage(msg string, urls ...*url.URL) string {
 		}
 	}
 	msg = userinfoInTextRe.ReplaceAllString(msg, "://REDACTED@")
-	return sensitiveQueryInTextRe.ReplaceAllString(msg, "${1}REDACTED")
+	return queryParamInTextRe.ReplaceAllStringFunc(msg, func(m string) string {
+		sub := queryParamInTextRe.FindStringSubmatch(m)
+		if len(sub) == 4 && sensitiveQueryParam(sub[2]) {
+			return sub[1] + sub[2] + "=REDACTED"
+		}
+		return m
+	})
 }
 
 // sensitiveQueryParam — имя параметра URL, значение которого может быть

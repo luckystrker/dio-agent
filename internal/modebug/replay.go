@@ -42,7 +42,7 @@ func LoadDump(path string) (*Dump, error) {
 	if len(request) == 0 || request[0] != '{' {
 		// request:null проходит проверку на непустоту, но это не запрос:
 		// абляция temperature упала бы присваиванием в nil-map.
-		return nil, fmt.Errorf("дамп %q: пустой request — нужен JSON-объект", path)
+		return nil, fmt.Errorf("дамп %q: request — не JSON-объект (пустой request или null)", path)
 	}
 	var probe struct {
 		Truncated bool `json:"truncated"`
