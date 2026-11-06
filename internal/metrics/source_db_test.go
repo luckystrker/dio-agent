@@ -70,6 +70,10 @@ func TestSnapshotFromDatabase(t *testing.T) {
 	if bgPool.Calls != 2 || bgPool.Tokens != 500 || bgPool.Remaining != 398 {
 		t.Errorf("background пул = %+v", bgPool)
 	}
+	// Кэш префикса (39.2): только первый вызов хода — 400/1000 = 0.4.
+	if snap.Model.PrefixCache.Samples24h != 1 || snap.Model.PrefixCache.AvgShare < 0.399 || snap.Model.PrefixCache.AvgShare > 0.401 {
+		t.Errorf("кэш префикса = %+v, хочу 1 замер со средней долей 0.4", snap.Model.PrefixCache)
+	}
 
 	// Инструменты памяти: 1 из 2 разговорных ходов, причина из журнала.
 	if snap.MemoryTools.ConversationTurns24h != 2 || snap.MemoryTools.TurnsWithTools24h != 1 {
@@ -228,6 +232,12 @@ func seedMetricsFixture(t *testing.T, ctx context.Context, pool *runtime.Pool) {
 		`INSERT INTO budget_counters (pool, period, reserved_calls, actual_calls, actual_tokens) VALUES
 		   ('conversation', (now() AT TIME ZONE 'UTC')::date, 4, 3, 1000),
 		   ('background', (now() AT TIME ZONE 'UTC')::date, 2, 2, 500)`,
+		// Кэш префикса первого вызова хода (39.2): доля считается только по
+		// operation_id вида model:turn:<id>:<attempt>:0; вызов 1 той же
+		// операции в среднее не попадает.
+		`INSERT INTO budget_reservations (operation_id, attempt, pool, actual, period) VALUES
+		   ('model:turn:7001:0:0', 0, 'conversation', '{"tokens":500,"calls":1,"cached_tokens":400,"prompt_tokens":1000}', (now() AT TIME ZONE 'UTC')::date),
+		   ('model:turn:7001:0:1', 0, 'conversation', '{"tokens":50,"calls":1,"cached_tokens":0,"prompt_tokens":100}', (now() AT TIME ZONE 'UTC')::date)`,
 		`INSERT INTO provenance (kind, ref, scopes) VALUES ('runtime_action', 'metrics-test', ARRAY['internal'])`,
 		`INSERT INTO intentions (kind, target_chat_id, topic, reason, provenance_id, status, not_before, dedupe_key, related_turn_id, created_at, updated_at)
 		 SELECT 'share', 777, 'пластинки', 'тест', id, 'completed', now(), 'share:metrics-test', 7001, now() - interval '1 hour', now() - interval '30 minutes'

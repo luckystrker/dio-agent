@@ -22,12 +22,15 @@ func stubToolExec(calls *int) middleware.ToolExecFunc {
 	}
 }
 
-// TestToolLimitStopCraneThreshold — приёмка 16.5, границы серии: первый отказ и
-// второй — ToolErrorEvent (модель видит отказ и может завершиться сама), третий
-// подряд — финальный результат (Final=true), который executor ago обращает в
-// ModelResponse с ResponseForce; отказанные вызовы в исполнитель не уходят.
+// TestToolLimitStopCraneThreshold — с 39.1 первый отказ лимита закрывает
+// инструменты (tool_choice=none) и возвращает ошибку с подсказкой «ответь
+// текстом»; если модель игнорирует закрытие и снова зовёт инструмент, стоп-кран
+// отдаёт финальный результат (Final=true), который executor ago обращает в
+// ModelResponse с ResponseForce. Отказанные вызовы в исполнитель не уходят.
 func TestToolLimitStopCraneThreshold(t *testing.T) {
 	m := NewToolLimitMiddleware(1, nil)
+	closed := 0
+	m.SetOnExhausted(func() { closed++ })
 	executed := 0
 	next := stubToolExec(&executed)
 
@@ -44,30 +47,30 @@ func TestToolLimitStopCraneThreshold(t *testing.T) {
 	if ev := call("c1"); executed != 1 {
 		t.Fatalf("вызов в лимите не дошёл до исполнителя: %T", ev)
 	}
-	// Первый и второй подряд отказ — ошибка инструмента, кран ещё не сработал
-	// (преждевременный кран отнимал бы у модели шанс завершить ход ответом).
-	for i, id := range []string{"c2", "c3"} {
-		te, ok := call(id).(*events.ToolErrorEvent)
-		if !ok {
-			t.Fatalf("отказ %d (%s) не ошибка инструмента — кран сработал раньше времени", i+1, id)
-		}
-		if te.ParentID != id || te.Error == "" {
-			t.Fatalf("отказ %d не отвечает вызову %s или без текста: %+v", i+1, id, te)
-		}
+	// Первый отказ: инструменты закрываются, модель видит подсказку.
+	te, ok := call("c2").(*events.ToolErrorEvent)
+	if !ok {
+		t.Fatalf("первый отказ не ошибка инструмента")
+	}
+	if te.ParentID != "c2" || !strings.Contains(te.Error, "закрыты") || !strings.Contains(te.Error, "текстом") {
+		t.Fatalf("отказ не говорит о закрытии инструментов: %+v", te)
+	}
+	if closed != 1 {
+		t.Fatalf("первый отказ не закрыл инструменты: %d", closed)
 	}
 	if executed != 1 {
-		t.Fatalf("отказанные вызовы ушли в исполнитель: %d", executed)
+		t.Fatalf("отказанный вызов ушёл в исполнитель: %d", executed)
 	}
 
-	// Третий подряд — кран: финальный результат, отвечающий вызову.
-	tr, ok := call("c4").(*events.ToolResultEvent)
+	// Модель игнорирует tool_choice=none — кран: финальный результат.
+	tr, ok := call("c3").(*events.ToolResultEvent)
 	if !ok {
-		t.Fatalf("третий подряд отказ не включил стоп-кран")
+		t.Fatalf("игнорирование закрытия не включило стоп-кран")
 	}
 	if !tr.Result.Final {
 		t.Fatalf("результат стоп-крана не финальный")
 	}
-	if tr.ParentID != "c4" {
+	if tr.ParentID != "c3" {
 		t.Fatalf("стоп-кран не отвечает вызову: parent=%s", tr.ParentID)
 	}
 	if executed != 1 {
@@ -95,10 +98,10 @@ func TestToolLimitStopCraneThreshold(t *testing.T) {
 	}
 }
 
-// TestToolLimitStopCraneDirectReacts — на прямом ходе стоп-кран отдаёт
-// decision=react с «🤔» вместо ignore (bug 2026-11-02): молчание выглядело как
-// потерянный вопрос; видимая реакция — честный сигнал, а текст без модели не
-// сгенерировать (ошибка генерации зациклила бы повторы).
+// TestToolLimitStopCraneDirectReacts — на прямом ходе стоп-кран (модель
+// игнорирует закрытие инструментов) отдаёт decision=react с «🤔»: финальный
+// вызов без инструментов не дал текста, а молчание выглядело бы потерей
+// вопроса (39.1).
 func TestToolLimitStopCraneDirectReacts(t *testing.T) {
 	m := NewToolLimitMiddleware(1, nil)
 	m.SetDirect(true)
@@ -115,9 +118,8 @@ func TestToolLimitStopCraneDirectReacts(t *testing.T) {
 	}
 
 	call("c1") // в лимите
-	call("c2") // отказ 1
-	call("c3") // отказ 2
-	ev := call("c4")
+	call("c2") // первый отказ — закрытие инструментов
+	ev := call("c3")
 	tr, ok := ev.(*events.ToolResultEvent)
 	if !ok || !tr.Result.Final {
 		t.Fatalf("стоп-кран не сработал на прямом ходе: %T", ev)

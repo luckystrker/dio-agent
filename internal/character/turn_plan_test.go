@@ -109,7 +109,7 @@ func TestLogMemoryTurn(t *testing.T) {
 	line := buf.String()
 	for _, want := range []string{
 		"ход 42: память",
-		"инструменты вкл",
+		"обращение нужно",
 		"причина: history_trimmed",
 		"записей=4",
 		"fits=false",

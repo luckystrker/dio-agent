@@ -151,11 +151,14 @@ func (s *BudgetStore) Release(ctx context.Context, operationID, pool string, cou
 
 // ActualUsage — фактическая стоимость операции. CachedTokens — токены
 // префикса, прочитанные из кэша провайдера (nil — провайдер их не сообщил):
-// наблюдаемость попадания в префикс (решение 2026-11-02).
+// наблюдаемость попадания в префикс (решение 2026-11-02). PromptTokens —
+// размер промпта (nil — не сообщён): по нему считается доля кэша первого
+// вызова хода (39.2).
 type ActualUsage struct {
 	Tokens       int64
 	Calls        int64
 	CachedTokens *int64
+	PromptTokens *int64
 	Unknown      bool
 }
 
@@ -174,6 +177,9 @@ func (s *BudgetStore) RecordActualUsage(ctx context.Context, operationID, pool s
 	actual := map[string]any{"tokens": usage.Tokens, "calls": usage.Calls}
 	if usage.CachedTokens != nil {
 		actual["cached_tokens"] = *usage.CachedTokens
+	}
+	if usage.PromptTokens != nil {
+		actual["prompt_tokens"] = *usage.PromptTokens
 	}
 	if usage.Unknown {
 		// Неизвестная стоимость ≠ нулевая: actual не заполняется токенами.

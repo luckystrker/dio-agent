@@ -254,7 +254,23 @@ func (s *PgSource) collectModel(ctx context.Context, snap *Snapshot, _ time.Time
 		}
 		snap.Model.Pools[pool] = counts
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	// Кэш префикса первого вызова разговорного хода за 24 часа (39.2):
+	// operation_id вида model:turn:<id>:<attempt>:0 — первый модельный вызов
+	// хода. Доля считается только по строкам, где провайдер сообщил и
+	// cached_tokens, и prompt_tokens.
+	return s.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE (actual->>'prompt_tokens')::numeric > 0),
+		       coalesce(avg((actual->>'cached_tokens')::numeric
+		                    / NULLIF((actual->>'prompt_tokens')::numeric, 0)), 0)
+		FROM budget_reservations
+		WHERE created_at >= now() - interval '24 hours'
+		  AND operation_id ~ '^model:turn:[0-9]+:[0-9]+:0$'
+		  AND actual ? 'cached_tokens' AND actual ? 'prompt_tokens'`).
+		Scan(&snap.Model.PrefixCache.Samples24h, &snap.Model.PrefixCache.AvgShare)
 }
 
 func (s *PgSource) collectMemoryTools(ctx context.Context, snap *Snapshot, _ time.Time) error {

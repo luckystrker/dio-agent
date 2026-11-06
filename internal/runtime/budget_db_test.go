@@ -343,22 +343,23 @@ func TestRecordActualUsageCachedTokens(t *testing.T) {
 		t.Fatalf("резерв не прошёл: ok=%v err=%v", ok, err)
 	}
 	cached := int64(64)
+	prompt := int64(100)
 	if err := store.RecordActualUsage(ctx, op, BudgetPoolConversation, ActualUsage{
-		Tokens: 120, Calls: 1, CachedTokens: &cached,
+		Tokens: 120, Calls: 1, CachedTokens: &cached, PromptTokens: &prompt,
 	}); err != nil {
 		t.Fatalf("actual не записан: %v", err)
 	}
-	var tokens, cachedOut int64
+	var tokens, cachedOut, promptOut int64
 	var cachedPresent bool
 	if err := pool.QueryRow(ctx,
 		`SELECT (actual->>'tokens')::bigint, (actual->>'cached_tokens')::bigint,
-		        actual ? 'cached_tokens'
+		        (actual->>'prompt_tokens')::bigint, actual ? 'cached_tokens'
 		   FROM budget_reservations WHERE operation_id = $1`, op).
-		Scan(&tokens, &cachedOut, &cachedPresent); err != nil {
+		Scan(&tokens, &cachedOut, &promptOut, &cachedPresent); err != nil {
 		t.Fatalf("actual не читается: %v", err)
 	}
-	if tokens != 120 || !cachedPresent || cachedOut != 64 {
-		t.Fatalf("actual = tokens %d, cached %d (present %v), хочу 120/64", tokens, cachedOut, cachedPresent)
+	if tokens != 120 || !cachedPresent || cachedOut != 64 || promptOut != 100 {
+		t.Fatalf("actual = tokens %d, cached %d (present %v), prompt %d, хочу 120/64/100", tokens, cachedOut, cachedPresent, promptOut)
 	}
 
 	// Провайдер не сообщил кэш — поля нет (неизвестно ≠ полный промах).
@@ -369,12 +370,13 @@ func TestRecordActualUsageCachedTokens(t *testing.T) {
 	if err := store.RecordActual(ctx, op2, BudgetPoolConversation, 50, 1, false); err != nil {
 		t.Fatalf("actual 2 не записан: %v", err)
 	}
-	var present bool
+	var cachedPresence, promptPresence bool
 	if err := pool.QueryRow(ctx,
-		`SELECT actual ? 'cached_tokens' FROM budget_reservations WHERE operation_id = $1`, op2).Scan(&present); err != nil {
+		`SELECT actual ? 'cached_tokens', actual ? 'prompt_tokens' FROM budget_reservations WHERE operation_id = $1`, op2).
+		Scan(&cachedPresence, &promptPresence); err != nil {
 		t.Fatalf("actual 2 не читается: %v", err)
 	}
-	if present {
-		t.Fatalf("фантомное cached_tokens без данных провайдера")
+	if cachedPresence || promptPresence {
+		t.Fatalf("фантомные cached_tokens/prompt_tokens без данных провайдера")
 	}
 }

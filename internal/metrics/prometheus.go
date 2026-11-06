@@ -110,6 +110,8 @@ func buildFamilies(snap Snapshot) []family {
 		family{name: "dio_model_tokens", typ: "gauge", samples: tokens},
 		family{name: "dio_model_calls_limit", typ: "gauge", samples: limits},
 		family{name: "dio_model_calls_remaining", typ: "gauge", samples: remaining},
+		family{name: "dio_model_prefix_cache_share_24h", typ: "gauge", samples: []sample{{snap.Model.PrefixCache.AvgShare, nil}}},
+		family{name: "dio_model_prefix_cache_samples_24h", typ: "gauge", samples: []sample{{float64(snap.Model.PrefixCache.Samples24h), nil}}},
 	)
 
 	// Инструменты памяти: доля ходов и причины включения.

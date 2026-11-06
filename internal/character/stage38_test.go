@@ -18,103 +18,64 @@ import (
 	"github.com/luckystrker/ago/events"
 )
 
-// schemaProps — свойства схемы хода по флагам ситуации.
-func schemaProps(f TurnSchemaFeatures) map[string]any {
-	return TurnResultJSONSchemaFor(f)["properties"].(map[string]any)
-}
-
-// TestTurnSchemaByFeatures — необязательное поле попадает в схему только когда
-// применимо на этом ходе (38.1): образовывать мусор модели нечем.
-func TestTurnSchemaByFeatures(t *testing.T) {
-	conditional := []string{"image_url", "image_notes", "sticker", "save_sticker", "forward", "reply_to_by_message"}
-	base := []string{"decision", "messages", "notes", "memory", "reaction", "intentions",
-		"defer_hours", "mood_delta", "relationship_delta", "reason"}
-
-	// Полная схема (все флаги) знает все поля — совместимость с прежними
-	// тестами и вызовами.
-	all := TurnSchemaFeatures{Images: true, UnknownSticker: true, StickerAllowed: true, Web: true, HistoryRefs: true}
-	full := schemaProps(all)
-	for _, want := range append(append([]string{}, base...), conditional...) {
-		if _, ok := full[want]; !ok {
-			t.Fatalf("полная схема потеряла поле %q", want)
+// TestTurnSchemaStableAcrossFeatures — с 39.2 JSON-схема хода ОДНА и та же на
+// всех разговорных ходах (полная), независимо от ситуации: иначе префикс
+// запроса менялся и кэш провайдера сбрасывался. Флаги ситуации теперь влияют
+// только на подсказки панели и мягкое обнуление в runtime.
+func TestTurnSchemaStableAcrossFeatures(t *testing.T) {
+	combos := []TurnSchemaFeatures{
+		{},
+		{Images: true},
+		{UnknownSticker: true},
+		{StickerAllowed: true},
+		{Web: true},
+		{HistoryRefs: true},
+		allTurnSchemaFeatures(),
+	}
+	base, err := json.Marshal(TurnResultJSONSchemaFor(combos[0]))
+	if err != nil {
+		t.Fatalf("схема не сериализуется: %v", err)
+	}
+	for i, f := range combos[1:] {
+		got, err := json.Marshal(TurnResultJSONSchemaFor(f))
+		if err != nil {
+			t.Fatalf("схема %d не сериализуется: %v", i+1, err)
+		}
+		if string(got) != string(base) {
+			t.Fatalf("схема хода %d отличается от базовой — префикс запроса нестабилен", i+1)
 		}
 	}
-
-	// Ни одного флага: только базовые поля.
-	bare := schemaProps(TurnSchemaFeatures{})
-	for _, want := range base {
-		if _, ok := bare[want]; !ok {
-			t.Fatalf("базовая схема потеряла поле %q", want)
+	// Полная схема знает все поля TurnResult.
+	props := TurnResultJSONSchemaFor(TurnSchemaFeatures{})["properties"].(map[string]any)
+	for _, want := range []string{"decision", "messages", "notes", "memory", "reaction", "intentions",
+		"defer_hours", "mood_delta", "relationship_delta", "reason", "image_url", "image_notes",
+		"sticker", "save_sticker", "forward", "reply_to_by_message"} {
+		if _, ok := props[want]; !ok {
+			t.Fatalf("стабильная схема потеряла поле %q", want)
 		}
-	}
-	for _, not := range conditional {
-		if _, ok := bare[not]; ok {
-			t.Fatalf("неприменимое поле %q попало в схему пустого хода", not)
-		}
-	}
-
-	cases := []struct {
-		name string
-		f    TurnSchemaFeatures
-		want []string
-	}{
-		{"картинки пачки", TurnSchemaFeatures{Images: true}, []string{"image_notes"}},
-		{"незнакомый стикер", TurnSchemaFeatures{UnknownSticker: true}, []string{"save_sticker"}},
-		{"коллекция стикеров", TurnSchemaFeatures{StickerAllowed: true}, []string{"sticker"}},
-		{"веб", TurnSchemaFeatures{Web: true}, []string{"image_url"}},
-		{"история с метками", TurnSchemaFeatures{HistoryRefs: true}, []string{"forward", "reply_to_by_message"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			props := schemaProps(tc.f)
-			for _, want := range tc.want {
-				if _, ok := props[want]; !ok {
-					t.Fatalf("поле %q не попало в схему применимого хода", want)
-				}
-			}
-			// Остальные условные поля не просачиваются.
-			for _, other := range conditional {
-				present := false
-				for _, w := range tc.want {
-					if w == other {
-						present = true
-					}
-				}
-				if present {
-					continue
-				}
-				if _, ok := props[other]; ok {
-					t.Fatalf("поле %q попало в схему, хотя неприменимо", other)
-				}
-			}
-		})
 	}
 }
 
-// TestConstraintsByTurnFeatures — constraints говорят только о тех
-// необязательных полях, которые есть в схеме этого хода (38.1), и всегда
-// прямо предлагают decision=react для «только реакции» (38.2).
-func TestConstraintsByTurnFeatures(t *testing.T) {
-	bare := constraintsSectionFor(TurnSchemaFeatures{})
-	for _, not := range []string{
-		"- sticker —", "- save_sticker —", "- image_url —", "- image_notes —",
-		"- forward —", "reply_to_by_message —",
-	} {
-		if strings.Contains(bare, not) {
-			t.Fatalf("constraints пустого хода говорят о неприменимом поле %q:\n%s", not, bare)
+// TestConstraintsStableAcrossFeatures — constraints идут в system-промпт,
+// поэтому с 39.2 их текст одинаков на всех ходах: ситуативные подсказки
+// переехали в панель (turnFieldHints), и префикс запроса не меняется.
+func TestConstraintsStableAcrossFeatures(t *testing.T) {
+	base := constraintsSectionFor(TurnSchemaFeatures{})
+	combos := []TurnSchemaFeatures{
+		{Images: true}, {UnknownSticker: true}, {StickerAllowed: true},
+		{Web: true}, {HistoryRefs: true}, allTurnSchemaFeatures(),
+	}
+	for i, f := range combos {
+		if got := constraintsSectionFor(f); got != base {
+			t.Fatalf("constraints хода %d отличаются от базовых — префикс запроса нестабилен", i+1)
 		}
 	}
-	if !strings.Contains(bare, "хочешь только реакцию — decision=react") {
-		t.Fatalf("constraints не подсказывают decision=react для реакции без текста:\n%s", bare)
-	}
-
-	full := constraintsSection()
 	for _, want := range []string{
-		"- sticker —", "- save_sticker —", "- image_url —", "- image_notes —",
-		"- forward —", "reply_to_by_message —",
+		"хочешь только реакцию — decision=react", "- sticker —", "- save_sticker —",
+		"- image_url —", "- image_notes —", "- forward —", "reply_to_by_message —",
 	} {
-		if !strings.Contains(full, want) {
-			t.Fatalf("полные constraints потеряли %q:\n%s", want, full)
+		if !strings.Contains(base, want) {
+			t.Fatalf("стабильные constraints потеряли %q:\n%s", want, base)
 		}
 	}
 }
@@ -367,7 +328,8 @@ func TestToolLimitPerKindCaps(t *testing.T) {
 		return out
 	}
 
-	// Память: первые два вызова исполняются, третий — отказ с текстом про память.
+	// Память: первые два вызова исполняются, третий — отказ с текстом про
+	// память и закрытием инструментов (39.1).
 	for i := 1; i <= 2; i++ {
 		if ev := call("memory_search"); ev == nil {
 			t.Fatalf("вызов памяти %d потерян", i)
@@ -378,23 +340,40 @@ func TestToolLimitPerKindCaps(t *testing.T) {
 	if !ok {
 		t.Fatalf("третье обращение к памяти не отклонено: %T", ev)
 	}
-	if !strings.Contains(te.Error, "памяти") || !strings.Contains(te.Error, "отвечай") {
-		t.Fatalf("модели нужен внятный отказ памяти, получено %q", te.Error)
+	if !strings.Contains(te.Error, "памяти") || !strings.Contains(te.Error, "закрыты") {
+		t.Fatalf("модели нужен внятный отказ памяти и закрытие, получено %q", te.Error)
 	}
 	if executed != 2 {
 		t.Fatalf("исполнено вызовов %d, хочу 2", executed)
 	}
-
-	// Веб живёт своим потолком: память исчерпана, поиск ещё можно.
-	for i := 1; i <= 2; i++ {
-		call("web_search")
-	}
+	// После закрытия любой другой вид тоже закрыт — вызов замыкает ход краном.
 	ev = call("web_search")
+	if tr, ok := ev.(*events.ToolResultEvent); !ok || !tr.Result.Final {
+		t.Fatalf("после закрытия веб-вызов не замкнут стоп-краном: %T", ev)
+	}
+
+	// Веб-потолки проверяем на свежем middleware (закрытие — на весь ход).
+	web := NewToolLimitMiddleware(5, nil)
+	web.SetKindCaps(conversationKindCaps(true, 2, true, "web_search"))
+	executed = 0
+	next = stubToolExec(&executed)
+	callWeb := func(name string) events.Event {
+		t.Helper()
+		out, err := web.OnToolExecution(next, &events.ToolCallEvent{ID: name, Name: name}, nil)
+		if err != nil {
+			t.Fatalf("вызов %s: %v", name, err)
+		}
+		return out
+	}
+	for i := 1; i <= 2; i++ {
+		callWeb("web_search")
+	}
+	ev = callWeb("web_search")
 	if te, ok := ev.(*events.ToolErrorEvent); !ok || !strings.Contains(te.Error, "поиск") {
 		t.Fatalf("третий поиск не отклонён своим лимитом: %#v", ev)
 	}
-	if executed != 4 {
-		t.Fatalf("исполнено вызовов %d, хочу 4 (2 памяти + 2 поиска)", executed)
+	if executed != 2 {
+		t.Fatalf("исполнено поисков %d, хочу 2", executed)
 	}
 }
 
@@ -428,29 +407,48 @@ func TestConversationKindCaps(t *testing.T) {
 	}
 }
 
-// TestToolLimitKindCapsKeepsOtherKinds — отказ вида памяти не отключает
-// инструменты целиком: веб продолжает работать (38.4).
-func TestToolLimitKindCapsKeepsOtherKinds(t *testing.T) {
+// TestToolLimitKindRejectClosesTools — с 39.1 первый отказ вида (38.4) — это
+// первый отказ хода: инструменты закрываются (tool_choice=none), отказ несёт
+// подсказку «ответь текстом», а повторный вызов при уже закрытых инструментах
+// замыкает ход стоп-краном (модель игнорирует tool_choice=none).
+func TestToolLimitKindRejectClosesTools(t *testing.T) {
 	m := NewToolLimitMiddleware(5, nil)
-	disabled := false
-	m.SetOnExhausted(func() { disabled = true })
+	closed := 0
+	m.SetOnExhausted(func() { closed++ })
 	m.SetKindCaps(conversationKindCaps(true, 2, true, "web_search"))
 
 	executed := 0
 	next := stubToolExec(&executed)
 	cx := agocontext.New(nil)
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 2; i++ {
 		if _, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: "m", Name: "memory_search"}, cx); err != nil {
 			t.Fatalf("вызов памяти: %v", err)
 		}
 	}
-	if disabled {
-		t.Fatal("исчерпание вида памяти отключило все инструменты — веб должен остаться")
+	ev, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: "m3", Name: "memory_search"}, cx)
+	if err != nil {
+		t.Fatalf("третий вызов памяти: %v", err)
 	}
-	if _, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: "w", Name: "web_search"}, cx); err != nil {
-		t.Fatalf("поиск после отказа памяти: %v", err)
+	te, ok := ev.(*events.ToolErrorEvent)
+	if !ok {
+		t.Fatalf("третье обращение к памяти не отклонено: %T", ev)
 	}
-	if executed != 3 {
-		t.Fatalf("исполнено %d, хочу 3 (2 памяти + 1 поиск)", executed)
+	if !strings.Contains(te.Error, "закрыты") || !strings.Contains(te.Error, "текстом") {
+		t.Fatalf("отказ не говорит, что инструменты закрыты: %q", te.Error)
+	}
+	if closed != 1 {
+		t.Fatalf("первый отказ вида не закрыл инструменты: onExhausted=%d", closed)
+	}
+	// Модель игнорирует закрытие и снова зовёт инструмент — стоп-кран.
+	ev, err = m.OnToolExecution(next, &events.ToolCallEvent{ID: "m4", Name: "web_search"}, cx)
+	if err != nil {
+		t.Fatalf("четвёртый вызов: %v", err)
+	}
+	tr, ok := ev.(*events.ToolResultEvent)
+	if !ok || !tr.Result.Final {
+		t.Fatalf("игнорирование tool_choice=none не замкнуло ход: %T", ev)
+	}
+	if executed != 2 {
+		t.Fatalf("исполнено %d, хочу 2 (только вызовы в лимите)", executed)
 	}
 }

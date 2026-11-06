@@ -85,6 +85,7 @@ func sampleSnapshot() Snapshot {
 				"conversation": {Calls: 10, Reserved: 12, Tokens: 4000, Limit: 100, Remaining: 88},
 				"background":   {Calls: 20, Reserved: 20, Tokens: 9000, Limit: 400, Remaining: 380},
 			},
+			PrefixCache: PrefixCacheStats{Samples24h: 6, AvgShare: 0.75},
 		},
 		MemoryTools: MemoryToolsStats{
 			ConversationTurns24h: 10,

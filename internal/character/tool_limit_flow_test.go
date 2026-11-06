@@ -17,22 +17,27 @@ import (
 	"github.com/luckystrker/ago/middleware"
 )
 
-// toolsSequenceClient — заглушка модели: пока инструменты выданы, всегда зовёт
-// инструмент; получив пустой opts.Tools, отвечает финальным JSON. Запоминает
-// число схем инструментов на каждом вызове.
+// toolsSequenceClient — заглушка модели: пока инструменты не закрыты
+// (tool_choice не none), зовёт инструмент; после закрытия отвечает финальным
+// JSON. Запоминает число схем инструментов и состояние «закрыто» на каждом
+// вызове: с 39.2 определения остаются в запросе, меняется только tool_choice.
 type toolsSequenceClient struct {
-	mu    sync.Mutex
-	calls []int
-	final string
+	cfg    *ChatConfig
+	mu     sync.Mutex
+	calls  []int
+	closed []bool
+	final  string
 }
 
 func (c *toolsSequenceClient) Call(_ context.Context, _ []events.Event, _ *agocontext.Context, opts config.CallOptions) (*events.ModelResponse, error) {
 	c.mu.Lock()
+	closedNow := c.cfg != nil && c.cfg.ToolsDisabled()
 	n := len(c.calls)
 	c.calls = append(c.calls, len(opts.Tools))
+	c.closed = append(c.closed, closedNow)
 	c.mu.Unlock()
 
-	if len(opts.Tools) == 0 || n >= 5 {
+	if closedNow || len(opts.Tools) == 0 || n >= 5 {
 		return &events.ModelResponse{Message: &events.ModelMessage{Content: c.final}}, nil
 	}
 	return &events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{{
@@ -42,19 +47,34 @@ func (c *toolsSequenceClient) Call(_ context.Context, _ []events.Event, _ *agoco
 	}}}}, nil
 }
 
+// bindTurnConfig — ход через Runner создаёт свой конфиг на ход; заглушка
+// получает именно его (turnConfigBinder), иначе не увидит tool_choice=none.
+func (c *toolsSequenceClient) bindTurnConfig(cfg *ChatConfig) {
+	c.mu.Lock()
+	c.cfg = cfg
+	c.mu.Unlock()
+}
+
 func (c *toolsSequenceClient) toolCounts() []int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]int(nil), c.calls...)
 }
 
-// TestToolLimitDisablesToolsNextModelCall — после первого отказа лимита
-// следующий вызов получает opts.Tools пустым, а ответ модели (JSON) становится
-// итогом answer. Работает и через NewChatConfigWithClient: обёртка chatClient
-// сама чистит инструменты, поэтому тестовая заглушка видит флаг.
-func TestToolLimitDisablesToolsNextModelCall(t *testing.T) {
+func (c *toolsSequenceClient) closedFlags() []bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]bool(nil), c.closed...)
+}
+
+// TestToolLimitClosesToolsNextModelCall — после первого отказа лимита
+// следующий вызов идёт с tool_choice=none (cfg.ToolsDisabled), но определения
+// инструментов остаются объявлены (39.2), а ответ модели (JSON) становится
+// итогом answer.
+func TestToolLimitClosesToolsNextModelCall(t *testing.T) {
 	fake := &toolsSequenceClient{final: `{"decision":"answer","messages":["готово"]}`}
 	cfg := NewChatConfigWithClient(fake)
+	fake.cfg = cfg
 
 	tool := testTool(t, "probe")
 	limitMW := NewToolLimitMiddleware(1, nil)
@@ -79,14 +99,20 @@ func TestToolLimitDisablesToolsNextModelCall(t *testing.T) {
 	}
 
 	counts := fake.toolCounts()
-	if len(counts) < 3 {
-		t.Fatalf("модельных вызовов %d, хочу минимум 3: %v", len(counts), counts)
+	closed := fake.closedFlags()
+	if len(counts) != 3 {
+		t.Fatalf("модельных вызовов %d, хочу 3 (tool + отказ + финал): %v", len(counts), counts)
 	}
-	if counts[0] == 0 || counts[1] == 0 {
-		t.Fatalf("инструменты пропали раньше лимита: %v", counts)
+	for i, n := range counts {
+		if n == 0 {
+			t.Fatalf("вызов %d потерял определения инструментов (39.2): %v", i, counts)
+		}
 	}
-	if counts[2] != 0 {
-		t.Fatalf("после отказа лимита инструменты не отключены: %v", counts)
+	if closed[0] || closed[1] {
+		t.Fatalf("инструменты закрыты раньше отказа: %v", closed)
+	}
+	if !closed[2] {
+		t.Fatalf("после отказа лимита tool_choice не none: %v", closed)
 	}
 }
 
@@ -109,6 +135,7 @@ func TestChatConfigWithClientObservesDisabledTools(t *testing.T) {
 	fake := &toolsSequenceClient{final: `{"decision":"ignore"}`}
 	rec := &recordingClient{inner: fake}
 	cfg := NewChatConfigWithClient(rec)
+	fake.cfg = cfg
 	client, err := cfg.Create()
 	if err != nil {
 		t.Fatalf("клиент не создан: %v", err)
@@ -129,8 +156,9 @@ func TestChatConfigWithClientObservesDisabledTools(t *testing.T) {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if len(rec.sizes) != 2 || rec.sizes[0] != 1 || rec.sizes[1] != 0 {
-		t.Fatalf("размеры opts.Tools = %v, хочу [1 0]", rec.sizes)
+	// 39.2: определения инструментов не пропадают — меняется только tool_choice.
+	if len(rec.sizes) != 2 || rec.sizes[0] != 1 || rec.sizes[1] != 1 {
+		t.Fatalf("размеры opts.Tools = %v, хочу [1 1]", rec.sizes)
 	}
 }
 
@@ -172,10 +200,11 @@ func (c *repairSequenceClient) toolCounts() []int {
 	return append([]int(nil), c.counts...)
 }
 
-// TestRepairCallAfterToolLimitHasNoTools — после исчерпания лимита инструментов
-// repair-продолжение (reply.Ask) идёт без схем инструментов, как и следующий
-// обычный вызов: модель обязана выдать финальный TurnResult, а не звать память.
-func TestRepairCallAfterToolLimitHasNoTools(t *testing.T) {
+// TestRepairCallAfterToolLimitKeepsToolsDeclared — после исчерпания лимита
+// repair-продолжение (reply.Ask) идёт с tool_choice=none, но определения
+// инструментов остаются в запросе (39.2): модель обязана выдать финальный
+// TurnResult, а префикс запроса не меняется.
+func TestRepairCallAfterToolLimitKeepsToolsDeclared(t *testing.T) {
 	fake := &repairSequenceClient{}
 	cfg := NewChatConfigWithClient(fake)
 
@@ -195,6 +224,9 @@ func TestRepairCallAfterToolLimitHasNoTools(t *testing.T) {
 	if _, err := ParseTurnResult([]byte(reply.Body())); err == nil {
 		t.Fatalf("первый ответ должен быть невалидным, получено: %s", reply.Body())
 	}
+	if !cfg.ToolsDisabled() {
+		t.Fatal("после отказа лимита инструменты не закрыты (tool_choice не none)")
+	}
 
 	fixed, err := reply.Ask(context.Background(), repairHint(fmt.Errorf("answer требует от 1 до 4 сообщений")))
 	if err != nil {
@@ -212,7 +244,9 @@ func TestRepairCallAfterToolLimitHasNoTools(t *testing.T) {
 	if len(counts) < 4 {
 		t.Fatalf("модельных вызовов %d, хочу минимум 4 (2 tool + финал + repair)", len(counts))
 	}
-	if counts[2] != 0 || counts[3] != 0 {
-		t.Fatalf("после исчерпания лимита инструменты остались: %v", counts)
+	for i, n := range counts {
+		if n == 0 {
+			t.Fatalf("вызов %d потерял определения инструментов (39.2): %v", i, counts)
+		}
 	}
 }

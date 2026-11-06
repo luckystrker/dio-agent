@@ -112,8 +112,13 @@ type statePanelData struct {
 	// идти в веб стоит только за свежим фактом.
 	WebTools bool
 	// WebExhausted — суточный лимит поисков разговорного пула исчерпан (36.1):
-	// инструменты не выдаются, панель говорит об этом прямо.
+	// инструменты объявлены, но вызов отклоняется лимитом (39.2) — панель
+	// прямо говорит, что искать не надо.
 	WebExhausted bool
+	// FieldHints — подсказки о применимых на этом ходе полях TurnResult
+	// (39.2): идут в панель (последнее user-сообщение), чтобы system, схема и
+	// набор инструментов оставались стабильным префиксом запроса.
+	FieldHints []string
 }
 
 // sanitizePanelValue — одна строка панели из внешнего/изменяемого значения
@@ -183,7 +188,13 @@ func buildStatePanel(d statePanelData) string {
 		lines = append(lines, "веб доступен инструментами (поиск и web_fetch) — только если нужен свежий факт, которого нет в истории и памяти, или тебя прямо просят поискать/найти/скинуть")
 	}
 	if d.WebExhausted {
-		lines = append(lines, "поиск на сегодня исчерпан — веб-инструменты на этом ходе не выдаются")
+		lines = append(lines, "поиск на сегодня исчерпан — веб-инструменты объявлены, но вызов отклоняется лимитом; отвечай без поиска")
+	}
+	// Применимые поля TurnResult (39.2) — в панели, а не в system/схеме.
+	for _, hint := range d.FieldHints {
+		if hint = strings.TrimSpace(hint); hint != "" {
+			lines = append(lines, hint)
+		}
 	}
 	lines = append(lines, statePanelClose)
 	return strings.Join(lines, "\n")

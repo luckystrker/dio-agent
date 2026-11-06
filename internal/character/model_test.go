@@ -141,11 +141,11 @@ func TestChatConfigForceOnlyOnceAcrossRuns(t *testing.T) {
 	}
 }
 
-// TestChatClientDisabledToolsDropSchemasAndForce — после исчерпания лимита
-// инструментов вызов уходит провайдеру без tools и без tool_choice (bug
-// 2026-11-02): провайдер-независимое требование, чтобы модель отвечала
-// финальным TurnResult, а не звала инструменты бесконечно.
-func TestChatClientDisabledToolsDropSchemasAndForce(t *testing.T) {
+// TestChatClientDisabledToolsSendToolChoiceNone — после исчерпания лимита
+// инструментов вызов уходит с tool_choice="none", но определения инструментов
+// и strict-схема остаются (39.2): префикс запроса стабилен, модель отвечает
+// финальным TurnResult.
+func TestChatClientDisabledToolsSendToolChoiceNone(t *testing.T) {
 	var bodies []map[string]any
 	server := captureServer(t, &bodies)
 
@@ -169,11 +169,11 @@ func TestChatClientDisabledToolsDropSchemasAndForce(t *testing.T) {
 	if len(bodies) != 1 {
 		t.Fatalf("сервер получил %d запросов, хочу 1", len(bodies))
 	}
-	if _, has := bodies[0]["tools"]; has {
-		t.Fatalf("при исчерпанном лимите tools ушли на провод: %v", bodies[0]["tools"])
+	if _, has := bodies[0]["tools"]; !has {
+		t.Fatalf("при закрытых инструментах определения не ушли на провод (39.2): %v", bodies[0])
 	}
-	if _, has := bodies[0]["tool_choice"]; has {
-		t.Fatalf("при исчерпанном лимите остался forced tool_choice: %v", bodies[0]["tool_choice"])
+	if choice, ok := bodies[0]["tool_choice"].(string); !ok || choice != "none" {
+		t.Fatalf("tool_choice = %v, хочу none", bodies[0]["tool_choice"])
 	}
 }
 

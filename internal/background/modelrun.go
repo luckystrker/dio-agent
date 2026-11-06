@@ -203,6 +203,9 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 	if caps.Calls > 0 || caps.Tokens > 0 {
 		counting.onCap = func() {
 			chatCfg.DisableTools()
+			// Middleware тоже знает о закрытии: иначе упорный вызов
+			// инструмента после потолка исполнился бы (39.1/39.2).
+			toolMW.SetClosed()
 			s.logInfo("потолок фоновой задачи достигнут (%d вызовов / %d токенов) — дальше без инструментов, финал с тем, что есть",
 				caps.Calls, caps.Tokens)
 		}

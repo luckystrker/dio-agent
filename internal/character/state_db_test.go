@@ -632,25 +632,24 @@ func toolRoundResp(id, query string) *events.ModelResponse {
 	}}}
 }
 
-// TestTurnToolLimitStopCrane — стоп-кран серии отказов (16.5): три подряд
-// отказа лимита обращений принудительно завершают ход (ResponseForce из
-// финального результата инструмента), число модельных вызовов ограничено —
-// модель не крутит платные круги над отказами. Ход завершается как ignore:
-// без сообщений пользователю.
+// TestTurnToolLimitStopCrane — стоп-кран (39.1): первый отказ лимита закрывает
+// инструменты (tool_choice=none) и следующий вызов модели — финальный. Если
+// модель игнорирует закрытие и снова зовёт инструмент, ход замыкается
+// принудительно (ResponseForce), платные круги над отказами не крутятся. Ход
+// завершается как ignore: без сообщений пользователю.
 func TestTurnToolLimitStopCrane(t *testing.T) {
 	f, ctx := newFixture(t)
 	f.runner.ToolCallsLimit = 1
 	turnID := int64(213)
 	f.seedTurn(t, ctx, turnID, "поищи много раз")
 
-	// Первый круг в лимите исполняется; дальше модель упорствует — отказы c2,
-	// c3, c4, на третьем подряд срабатывает стоп-кран. Сценария на пятый вызов
-	// нет намеренно: без стоп-крана прогон исчерпает сценарий и ход упадёт.
+	// c1 — в лимите; c2 — отказ и закрытие инструментов; c3 — модель игнорирует
+	// tool_choice=none, срабатывает кран. Сценария на четвёртый вызов нет
+	// намеренно: без стоп-крана прогон исчерпает сценарий и ход упадёт.
 	script := f.withModel(
 		toolRoundResp("c1", "пластинки"),
 		toolRoundResp("c2", "ещё"),
 		toolRoundResp("c3", "и ещё"),
-		toolRoundResp("c4", "снова"),
 	)
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
@@ -661,13 +660,13 @@ func TestTurnToolLimitStopCrane(t *testing.T) {
 	if out.Skipped || !out.Apply.Applied {
 		t.Fatalf("ход не применился: %+v", out)
 	}
-	// Модельных вызовов ровно четыре: разрешённый круг + три отказа; пятого
+	// Модельных вызовов ровно три: разрешённый круг, отказ, кран; четвёртого
 	// платного круга над отказами не случилось.
-	if calls := len(script.Calls()); calls != 4 {
-		t.Fatalf("модельных вызовов %d, хочу 4 — стоп-кран не ограничил серию", calls)
+	if calls := len(script.Calls()); calls != 3 {
+		t.Fatalf("модельных вызовов %d, хочу 3 — стоп-кран не ограничил серию", calls)
 	}
-	if out.LLMCalls != 4 {
-		t.Fatalf("LLMCalls = %d, хочу 4", out.LLMCalls)
+	if out.LLMCalls != 3 {
+		t.Fatalf("LLMCalls = %d, хочу 3", out.LLMCalls)
 	}
 	// Стоп-кран завершает ход молча: доставки нет.
 	var outbox int
@@ -677,7 +676,7 @@ func TestTurnToolLimitStopCrane(t *testing.T) {
 	if outbox != 0 {
 		t.Fatalf("стоп-кран не должен ставить сообщения в доставку, outbox=%d", outbox)
 	}
-	// Журнал: четыре обращения, отказов лимита два (c2, c3), финал стоп-крана —
+	// Журнал: три обращения, отказ лимита один (c2), финал стоп-крана —
 	// результат, а не ошибка.
 	calls, limitErrs, crane := 0, 0, false
 	evs, err := f.journal.History(ctx, turnID)
@@ -697,13 +696,14 @@ func TestTurnToolLimitStopCrane(t *testing.T) {
 			}
 		}
 	}
-	if calls != 4 || limitErrs != 2 || !crane {
-		t.Fatalf("журнал: calls=%d отказов_лимита=%d стоп_кран=%v, хочу 4/2/true", calls, limitErrs, crane)
+	if calls != 3 || limitErrs != 1 || !crane {
+		t.Fatalf("журнал: calls=%d отказов_лимита=%d стоп_кран=%v, хочу 3/1/true", calls, limitErrs, crane)
 	}
 }
 
-// TestTurnToolLimitStopCraneDirectReacts — прямой ход на стоп-кране отдаёт
-// видимую реакцию «🤔» (bug 2026-11-02): раньше молчаливый ignore терял вопрос.
+// TestTurnToolLimitStopCraneDirectReacts — прямой ход на стоп-кране (модель
+// игнорирует tool_choice=none) отдаёт видимую реакцию «🤔» (39.1): финальный
+// вызов без инструментов не дал текста, а молчаливый ignore потерял бы вопрос.
 // Reaction попадает в outbox как отдельный пузырь, сообщений нет.
 func TestTurnToolLimitStopCraneDirectReacts(t *testing.T) {
 	f, ctx := newFixture(t)
@@ -715,7 +715,6 @@ func TestTurnToolLimitStopCraneDirectReacts(t *testing.T) {
 		toolRoundResp("c1", "пластинки"),
 		toolRoundResp("c2", "ещё"),
 		toolRoundResp("c3", "и ещё"),
-		toolRoundResp("c4", "снова"),
 	)
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID, Direct: true,
@@ -726,8 +725,8 @@ func TestTurnToolLimitStopCraneDirectReacts(t *testing.T) {
 	if out.Skipped || !out.Apply.Applied {
 		t.Fatalf("ход не применился: %+v", out)
 	}
-	if calls := len(script.Calls()); calls != 4 {
-		t.Fatalf("модельных вызовов %d, хочу 4", calls)
+	if calls := len(script.Calls()); calls != 3 {
+		t.Fatalf("модельных вызовов %d, хочу 3", calls)
 	}
 	var kind, reaction string
 	if err := f.pool.QueryRow(ctx,
@@ -788,7 +787,8 @@ func TestTurnToolLimitStopCraneBatch(t *testing.T) {
 	if outbox != 0 {
 		t.Fatalf("стоп-кран не должен ставить сообщения в доставку, outbox=%d", outbox)
 	}
-	// Журнал: пять обращений (c1 + пачка), два отказа лимита, финал крана.
+	// Журнал: пять обращений (c1 + пачка), отказ лимита один (первый вызов
+	// пачки закрывает инструменты), остальные вызовы пачки замыкаются краном.
 	calls, limitErrs, cranes := 0, 0, 0
 	evs, err := f.journal.History(ctx, turnID)
 	if err != nil {
@@ -807,18 +807,18 @@ func TestTurnToolLimitStopCraneBatch(t *testing.T) {
 			}
 		}
 	}
-	// Пачка из четырёх сверх лимита: отказы 1–2 — ошибки, 3–4 — кран (какие
+	// Пачка из четырёх сверх лимита: первый — отказ, остальные — кран (какие
 	// именно вызовы — решает планировщик горутин, число детерминировано).
-	if calls != 5 || limitErrs != 2 || cranes < 1 {
-		t.Fatalf("журнал: calls=%d отказов_лимита=%d кранов=%d, хочу 5/2/>=1", calls, limitErrs, cranes)
+	if calls != 5 || limitErrs < 1 || cranes < 1 {
+		t.Fatalf("журнал: calls=%d отказов_лимита=%d кранов=%d, хочу 5/>=1/>=1", calls, limitErrs, cranes)
 	}
 }
 
-// TestTurnToolLimitTwoRejectsNoCrane — обратная граница стоп-крана (16.5): два
-// подряд отказа — ещё не кран; модель, услышав отказы, завершает ход финальным
-// ответом, и ответ доставляется. Преждевременный кран молча глотал бы ответ на
-// прямой вопрос (PHILOSOPHY п.8).
-func TestTurnToolLimitTwoRejectsNoCrane(t *testing.T) {
+// TestTurnToolLimitClosesThenAnswers — 39.1: первый отказ закрывает инструменты,
+// и следующий вызов модели идёт с tool_choice=none; модель отвечает текстом, и
+// ответ доставляется (закрытие инструментов не превращает прямой вопрос в
+// молчание).
+func TestTurnToolLimitClosesThenAnswers(t *testing.T) {
 	f, ctx := newFixture(t)
 	f.runner.ToolCallsLimit = 1
 	turnID := int64(215)
@@ -827,20 +827,19 @@ func TestTurnToolLimitTwoRejectsNoCrane(t *testing.T) {
 	script := f.withModel(
 		toolRoundResp("c1", "пластинки"),
 		toolRoundResp("c2", "ещё"),
-		toolRoundResp("c3", "и ещё"),
 		&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["вот ответ"]}`}},
 	)
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
 		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поищи и ответь"}}})
 	if err != nil {
-		t.Fatalf("ход с двумя отказами упал: %v", err)
+		t.Fatalf("ход с отказом упал: %v", err)
 	}
 	if out.Skipped || !out.Apply.Applied {
 		t.Fatalf("ход не применился: %+v", out)
 	}
-	if calls := len(script.Calls()); calls != 4 {
-		t.Fatalf("модельных вызовов %d, хочу 4 — кран сработал раньше третьего отказа", calls)
+	if calls := len(script.Calls()); calls != 3 {
+		t.Fatalf("модельных вызовов %d, хочу 3 (tool + отказ + финальный текст)", calls)
 	}
 	var text string
 	if err := f.pool.QueryRow(ctx, `SELECT payload->>'text' FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&text); err != nil {

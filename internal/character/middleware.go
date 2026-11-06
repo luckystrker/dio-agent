@@ -108,10 +108,19 @@ func (m *BudgetMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.E
 		rcancel()
 		return nil, err
 	}
-	tokens, cached := usageTokens(resp)
+	tokens, prompt, cached := usageTokens(resp)
+	if idx == 0 {
+		// Наблюдаемость кэша префикса (39.2): cached_tokens первого вызова
+		// хода. cached=«нет данных» — провайдер не сообщил (не ложный промах).
+		cacheText := "нет данных"
+		if cached != nil {
+			cacheText = fmt.Sprintf("%d", *cached)
+		}
+		m.logger.Printf("модель: первый вызов хода — prompt_tokens=%d cached_tokens=%s", prompt, cacheText)
+	}
 	rctx, rcancel := context.WithTimeout(context.Background(), budgetDBTimeout)
 	err = m.store.RecordActualUsage(rctx, operationID, m.pool,
-		runtime.ActualUsage{Tokens: tokens, Calls: 1, CachedTokens: cached})
+		runtime.ActualUsage{Tokens: tokens, Calls: 1, CachedTokens: cached, PromptTokens: promptOrNil(resp)})
 	rcancel()
 	if err != nil {
 		m.logger.Printf("бюджет: фактический usage не записан: %v", err)
@@ -131,21 +140,32 @@ func (m *BudgetMiddleware) releaseBudget(operationID string) error {
 	return m.store.Release(ctx, operationID, m.pool, 1)
 }
 
-// usageTokens — токены ответа и кэшированное попадание префикса (решение
-// 2026-11-02): ago отдаёт CacheReadInputTokens (prompt_tokens_details.cached_tokens
-// у OpenAI-совместимых провайдеров). Провайдер не сообщил — nil, а не 0:
-// «неизвестно» не должно выглядеть как полный промах кэша.
-func usageTokens(resp *events.ModelResponse) (tokens int64, cached *int64) {
+// usageTokens — токены ответа, промпта и кэшированное попадание префикса
+// (решение 2026-11-02): ago отдаёт CacheReadInputTokens
+// (prompt_tokens_details.cached_tokens у OpenAI-совместимых провайдеров).
+// Провайдер не сообщил — nil, а не 0: «неизвестно» не должно выглядеть как
+// полный промах кэша.
+func usageTokens(resp *events.ModelResponse) (tokens, prompt int64, cached *int64) {
 	if resp == nil {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if resp.Usage.PromptTokens != nil {
-		tokens += *resp.Usage.PromptTokens
+		prompt = *resp.Usage.PromptTokens
+		tokens += prompt
 	}
 	if resp.Usage.CompletionTokens != nil {
 		tokens += *resp.Usage.CompletionTokens
 	}
-	return tokens, resp.Usage.CacheReadInputTokens
+	return tokens, prompt, resp.Usage.CacheReadInputTokens
+}
+
+// promptOrNil — prompt_tokens ответа для записи в actual: провайдер не
+// сообщил — nil (доля кэша по такой строке не считается).
+func promptOrNil(resp *events.ModelResponse) *int64 {
+	if resp == nil {
+		return nil
+	}
+	return resp.Usage.PromptTokens
 }
 
 // callCount — сколько модельных вызовов сделано в рамках хода (§20).
@@ -277,14 +297,19 @@ type ToolKindCap struct {
 
 // ToolLimitMiddleware — ограничение числа обращений к инструментам за ход
 // (§11.2: лимит конфигурируемый). Превышение отвечает модели ошибкой вместо
-// исполнения: модель видит отказ и обязана завершить ход финальным ответом.
-// Если модель отказ игнорирует, срабатывает стоп-кран (16.5): после
-// stopCraneRejects подряд отказов middleware возвращает финальный результат
-// инструмента (ToolResult с Final=true), который executor ago обращает в
+// исполнения. С этапа 39 первый отказ ЛЮБОГО вида (или исчерпание общего
+// лимита) закрывает инструменты на ходе: следующий модельный вызов идёт с
+// tool_choice=none (определения остаются объявлены — 39.2), а текст отказа
+// прямо говорит «ответь текстом сейчас». Модель обязана завершить ход
+// финальным TurnResult.
+//
+// Если модель игнорирует и tool_choice=none (снова зовёт инструмент при уже
+// закрытых инструментах), срабатывает стоп-кран: middleware возвращает
+// финальный результат (ToolResult с Final=true), executor ago обращает его в
 // ModelResponse с ResponseForce — агентский цикл завершается без нового
-// модельного вызова (живой смоук: серия отказов = серия платных вызовов).
-// На прямом ходе тело крана — react «🤔», на непрямом/фоновом — ignore
-// (bug 2026-11-02: молчаливый ignore терял прямой вопрос).
+// модельного вызова. Тело крана: на прямом ходе — react «🤔», на
+// непрямом/фоновом — ignore (39.1: видимая реакция — только когда финальный
+// вызов без инструментов не дал валидного TurnResult).
 type ToolLimitMiddleware struct {
 	middleware.Base
 	limit  int
@@ -298,18 +323,28 @@ type ToolLimitMiddleware struct {
 	// kindCaps — раздельные потолки видов (38.4); kindSeen — счётчики по видам.
 	kindCaps []ToolKindCap
 	kindSeen map[string]int
-	// onExhausted — колбэк харнесса на первый отказ лимита: он выключает
-	// инструменты на конфиге хода, чтобы СЛЕДУЮЩИЙ вызов модели шёл без них.
+	// onExhausted — колбэк харнесса на первый отказ: он закрывает инструменты
+	// на конфиге хода (tool_choice=none), чтобы следующий вызов модели был
+	// финальным.
 	onExhausted func()
-	// exhausted — колбэк уже позвали (ровно один раз за ход).
-	exhausted bool
+	// toolsClosed — инструменты уже закрыты на этом ходе (харнессом при
+	// tool_choice=none или первым отказом лимита).
+	toolsClosed bool
+	// warned — модель уже получила подсказку «инструменты закрыты, ответь
+	// текстом»; повторный вызов после неё замыкает ход краном.
+	warned bool
+	// closedByReject — инструменты закрыты именно отказом лимита (39.1):
+	// только тогда невалидный финальный ответ деградирует в react, а не в
+	// терминальный пропуск.
+	closedByReject bool
 	// direct — прямой ход (§5.2 приоритет 1): стоп-кран отдаёт видимую
-	// реакцию вместо молчаливого ignore (bug 2026-11-02).
+	// реакцию вместо молчаливого ignore.
 	direct bool
 }
 
-// stopCraneRejects — сколько подряд отказов лимита замыкают ход принудительно.
-const stopCraneRejects = 3
+// stopCraneRejects — сколько подряд отказов лимита замыкают ход принудительно
+// после того, как инструменты уже закрыты (модель игнорирует tool_choice=none).
+const stopCraneRejects = 1
 
 // NewToolLimitMiddleware строит middleware лимита обращений (0 = не ограничивать).
 func NewToolLimitMiddleware(limit int, logger *log.Logger) *ToolLimitMiddleware {
@@ -319,11 +354,21 @@ func NewToolLimitMiddleware(limit int, logger *log.Logger) *ToolLimitMiddleware 
 	return &ToolLimitMiddleware{limit: limit, logger: logger}
 }
 
-// SetOnExhausted подписывает харнесс на первый отказ лимита (выключение
-// инструментов на конфиге хода). Вызывается до запуска агента.
+// SetOnExhausted подписывает харнесс на первый отказ лимита: он закрывает
+// инструменты на конфиге хода (tool_choice=none). Вызывается до запуска агента.
 func (m *ToolLimitMiddleware) SetOnExhausted(fn func()) {
 	m.mu.Lock()
 	m.onExhausted = fn
+	m.mu.Unlock()
+}
+
+// SetClosed отмечает, что харнесс уже закрыл инструменты на этом ходе
+// (tool_choice=none: память не нужна и веб исчерпан, 39.2). Вызывается до
+// запуска агента: вызов инструмента такой моделью — нарушение, и middleware
+// ответит подсказкой, а повторный вызов замкнёт ход.
+func (m *ToolLimitMiddleware) SetClosed() {
+	m.mu.Lock()
+	m.toolsClosed = true
 	m.mu.Unlock()
 }
 
@@ -335,7 +380,8 @@ func (m *ToolLimitMiddleware) SetDirect(direct bool) {
 }
 
 // SetKindCaps задаёт раздельные потолки видов (38.4). Вызывается до запуска
-// агента; отказ вида не дёргает onExhausted — остальные виды работают.
+// агента. Отказ вида считается первым отказом хода (39.1) и тоже закрывает
+// инструменты: после него следующий вызов модели обязан дать текст.
 func (m *ToolLimitMiddleware) SetKindCaps(caps []ToolKindCap) {
 	m.mu.Lock()
 	m.kindCaps = caps
@@ -370,59 +416,65 @@ func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *
 	m.seen++
 	overKind := m.kindCapOver(ev.Name)
 	over := m.limit > 0 && m.seen > m.limit
-	rejected := overKind != nil || over
-	firstReject := false
+	// После закрытия инструментов любой вызов отклоняется: tool_choice=none уже
+	// сказал модели «ответь текстом», а она снова зовёт инструмент.
+	rejected := overKind != nil || over || m.toolsClosed
+	// Кран — только когда модель уже получила подсказку о закрытии и всё равно
+	// зовёт инструмент (игнорирует tool_choice=none).
+	warnedBefore := m.warned
+	closeNow := false
 	if rejected {
 		m.rejects++
-		if over && !m.exhausted {
-			m.exhausted = true
-			firstReject = true
+		switch {
+		case !m.toolsClosed:
+			// Первый отказ ЛЮБОГО вида (39.1): закрываем инструменты и
+			// возвращаем модели подсказку «ответь текстом сейчас».
+			m.toolsClosed = true
+			m.closedByReject = true
+			m.warned = true
+			closeNow = true
+		case !m.warned:
+			// Инструменты были закрыты харнессом с самого начала (39.2):
+			// первый вызов — нарушение, но сначала даём подсказку.
+			m.closedByReject = true
+			m.warned = true
 		}
 	} else {
 		m.rejects = 0
 	}
-	crane := rejected && m.rejects >= stopCraneRejects
+	// Кран — повторный вызов после уже выданной подсказки о закрытии.
+	crane := rejected && m.toolsClosed && warnedBefore && m.rejects >= stopCraneRejects
 	direct := m.direct
 	onExhausted := m.onExhausted
-	rejectText := "лимит обращений к инструментам за ход исчерпан — завершай ход финальным ответом"
+	rejects := m.rejects
+	rejectText := "лимит обращений к инструментам за ход исчерпан — инструменты на этот ход закрыты, ответь текстом сейчас"
 	if overKind != nil {
-		rejectText = overKind.Reject
+		rejectText = overKind.Reject + " — инструменты на этот ход закрыты, ответь текстом сейчас"
 	}
 	m.mu.Unlock()
 
-	// Первый отказ ОБЩЕГО лимита: харнесс выключает инструменты — следующий
-	// модельный вызов получит пустой opts.Tools и обязан выдать финальный
-	// TurnResult. Отказ вида (память/поиск) инструменты не выключает: другим
-	// видом ход ещё можно завершить (38.4).
-	if firstReject && onExhausted != nil {
+	// Первый отказ ЛЮБОГО вида (39.1): закрываем инструменты — следующий вызов
+	// модели идёт с tool_choice=none (определения остаются, 39.2) и обязан
+	// выдать финальный TurnResult.
+	if closeNow && onExhausted != nil {
 		onExhausted()
 	}
 
 	if crane {
-		m.logger.Printf("стоп-кран: %d подряд отказов лимита обращений (%d) — ход завершается принудительно", m.rejects, m.limit)
+		m.logger.Printf("стоп-кран: %d подряд отказов лимита обращений (%d) после закрытия инструментов — ход завершается принудительно", rejects, m.limit)
 		// Финальный результат с телом валидного TurnResult: цикл инструментов
-		// закрывается ResponseForce без repair-вызова модели. На прямом ходе
-		// (2026-11-02) — decision=react с «🤔»: видимый сигнал вместо молчания
-		// (сгенерировать текст без модели нельзя, а ошибка генерации зациклила
-		// бы повторы); на непрямом/фоновом — ignore, как раньше.
-		result := TurnResult{
-			Decision: DecisionIgnore,
-			Reason:   fmt.Sprintf("стоп-кран: %d подряд отказа лимита обращений к инструментам — ход завершён без ответа модели", stopCraneRejects),
-		}
-		if direct {
-			result = TurnResult{
-				Decision: DecisionReact,
-				Reaction: "🤔",
-				Reason:   fmt.Sprintf("стоп-кран: %d подряд отказа лимита обращений к инструментам — прямой ход завершён видимой реакцией", stopCraneRejects),
-			}
-		}
+		// закрывается ResponseForce без нового модельного вызова. Тело крана —
+		// резервный путь: финальный вызов с tool_choice=none не дал текста
+		// (модель снова позвала инструмент). На прямом ходе — react «🤔»,
+		// на непрямом/фоновом — ignore.
+		result := craneFallbackResult(direct)
 		body, err := json.Marshal(result)
 		if err != nil {
 			// Недостижимо (плоская структура), но финал не имеет права упасть.
 			m.logger.Printf("стоп-кран: результат не собран: %v", err)
 			return &events.ToolErrorEvent{
 				ToolResultEvent: events.ToolResultEvent{ParentID: ev.ID, Name: ev.Name},
-				Error:           "лимит обращений к инструментам за ход исчерпан — завершай ход финальным ответом",
+				Error:           rejectText,
 			}, nil
 		}
 		return &events.ToolResultEvent{
@@ -439,4 +491,14 @@ func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *
 		}, nil
 	}
 	return next(ev, cx)
+}
+
+// toolsClosedNow — инструменты закрыты middleware из-за отказа лимита (39.1):
+// харнесс использует это, чтобы отличить стоп-кран от хода, где инструменты не
+// были нужны с самого начала (там невалидный ответ остаётся терминальным
+// пропуском, а не превращается в реакцию).
+func (m *ToolLimitMiddleware) toolsClosedNow() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closedByReject
 }

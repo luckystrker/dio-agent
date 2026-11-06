@@ -175,21 +175,24 @@ func TestMemoryQueryFromBatch(t *testing.T) {
 // предзагрузки.
 func TestMemoryToolsAvailableHint(t *testing.T) {
 	cases := []struct {
-		name     string
-		hasMem   bool
-		prefetch bool
-		trimmed  bool
-		fitted   bool
-		want     bool
+		name       string
+		hasMem     bool
+		prefetch   bool
+		trimmed    bool
+		fitted     bool
+		incomplete string
+		want       bool
 	}{
-		{"целая история и карточка", true, true, false, true, false},
-		{"история урезана", true, true, true, true, true},
-		{"карточка не влезла", true, true, false, false, true},
-		{"откат предзагрузки", true, false, false, true, false},
-		{"нет инструментария", false, true, true, false, false},
+		{"целая история и карточка", true, true, false, true, "", false},
+		{"история урезана", true, true, true, true, "", true},
+		{"карточка не влезла", true, true, false, false, "budget", true},
+		{"неполнота только stances", true, true, false, false, "stances", false},
+		{"stances и budget", true, true, false, false, "budget, stances", true},
+		{"откат предзагрузки", true, false, false, true, "", false},
+		{"нет инструментария", false, true, true, false, "", false},
 	}
 	for _, tc := range cases {
-		if got := memoryToolsAvailable(tc.hasMem, tc.prefetch, tc.trimmed, tc.fitted); got != tc.want {
+		if got := memoryToolsAvailable(tc.hasMem, tc.prefetch, tc.trimmed, tc.fitted, tc.incomplete); got != tc.want {
 			t.Errorf("%s: memoryToolsAvailable = %v, хочу %v", tc.name, got, tc.want)
 		}
 	}

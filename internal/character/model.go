@@ -139,6 +139,19 @@ func isUnsupportedFeatureError(err error) bool {
 	return false
 }
 
+// isToolChoiceRejection — 400, которым провайдер отказывает именно в
+// tool_choice (39.2: не все OpenAI-совместимые принимают tool_choice вместе со
+// strict json_schema). Живой провайдер проверить нельзя — на такой отказ один
+// повтор без инструментов, но со схемой TurnResult.
+func isToolChoiceRejection(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok || code != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "tool_choice") || strings.Contains(msg, "tool choice")
+}
+
 // IsPermanentProviderError — отказ провайдера, который не лечится повтором
 // с тем же контекстом: 4xx, кроме 429 (флуд-контроль). Фон использует это,
 // чтобы 400 не жёг пять попыток одинаковым запросом (§12.1/§16, этап 38.6).
@@ -149,6 +162,10 @@ func IsPermanentProviderError(err error) bool {
 	}
 	return code >= 400 && code < 500 && code != 429
 }
+
+// turnConfigBinder — необязательный интерфейс inner-клиента (тесты): получить
+// конфиг конкретного хода и наблюдать tool_choice (в CallOptions его нет).
+type turnConfigBinder interface{ bindTurnConfig(*ChatConfig) }
 
 // ChatConfig — модельный конфиг одного хода (config.ModelConfig). Один конфиг
 // на ход: все запуски агента внутри хода (включая repair §11.3) делят счётчик
@@ -170,11 +187,11 @@ type ChatConfig struct {
 
 	mu    sync.Mutex
 	calls int
-	// toolsOff — лимит обращений к инструментам исчерпан (bug 2026-11-02):
-	// следующий модельный вызов уходит без tools и без forced tool_choice,
-	// чтобы модель выдала финальный TurnResult. Флаг ставит middleware хода
-	// через колбэк; atomic — модельные вызовы и middleware живут в разных
-	// горутинах агентского цикла.
+	// toolsOff — инструменты на этом ходе закрыты (39.1/39.2): следующий
+	// модельный вызов уходит с tool_choice="none" (определения инструментов
+	// остаются объявлены — префикс запроса стабилен), чтобы модель выдала
+	// финальный TurnResult. Флаг ставит middleware хода через колбэк; atomic —
+	// модельные вызовы и middleware живут в разных горутинах агентского цикла.
 	toolsOff atomic.Bool
 }
 
@@ -226,11 +243,13 @@ func (c *ChatConfig) Create() (config.LLMClient, error) {
 	return &chatClient{cfg: c, params: c.params, inner: c.inner, logf: logf}, nil
 }
 
-// DisableTools — харнесс исчерпал лимит обращений к инструментам за ход:
-// следующие модельные вызовы идут без инструментов (потокобезопасно).
+// DisableTools — на этом ходе инструменты закрыты (лимит обращений исчерпан,
+// стоп-кран или «на ходе не нужны»): следующие модельные вызовы идут с
+// tool_choice="none", а определения инструментов остаются в запросе (39.2) —
+// модель обязана выдать финальный TurnResult текстом.
 func (c *ChatConfig) DisableTools() { c.toolsOff.Store(true) }
 
-// ToolsDisabled — отключены ли инструменты на этом конфиге хода.
+// ToolsDisabled — инструменты на этом конфиге хода закрыты (tool_choice=none).
 func (c *ChatConfig) ToolsDisabled() bool { return c.toolsOff.Load() }
 
 // nextCall отмечает очередной модельный вызов хода и отвечает, должен ли он
@@ -284,26 +303,25 @@ type chatClient struct {
 
 // Call выполняет один модельный вызов (LLMClient).
 func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *agocontext.Context, opts config.CallOptions) (*events.ModelResponse, error) {
-	// Лимит инструментов исчерпан: провайдер-независимо убираем схемы и НЕ
-	// ставим forced tool_choice (bug 2026-11-02) — модель обязана выдать
-	// финальный TurnResult, а не звать инструменты дальше.
+	// Инструменты закрыты (39.1/39.2): провайдер-независимое tool_choice="none"
+	// при объявленных инструментах — модель обязана выдать финальный
+	// TurnResult, а префикс запроса (tools + схема) не меняется.
 	toolsOff := c.cfg.ToolsDisabled()
-	if toolsOff {
-		opts.Tools = nil
-	}
 	if c.inner != nil {
+		// Тестовый/внешний клиент видит состояние через cfg.ToolsDisabled():
+		// opts.Tools не чистим — набор инструментов стабилен.
 		return c.inner.Call(ctx, messages, conv, opts)
 	}
 
 	params := c.params
-	if !toolsOff {
-		if force, tool := c.cfg.nextCall(); force {
-			params.Extra = map[string]any{
-				"tool_choice": map[string]any{
-					"type":     "function",
-					"function": map[string]any{"name": tool},
-				},
-			}
+	if toolsOff {
+		params.Extra = withToolChoiceNone(params.Extra)
+	} else if force, tool := c.cfg.nextCall(); force {
+		params.Extra = map[string]any{
+			"tool_choice": map[string]any{
+				"type":     "function",
+				"function": map[string]any{"name": tool},
+			},
 		}
 	}
 	if c.cfg.SessionID != "" {
@@ -314,6 +332,19 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 		params.ExtraHeaders["User-Agent"] = "dio-agent/0.1 (living telegram character)"
 	}
 	resp, err := callWithShort429Retry(ctx, params, messages, conv, opts, c.logf)
+	if err != nil && isToolChoiceRejection(err) {
+		// Провайдер не принимает tool_choice вместе со strict json_schema
+		// (39.2): сохраняем structured output, но снимаем выбор инструментов и
+		// сами инструменты — один повтор. Живой провайдер проверить нельзя,
+		// поэтому фолбэк обязателен.
+		if c.logf != nil {
+			c.logf("провайдер отклонил tool_choice — один повтор без инструментов, схема TurnResult сохраняется: %v", err)
+		}
+		simple := opts
+		simple.Tools = nil
+		params.Extra = withoutToolChoice(params.Extra)
+		return callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
+	}
 	if err != nil && isUnsupportedFeatureError(err) {
 		// 400 «feature is not yet supported» — опциональная часть запроса не
 		// поддержана провайдером (этап 38.6). Один повтор в упрощённом виде:
@@ -326,9 +357,39 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 		simple := opts
 		simple.Tools = nil
 		simple.ResponseSchema = nil
+		params.Extra = withoutToolChoice(params.Extra)
 		return callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
 	}
 	return resp, err
+}
+
+// withToolChoiceNone возвращает Extra с tool_choice="none", не теряя прочих
+// полей (Extra мержится в тело запроса последним — ago/openaicompat).
+func withToolChoiceNone(extra map[string]any) map[string]any {
+	out := make(map[string]any, len(extra)+1)
+	for k, v := range extra {
+		out[k] = v
+	}
+	out["tool_choice"] = "none"
+	return out
+}
+
+// withoutToolChoice — копия Extra без tool_choice (фолбэк провайдера).
+func withoutToolChoice(extra map[string]any) map[string]any {
+	if len(extra) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(extra))
+	for k, v := range extra {
+		if k == "tool_choice" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // callWithShort429Retry — один логический модельный вызов с 1–2 короткими

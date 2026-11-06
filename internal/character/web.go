@@ -341,6 +341,10 @@ type webUsageMW struct {
 	name   string
 	db     web.UsageDB
 	logger *log.Logger
+	// onExhausted — закрыть инструменты хода (tool_choice=none), когда
+	// суточный лимит исчерпан прямо на ходе (39.1/39.2): следующий вызов
+	// модели обязан дать текст, а определения остаются объявлены.
+	onExhausted func()
 
 	mu        sync.Mutex
 	remaining int64
@@ -358,9 +362,12 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 		if m.logger != nil {
 			m.logger.Printf("веб: суточный лимит поисков исчерпан — вызов %q отклонён (36.1)", ev.Name)
 		}
+		if m.onExhausted != nil {
+			m.onExhausted()
+		}
 		return &events.ToolErrorEvent{
 			ToolResultEvent: events.ToolResultEvent{ParentID: ev.ID, Name: ev.Name},
-			Error:           "поиск на сегодня исчерпан — отвечай тем, что уже есть, или без поиска",
+			Error:           "поиск на сегодня исчерпан — инструменты на этот ход закрыты, ответь текстом без поиска",
 		}, nil
 	}
 	if err := (web.UsageStore{}).IncrementSearch(context.Background(), m.db); err != nil && m.logger != nil {

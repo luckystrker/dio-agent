@@ -8,8 +8,9 @@
 //     состояния первой частью пачки, карточка памяти вместо принудительного
 //     поиска (решение 2026-11-02), строгая валидация TurnResult (§11.2), один
 //     repair-retry (§11.3), невалидный результат не применяется — терминальный
-//     пропуск. Схема TurnResult — по ситуации хода (38.1); пустой answer после
-//     repair деградирует в react/ignore (38.2), а не пропускает ход;
+//     пропуск. Схема TurnResult полная и стабильная между ходами (39.2);
+//     пустой answer после repair деградирует в react/ignore (38.2), а не
+//     пропускает ход;
 //  3. model_output записывается ДО применения (§12.1);
 //  4. применение «всё или ничего» одной транзакцией (apply.go).
 //
@@ -89,10 +90,11 @@ type memoryToolPlan struct {
 //
 // Обычный режим (решения 2026-11-02 и 2026-11-03): история цела и в карточку
 // влезло всё релевантное — модель уже видит весь разговор и нужные заметки,
-// значит ход идёт одним вызовом БЕЗ инструментов памяти. История урезана или
-// релевантное не влезло — инструменты включаются, но без forced-вызова и с
-// лимитом min(ToolCallsLimit, 2): добрать недостающее, а не исследовать память
-// заново.
+// значит на ходе инструменты памяти не нужны. История урезана или релевантное
+// не влезло — обращение к памяти нужно, без forced-вызова и с лимитом
+// min(ToolCallsLimit, 2): добрать недостающее, а не исследовать память заново.
+// С 39.2 «не нужны» выражается tool_choice=none, а не удалением инструментов
+// из запроса: набор инструментов стабилен (кэш префикса провайдера).
 //
 // Откат (prefetch=false): прежнее поведение — инструменты всегда, forced на
 // прямом обращении, лимит из конфигурации.
@@ -108,6 +110,12 @@ func planMemoryTools(in Input, bctx BaseContext, hasMemory, prefetch bool, confi
 		return plan
 	}
 	if !bctx.HistoryTrimmed && bctx.MemoryCardFitted {
+		return memoryToolPlan{}
+	}
+	// 39.3: неполнота только из-за stances (отношений больше потолка) — это не
+	// пропущенный факт: поиск памяти его не доберёт, инструменты не нужны.
+	// Причина в логе (card_incomplete:stances) остаётся информационной.
+	if !bctx.HistoryTrimmed && !cardIncompleteNeedsTools(bctx.MemoryCardIncomplete) {
 		return memoryToolPlan{}
 	}
 	limit := memoryToolsLimit
@@ -447,12 +455,22 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
 	// получает обычный вызов и может ответить финальным TurnResult.
 	cfg := &ChatConfig{params: r.Model.params, inner: r.Model.inner, SessionID: sessionForChat(in.ChatID)}
+	// Тестовый/внешний клиент может получить конфиг хода: tool_choice в
+	// config.CallOptions не передаётся, иначе «инструменты закрыты» не
+	// проверить (production inner == nil, провод видит params.Extra).
+	if binder, ok := cfg.inner.(turnConfigBinder); ok {
+		binder.bindTurnConfig(cfg)
+	}
 	plan := planMemoryTools(in, bctx, r.Memory != nil, r.MemoryPrefetch, r.ToolCallsLimit)
-	// Веб (36.1): харнесс решает по конфигурации и суточному остатку,
-	// посчитанным при сборке контекста; модель решает, идти ли в поиск.
-	webOn := bctx.WebTools && r.Web != nil && r.Web.Enabled()
+	// Набор инструментов стабилен между ходами (39.2): память объявлена, если
+	// есть тулсет; веб — если включён в конфигурации, даже при исчерпанном
+	// суточном лимите (вызов отклонит лимит с понятным текстом). «Не нужны» —
+	// tool_choice=none, а не удаление определений.
+	webConfigured := r.Web != nil && r.Web.Enabled()
+	webAvailable := bctx.WebTools && webConfigured
+	toolPlan := planConversationTools(r.Memory != nil, plan.Enabled, webConfigured, webAvailable)
 	searchName := ""
-	if webOn {
+	if webConfigured {
 		searchName = r.Web.SearchToolName()
 	}
 	r.logMemoryTurn(in, bctx, plan)
@@ -465,7 +483,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		Reason:      memoryToolsReason(r.MemoryPrefetch, bctx),
 		CardEntries: bctx.MemoryCardEntries,
 		CardFitted:  bctx.MemoryCardFitted,
-		WebEnabled:  webOn,
+		WebEnabled:  webAvailable,
 	}); err != nil {
 		r.logf("ход %d: turn_plan не записан: %v", in.TurnID, err)
 	}
@@ -475,24 +493,44 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// в карточке панели (решение 2026-11-02).
 		cfg.ForcedTool = plan.ForcedTool
 	}
-	if webOn {
-		r.logf("ход %d: веб — инструменты вкл (остаток поисков на ход: %d, суточный лимит %d)",
-			in.TurnID, bctx.WebSearchesLeft, WebSearchDailyLimit)
+	// Инструменты на этом ходе не нужны: определения остаются в запросе, но
+	// выбор модели закрыт (39.2). Если инструментов нет вовсе, tool_choice не
+	// нужен: некоторые провайдеры отвергают его без tools.
+	if toolPlan.Choice == "none" && (toolPlan.Memory || toolPlan.Web) {
+		cfg.DisableTools()
 	}
+	if webAvailable {
+		r.logf("ход %d: веб — инструменты доступны (остаток поисков на ход: %d, суточный лимит %d)",
+			in.TurnID, bctx.WebSearchesLeft, WebSearchDailyLimit)
+	} else if webConfigured {
+		r.logf("ход %d: веб — инструменты объявлены, но суточный лимит поисков исчерпан — вызовы отклоняются лимитом (39.2)", in.TurnID)
+	}
+	r.logf("ход %d: инструменты хода — объявлены (память=%v, веб=%v), режим=%s",
+		in.TurnID, toolPlan.Memory, toolPlan.Web, toolChoiceLabel(toolPlan.Choice))
 
 	// Middleware: бюджет §16 — внешний слой (резерв до всего остального);
 	// журналирование tool_call/tool_result — наружу лимита, чтобы отклонённые
 	// лимитом вызовы тоже были зафиксированы; typing §13.3 — на весь ход.
 	budgetMW := NewBudgetMiddleware(r.Budget, operation, r.DailyCallsLimit, r.Logger)
-	toolLimit := conversationToolLimit(plan.Enabled, plan.Limit, webOn, r.ToolCallsLimit)
+	// Общий и раздельные потолки — по объявленному набору, а не по ситуации:
+	// middleware ведёт себя одинаково между ходами (39.2).
+	memoryLimit := plan.Limit
+	if memoryLimit <= 0 || memoryLimit > memoryToolsLimit {
+		memoryLimit = memoryToolsLimit
+	}
+	toolLimit := conversationToolLimit(toolPlan.Memory, memoryLimit, toolPlan.Web, r.ToolCallsLimit)
 	toolMW := NewToolLimitMiddleware(toolLimit, r.Logger)
-	// Раздельные потолки видов (38.4): память ≤2, поиск ≤2, страницы ≤2 —
-	// память не может съесть общий лимит на ходе с вебом.
-	toolMW.SetKindCaps(conversationKindCaps(plan.Enabled, plan.Limit, webOn, searchName))
-	// Исчерпание ОБЩЕГО лимита отключает инструменты на конфиге хода: следующий
-	// модельный вызов идёт без tools и без forced tool_choice (bug 2026-11-02).
-	// Отказ вида инструменты не выключает — другим видом ход ещё завершим.
+	// Раздельные потолки видов (38.4): память ≤2, поиск ≤2, страницы ≤2.
+	toolMW.SetKindCaps(conversationKindCaps(toolPlan.Memory, memoryLimit, toolPlan.Web, searchName))
+	// Первый отказ ЛЮБОГО вида закрывает инструменты: следующий вызов идёт с
+	// tool_choice=none (39.1).
 	toolMW.SetOnExhausted(cfg.DisableTools)
+	// Инструменты не нужны на ходе (tool_choice=none, 39.2): middleware знает,
+	// что вызов инструмента — нарушение, сначала ответит подсказкой, а
+	// повторный вызов замкнёт ход.
+	if toolPlan.Choice == "none" {
+		toolMW.SetClosed()
+	}
 	// Прямой ход на стоп-кране отвечает видимой реакцией, а не молчанием.
 	toolMW.SetDirect(in.Direct)
 	mws := []agomiddleware.Factory{func() agomiddleware.Middleware { return budgetMW }}
@@ -500,13 +538,13 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// repair): складывается отдельно от истории, только для журнала.
 	reasoning := NewReasoningCapture()
 	mws = append(mws, func() agomiddleware.Middleware { return reasoning })
-	if plan.Enabled || webOn {
+	if toolPlan.Memory || toolPlan.Web {
 		mws = append(mws,
 			func() agomiddleware.Middleware { return &toolJournalMW{runner: r, turnID: in.TurnID} },
 			func() agomiddleware.Middleware { return toolMW },
 		)
 	}
-	if webOn {
+	if toolPlan.Web {
 		// Бюджеты веба на ход (§15/§16): 2 поиска + 2 страницы; адреса выдачи
 		// собираются для проверки image_url (36.2); суточный счётчик — в базе.
 		webBudget, err := web.BudgetMiddleware(searchName, WebSearchesPerTurn, WebFetchesPerTurn)
@@ -516,7 +554,15 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		mws = append(mws, webBudget...)
 		mws = append(mws,
 			func() agomiddleware.Middleware {
-				return &webUsageMW{name: searchName, db: r.Pool, remaining: bctx.WebSearchesLeft, logger: r.Logger}
+				// remaining=0 при исчерпанном суточном лимите: первый же вызов
+				// отклоняется понятным текстом, а инструменты остаются
+				// объявлены (39.2). onExhausted закрывает и middleware: иначе
+				// упорные поиски отклонялись бы бесконечно без стоп-крана.
+				return &webUsageMW{name: searchName, db: r.Pool, remaining: bctx.WebSearchesLeft,
+					logger: r.Logger, onExhausted: func() {
+						cfg.DisableTools()
+						toolMW.SetClosed()
+					}}
 			},
 			func() agomiddleware.Middleware {
 				return &webResultMW{collector: webURLs, searchName: searchName}
@@ -527,12 +573,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		mws = append(mws, func() agomiddleware.Middleware { return NewTypingMiddleware(r.Typing, in.ChatID) })
 	}
 
-	// Инструменты хода: память (если выдана планом) и веб (если включён).
+	// Инструменты хода: стабильный набор (39.2).
 	tools := make([]agotools.Tool, 0, memoryToolsLimit+WebSearchesPerTurn+WebFetchesPerTurn)
-	if plan.Enabled {
+	if toolPlan.Memory {
 		tools = append(tools, r.Memory.Tools()...)
 	}
-	if webOn {
+	if toolPlan.Web {
 		webTools, werr := r.Web.Tools()
 		if werr != nil {
 			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, fmt.Errorf("ход %d: веб-инструменты не собраны: %w", in.TurnID, werr)
@@ -634,6 +680,18 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			}
 		}
 		if perr != nil {
+			// 39.1: если инструменты были закрыты стоп-краном и финальный
+			// вызов без инструментов так и не дал валидного TurnResult, прямой
+			// ход отвечает видимой реакцией «🤔», а не терминальным пропуском
+			// (текст без модели не сгенерировать). Фон — ignore.
+			if toolMW.toolsClosedNow() {
+				fallback := craneFallbackResult(in.Direct)
+				if verr := fallback.Validate(); verr == nil {
+					r.logf("ход %d: стоп-кран — финальный вызов без инструментов не дал валидного TurnResult (%v), отдаю %s",
+						in.TurnID, perr, fallback.Decision)
+					return fallback, repairs, budgetMW.callCount(), reasoningOut, nil
+				}
+			}
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, &invalidResultError{
 				err: perr, first: body, repair: repairBody,
 				firstReasoning: reasoningOut.First, repairReasoning: reasoningOut.Repair,
@@ -809,18 +867,19 @@ func (r *Runner) logf(format string, args ...any) {
 }
 
 // logMemoryTurn — одна строка наблюдаемости разговорного хода (21.4):
-// инструменты вкл/выкл и причина, объём карточки и её полнота, семантика
-// памяти. Без неё «модель опять сожгла лимит» не отличить от «память
-// предзагружена, но не влезла».
+// обращение к памяти нужно/не нужно и причина, объём карточки и её полнота,
+// семантика памяти. С 39.2 «не нужно» — это tool_choice=none при объявленных
+// инструментах, а не отсутствие инструментов в запросе. Без строки «модель
+// опять сожгла лимит» не отличить от «память предзагружена, но не влезла».
 func (r *Runner) logMemoryTurn(in Input, bctx BaseContext, plan memoryToolPlan) {
-	state := "выкл"
+	state := "не нужно (tool_choice=none)"
 	if plan.Enabled {
-		state = "вкл"
+		state = "нужно"
 	}
 	semantic := "выключена"
 	if model := r.Memory.SemanticModel(); model != "" {
 		semantic = "включена (" + model + ")"
 	}
-	r.logf("ход %d: память — инструменты %s (причина: %s), карточка: записей=%d fits=%v, семантика: %s",
+	r.logf("ход %d: память — обращение %s (причина: %s), карточка: записей=%d fits=%v, семантика: %s",
 		in.TurnID, state, memoryToolsReason(r.MemoryPrefetch, bctx), bctx.MemoryCardEntries, bctx.MemoryCardFitted, semantic)
 }

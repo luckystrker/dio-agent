@@ -230,10 +230,11 @@ func TestAssemblerHistoryTrimmed(t *testing.T) {
 	}
 }
 
-// TestTurnWithoutToolsWhenContextWhole — целая история + влезшая карточка:
-// модель получает пустой opts.Tools и ровно один вызов; урезанная история —
-// инструменты есть (без forced), эффективный лимит 3.
-func TestTurnWithoutToolsWhenContextWhole(t *testing.T) {
+// TestTurnNoMemoryToolsNeededWhenContextWhole — целая история + влезшая
+// карточка: инструменты памяти не нужны. С 39.2 определения инструментов
+// остаются в запросе (стабильный префикс), а модель получает tool_choice=none
+// и отвечает одним вызовом. Урезанная история — инструменты нужны (без forced).
+func TestTurnNoMemoryToolsNeededWhenContextWhole(t *testing.T) {
 	f, ctx := newFixture(t)
 	f.runner.MemoryPrefetch = true
 	f.runner.Assembler.Memory = f.runner.Memory
@@ -243,7 +244,9 @@ func TestTurnWithoutToolsWhenContextWhole(t *testing.T) {
 	turnID := int64(201)
 	f.seedTurn(t, ctx, turnID, "привет")
 	fake := &toolsSequenceClient{final: `{"decision":"answer","messages":["привет"]}`}
-	f.runner.Model = NewChatConfigWithClient(fake)
+	cfg := NewChatConfigWithClient(fake)
+	fake.cfg = cfg
+	f.runner.Model = cfg
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID, Direct: true,
 		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "привет"}}})
@@ -254,8 +257,12 @@ func TestTurnWithoutToolsWhenContextWhole(t *testing.T) {
 		t.Fatalf("модельных вызовов %d, хочу ровно 1: %v", out.LLMCalls, fake.toolCounts())
 	}
 	counts := fake.toolCounts()
-	if len(counts) != 1 || counts[0] != 0 {
-		t.Fatalf("целая история + карточка должны идти без инструментов: %v", counts)
+	closed := fake.closedFlags()
+	if len(counts) != 1 || counts[0] == 0 {
+		t.Fatalf("набор инструментов должен остаться объявленным (39.2): %v", counts)
+	}
+	if len(closed) != 1 || !closed[0] {
+		t.Fatalf("целая история + карточка: инструменты не закрыты tool_choice=none: %v", closed)
 	}
 }
 
@@ -312,7 +319,9 @@ func TestTurnModelOutputPanelAndHistoryWire(t *testing.T) {
 	turnID := int64(203)
 	f.seedTurn(t, ctx, turnID, "сегодняшнее")
 	fake := &toolsSequenceClient{final: `{"decision":"answer","messages":["ответ"]}`}
-	f.runner.Model = NewChatConfigWithClient(fake)
+	cfg := NewChatConfigWithClient(fake)
+	fake.cfg = cfg
+	f.runner.Model = cfg
 
 	batch := []BatchEvent{{EventID: 2, ActorID: 777, ActorName: "Коля", Text: "сегодняшнее"}}
 	if _, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID, Direct: true, Batch: batch}); err != nil {

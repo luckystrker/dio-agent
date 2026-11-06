@@ -27,6 +27,8 @@ func TestPrometheusExposition(t *testing.T) {
 		`dio_model_tokens{pool="conversation"} 4000`,
 		`dio_model_calls_limit{pool="conversation"} 100`,
 		`dio_model_calls_remaining{pool="conversation"} 88`,
+		`dio_model_prefix_cache_share_24h 0.75`,
+		`dio_model_prefix_cache_samples_24h 6`,
 		`dio_memory_turns_24h 10`,
 		`dio_memory_turns_with_tools_24h 3`,
 		`dio_memory_tools_share 0.3`,

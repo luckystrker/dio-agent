@@ -213,17 +213,17 @@ func TestStripLeadingHistoryStamps(t *testing.T) {
 // провайдер не сообщил — nil, а не ложный полный промах.
 func TestUsageTokens(t *testing.T) {
 	prompt, completion, cached := int64(100), int64(20), int64(64)
-	tokens, cache := usageTokens(&events.ModelResponse{Usage: events.Usage{
+	tokens, promptTokens, cache := usageTokens(&events.ModelResponse{Usage: events.Usage{
 		PromptTokens: &prompt, CompletionTokens: &completion, CacheReadInputTokens: &cached,
 	}})
-	if tokens != 120 || cache == nil || *cache != 64 {
-		t.Fatalf("usage = %d/%v, хочу 120/64", tokens, cache)
+	if tokens != 120 || promptTokens != 100 || cache == nil || *cache != 64 {
+		t.Fatalf("usage = %d/%d/%v, хочу 120/100/64", tokens, promptTokens, cache)
 	}
-	tokens, cache = usageTokens(&events.ModelResponse{Usage: events.Usage{PromptTokens: &prompt}})
-	if tokens != 100 || cache != nil {
-		t.Fatalf("без кэша: usage = %d/%v, хочу 100/nil", tokens, cache)
+	tokens, promptTokens, cache = usageTokens(&events.ModelResponse{Usage: events.Usage{PromptTokens: &prompt}})
+	if tokens != 100 || promptTokens != 100 || cache != nil {
+		t.Fatalf("без кэша: usage = %d/%d/%v, хочу 100/100/nil", tokens, promptTokens, cache)
 	}
-	if _, cache := usageTokens(nil); cache != nil {
+	if _, _, cache := usageTokens(nil); cache != nil {
 		t.Fatalf("nil-ответ дал кэш")
 	}
 }

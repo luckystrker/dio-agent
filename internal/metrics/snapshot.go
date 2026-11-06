@@ -64,6 +64,18 @@ type SkipCount struct {
 type ModelStats struct {
 	Period string               `json:"period"`
 	Pools  map[string]ModelPool `json:"pools"`
+	// PrefixCache — кэш префикса провайдера по ПЕРВОМУ вызову разговорного
+	// хода за 24 часа (39.2): средняя доля cached_tokens от prompt_tokens.
+	PrefixCache PrefixCacheStats `json:"prefix_cache_24h"`
+}
+
+// PrefixCacheStats — наблюдаемость стабильного префикса (39.2): сколько
+// первых вызовов ходов сообщили кэш и какая средняя доля промпта пришла из
+// кэша. Низкая доля — префикс снова пересобирается (схема/инструменты/система
+// меняются между ходами).
+type PrefixCacheStats struct {
+	Samples24h int64   `json:"samples_24h"`
+	AvgShare   float64 `json:"avg_share"`
 }
 
 // ModelPool — расход одного пула: completed/reserved вызовы, токены, лимит.
