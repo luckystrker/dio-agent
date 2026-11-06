@@ -143,3 +143,79 @@ func TestDeliveryLoopPhotoWithoutBytesFails(t *testing.T) {
 		t.Fatalf("sendPhoto без байтов не должен вызываться (вызовов %d)", sent)
 	}
 }
+
+// TestDeliveryPhotoFailsTerminallyDeletesBytes — m13: терминальный failed
+// (sendPhoto отвергнут) не оставляет байты картинки до ретенции.
+func TestDeliveryPhotoFailsTerminallyDeletesBytes(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"ok":false,"error_code":400,"description":"Bad Request: wrong file type"}`))
+	}))
+	t.Cleanup(srv.Close)
+	client := NewClient("TESTTOKEN", srv.URL, srv.Client())
+	repo := NewOutboxRepo(pool)
+
+	id := insertOutbox(t, pool, 202, 42, 0, `{"kind":"photo","source_url":"https://cdn.example.com/a.jpg"}`)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO outbox_images (outbox_id, content_type, bytes) VALUES ($1, 'image/jpeg', $2)`,
+		id, []byte("jpeg-байты")); err != nil {
+		t.Fatalf("байты картинки не вставлены: %v", err)
+	}
+
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{BubbleGap: time.Millisecond})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	var status string
+	if err := pool.QueryRow(ctx,
+		`SELECT status FROM delivery_outbox WHERE id = $1`, id).Scan(&status); err != nil {
+		t.Fatalf("строка не читается: %v", err)
+	}
+	if status != "failed" {
+		t.Fatalf("отвергнутая картинка: status=%q, хочу failed", status)
+	}
+	var left int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_images WHERE outbox_id = $1`, id).Scan(&left); err != nil {
+		t.Fatalf("outbox_images не прочитан: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("байты картинки остались после терминального failed: %d", left)
+	}
+}
+
+// TestDeliveryPhotoMarksGroupInvolvement — m17: ответ только картинкой в группе
+// отмечает вовлечённость (как сообщение/стикер), а не только noteSent.
+func TestDeliveryPhotoMarksGroupInvolvement(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	stub := &photoStub{}
+	srv := stub.server(t)
+	client := NewClient("TESTTOKEN", srv.URL, srv.Client())
+	repo := NewOutboxRepo(pool)
+
+	// Групповой чат и его событие: тип чата markGroupInvolvement читает из
+	// social_events.
+	mustIngest(t, pool, rawGroupMessageOf(9101, -301, "смотри"))
+	id := insertOutbox(t, pool, 203, -301, 0, `{"kind":"photo","source_url":"https://cdn.example.com/a.jpg"}`)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO outbox_images (outbox_id, content_type, bytes) VALUES ($1, 'image/jpeg', $2)`,
+		id, []byte("jpeg-байты")); err != nil {
+		t.Fatalf("байты картинки не вставлены: %v", err)
+	}
+
+	loop := NewDeliveryLoop(pool, repo, client, nil, DeliveryOptions{BubbleGap: time.Millisecond})
+	if err := loop.Tick(ctx); err != nil {
+		t.Fatalf("такт не удался: %v", err)
+	}
+	var involved time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT involved_until FROM chat_involvement WHERE chat_id = -301`).Scan(&involved); err != nil {
+		t.Fatalf("вовлечённость группы не отмечена картинкой (m17): %v", err)
+	}
+	if !involved.After(time.Now()) {
+		t.Fatalf("вовлечённость в прошлом: %v", involved)
+	}
+}

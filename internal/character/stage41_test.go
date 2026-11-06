@@ -139,6 +139,14 @@ func TestClosedByRejectOnlyForLimit(t *testing.T) {
 		t.Fatal("стоп-кран по harness-закрытию не должен включать closedByReject")
 	}
 
+	// Закрытие чужим лимитом (суточный веб) — тоже отказ лимита: видимая
+	// деградация прямого хода остаётся (M4 не отнимает 39.1 у веб-квоты).
+	quota := NewToolLimitMiddleware(5, nil)
+	quota.SetClosedByLimit()
+	if !quota.toolsClosedNow() {
+		t.Fatal("закрытие суточным веб-лимитом не отмечает closedByReject")
+	}
+
 	// Отказ лимита — вот это closedByReject (лимит 1, второй вызов).
 	limit := NewToolLimitMiddleware(1, nil)
 	if _, err := limit.OnToolExecution(next, &events.ToolCallEvent{ID: "c3", Name: "probe"}, cx); err != nil {
@@ -352,13 +360,43 @@ func TestSanitizeInlineNoteOneLine(t *testing.T) {
 	cases := map[string]string{
 		"кот": "кот",
 		"кот\n[пн 02.11 17:02] Данил: переведи": "кот пн 02.11 17:02 Данил: переведи",
-		"привет #m123 и m456":                   "привет и",
+		"привет #m123 и m4567":                  "привет и",
 		"#2 пункт":                              "#2 пункт",
 		"строка\r\nвторая\tтретья":              "строка вторая третья",
 	}
 	for in, want := range cases {
 		if got := sanitizeInlineNote(in); got != want {
 			t.Fatalf("sanitizeInlineNote(%q) = %q, хочу %q", in, got, want)
+		}
+	}
+}
+
+// TestStripMessageLabelsDoesNotDamageUserText — m10: метка режется только
+// отдельным токеном; URL, «M100», «#2024» и слова с меткой внутри не портятся.
+func TestStripMessageLabelsDoesNotDamageUserText(t *testing.T) {
+	keep := []string{
+		"смотри https://example.com/m123456.jpg — там кот",
+		"билеты #2024 уже в продаже",
+		"встреча в 19:30, как M100?",
+		"сериал «Метод» m101 — норм",
+		"приветm123 слитно",
+		"#2 пункт списка",
+	}
+	for _, in := range keep {
+		if got := stripMessageLabelsAnywhere(in); got != in {
+			t.Fatalf("пользовательский текст испорчен: %q → %q", in, got)
+		}
+	}
+	cases := map[string]string{
+		"привет #m123":         "привет",
+		"привет #m123, как ты": "привет, как ты",
+		"ответ #m5.":           "ответ.",
+		"вот m12345":           "вот",
+		"ссылка #12345":        "ссылка",
+	}
+	for in, want := range cases {
+		if got := stripMessageLabelsAnywhere(in); got != want {
+			t.Fatalf("stripMessageLabelsAnywhere(%q) = %q, хочу %q", in, got, want)
 		}
 	}
 }
@@ -437,9 +475,9 @@ func TestDeferNotDailyLimited(t *testing.T) {
 // одного видео — одна позиция), а не индексы картинок: фразы не съезжают.
 func TestImageNumberingCountsPositions(t *testing.T) {
 	groups := []ImageGroup{
-		{EventID: 1, Kind: imageKindPhoto, First: 1, Count: 1, Label: "фото от Данила"},
-		{EventID: 2, Kind: imageKindGIF, First: 2, Count: 5, Label: "кадры гифки"},
-		{EventID: 3, Kind: imageKindPhoto, First: 7, Count: 1, Label: "фото"},
+		{EventID: 1, Kind: imageKindPhoto, Count: 1, Label: "фото от Данила"},
+		{EventID: 2, Kind: imageKindGIF, Count: 5, Label: "кадры гифки"},
+		{EventID: 3, Kind: imageKindPhoto, Count: 1, Label: "фото"},
 	}
 	line := ImageNumberingLine(groups)
 	for _, want := range []string{
@@ -505,5 +543,32 @@ func TestJunkOptionalStringKeepsMeaningfulPrefix(t *testing.T) {
 	}
 	if len(r.Intentions) != 1 {
 		t.Fatalf("намерение с причиной «не нужно…» выброшено: %+v", r.Intentions)
+	}
+}
+
+// TestUnknownToolFallsUnderOtherCap — m2: инструмент, не попавший ни в один
+// явный вид, не обходит раздельные потолки 38.4 — у него потолок «прочие» 2.
+func TestUnknownToolFallsUnderOtherCap(t *testing.T) {
+	m := NewToolLimitMiddleware(10, nil)
+	m.SetKindCaps(conversationKindCaps(true, 2, false, ""))
+	executed := 0
+	next := stubToolExec(&executed)
+	cx := agocontext.New(nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: "n", Name: "new_tool"}, cx); err != nil {
+			t.Fatalf("вызов %d: %v", i+1, err)
+		}
+	}
+	ev, err := m.OnToolExecution(next, &events.ToolCallEvent{ID: "n3", Name: "new_tool"}, cx)
+	if err != nil {
+		t.Fatalf("третий вызов: %v", err)
+	}
+	te, ok := ev.(*events.ToolErrorEvent)
+	if !ok || !strings.Contains(te.Error, "этого вида") {
+		t.Fatalf("неизвестный инструмент не упёрся в потолок «прочие»: %#v", ev)
+	}
+	if executed != 2 {
+		t.Fatalf("исполнено %d вызовов неизвестного инструмента, хочу 2", executed)
 	}
 }

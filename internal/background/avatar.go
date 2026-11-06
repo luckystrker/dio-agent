@@ -67,19 +67,21 @@ func (s *Scheduler) checkAvatar(ctx context.Context, check avatar.Check) error {
 	}
 	if fileID == "" || uniqueID == "" {
 		// Аватарки нет или она скрыта приватностью: «не видно» пишется ОДИН раз
-		// за всё время (m26): маркер — уже записанное описание; переход
-		// visible→invisible не плодит одинаковые записи памяти.
+		// за всё время (m26) — явный маркер `invisible_reported`, а не
+		// сравнение с visible (иначе каждый переход visible→invisible плодил
+		// запись, а описание прошлой аватарки глушило бы первое сообщение).
 		text := avatar.InvisibleText(check.ActorName)
-		if check.Description == "" {
+		if !check.InvisibleReported {
 			if err := s.writeAvatarMemory(ctx, check, text, "avatar:"+fmt.Sprint(check.UserID)+":none"); err != nil {
 				return err
 			}
 		}
-		return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, "", false, text)
+		return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, "", false, text, true)
 	}
 	if uniqueID == check.FileUniqueID {
 		// Аватарка не менялась: память не трогаем, следующая проверка — сутки.
-		return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, uniqueID, true, check.Description)
+		return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, uniqueID, true,
+			check.Description, check.InvisibleReported)
 	}
 
 	mime, data, err := s.avatar.FetchAvatar(ctx, fileID)
@@ -98,7 +100,9 @@ func (s *Scheduler) checkAvatar(ctx context.Context, check avatar.Check) error {
 		fmt.Sprintf("avatar:%d:%s", check.UserID, uniqueID)); err != nil {
 		return err
 	}
-	return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, uniqueID, true, description)
+	// Флаг «не видно сообщали» липкий: правило «один раз», не «на переход».
+	return avatar.Complete(ctx, s.pool, check.UserID, check.ScopeID, uniqueID, true,
+		description, check.InvisibleReported)
 }
 
 // writeAvatarMemory — запись памяти experience в скоупе чата (§9.2): источник

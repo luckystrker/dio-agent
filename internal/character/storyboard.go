@@ -145,8 +145,7 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 
 	// Разворачиваем слоты в порядке пачки: текст Ask и картинки сохраняют
 	// последовательность событий. Нумерация описаний идёт по группам: кадры
-	// одного видео — одна позиция (этап 37.1).
-	imageNumber := 1
+	// одного видео — одна позиция (этап 37.1; 41.2 M7 — позиции, не индексы).
 	for _, slot := range slots {
 		if len(slot.frames) > 0 {
 			for _, frame := range slot.frames {
@@ -158,10 +157,9 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 			}
 			kind, label := videoGroupKindLabel(slot.video)
 			out.Groups = append(out.Groups, ImageGroup{
-				EventID: slot.event.EventID, Kind: kind, First: imageNumber,
+				EventID: slot.event.EventID, Kind: kind,
 				Count: len(slot.frames), Label: label,
 			})
-			imageNumber += len(slot.frames)
 			continue
 		}
 		if slot.fileID == "" || slot.dropped || photos == nil {
@@ -175,9 +173,8 @@ func CollectVisuals(ctx context.Context, batch []BatchEvent, photos PhotoFetcher
 		out.Images = append(out.Images, Photo{FileID: slot.fileID, Data: pm.Data(), Mime: pm.Mime})
 		kind, label := imageGroupKindLabel(slot)
 		out.Groups = append(out.Groups, ImageGroup{
-			EventID: slot.event.EventID, Kind: kind, First: imageNumber, Count: 1, Label: label,
+			EventID: slot.event.EventID, Kind: kind, Count: 1, Label: label,
 		})
-		imageNumber++
 	}
 	return out
 }

@@ -81,12 +81,13 @@ func ChatBlockedError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(apiErr.Description)
+	// Только 403-описания: «chat not found»/«peer_id_invalid» приходят с 400 и
+	// означают в том числе ошибку нашего id — ложная блокировка не снялась бы
+	// без входящего сообщения (m6 ревью 2026-11-06).
 	for _, marker := range []string{
 		"bot was blocked by the user",
 		"user is deactivated",
-		"chat not found",
 		"bot was kicked",
-		"peer_id_invalid",
 	} {
 		if strings.Contains(msg, marker) {
 			return true

@@ -36,10 +36,6 @@ type SourceOptions struct {
 	ConversationCallsLimit int64
 	BackgroundCallsLimit   int64
 	MaintenanceCallsLimit  int64
-	// WebSearchesLimit — эффективный суточный лимит поисков разговорного пула
-	// (тот же, что видит Assembler; 0 — константа web/character). Метрика не
-	// должна показывать хардкод мимо настроенного лимита (m19).
-	WebSearchesLimit int64
 }
 
 // PgSource собирает снимок SQL-запросами по таблицам-источникам истины.
@@ -613,10 +609,10 @@ func (s *PgSource) collectLifeEvents(ctx context.Context, snap *Snapshot, _ time
 // источник — web_usage (суточный счётчик поисков) и delivery_outbox
 // (подтверждённые sendPhoto), поэтому цифры переживают рестарт.
 func (s *PgSource) collectWeb(ctx context.Context, snap *Snapshot, _ time.Time) error {
-	snap.Web.SearchesLimit = s.opts.WebSearchesLimit
-	if snap.Web.SearchesLimit <= 0 {
-		snap.Web.SearchesLimit = character.WebSearchDailyLimit
-	}
+	// m19: отдельной настройки суточного лимита поиска нет — эффективный лимит
+	// и метрика берут одну константу. Когда лимит станет настраиваемым, сюда
+	// пойдёт SourceOptions (как у модельных пулов).
+	snap.Web.SearchesLimit = character.WebSearchDailyLimit
 	if err := s.pool.QueryRow(ctx, `
 		SELECT coalesce(sum(count), 0) FROM web_usage
 		WHERE kind = $1 AND period = (now() AT TIME ZONE 'UTC')::date`,

@@ -287,7 +287,9 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 			r.logf("ход %d: картинка не восстановлена — вердикт проверки в model_output отсутствует (image_url %q)",
 				in.TurnID, redactURLSecrets(state.Output.ImageURL))
 		}
-		image := r.fetchImage(ctx, in.TurnID, imageVerdict{URL: state.ImageURL, Alt: state.ImageAlt})
+		image := r.fetchImage(ctx, in.TurnID, imageVerdict{
+			URL: state.ImageURL, Alt: sanitizeInlineNote(state.ImageAlt),
+		})
 		return r.apply(ctx, in, *state.Output, image, state.ImageNotes, out)
 	}
 
@@ -571,7 +573,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 				return &webUsageMW{name: searchName, db: r.Pool, remaining: bctx.WebSearchesLeft,
 					logger: r.Logger, onExhausted: func() {
 						cfg.DisableTools()
-						toolMW.SetClosed()
+						toolMW.SetClosedByLimit()
 					}}
 			},
 			func() agomiddleware.Middleware {

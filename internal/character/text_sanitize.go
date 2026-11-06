@@ -8,15 +8,17 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // messageLabelTokenRe — кандидат в метку сообщения: #m123, m123, #123.
 var messageLabelTokenRe = regexp.MustCompile(`(?i)(?:#m|m|#)\d+`)
 
 // stripMessageLabelsAnywhere вырезает метки сообщений из любого места текста
-// (m10 ревью 2026-11-06): модель копирует их из истории не только в начало
-// сообщения. Терпимые формы (m123, #123) вырезаются только при ≥3 цифрах —
-// короткий «#2» в обычном тексте остаётся пунктом списка.
+// (m10 ревью 2026-11-06), не калеча пользовательский текст: метка должна стоять
+// отдельным токеном (не внутри URL/слова), каноническая #m<id> режется любым
+// числом цифр, терпимые формы — только достаточно длинные (m<id> ≥4, #<id> ≥5
+// цифр), иначе «#2024» и «M100» в живом тексте теряли бы смысл.
 func stripMessageLabelsAnywhere(text string) string {
 	locs := messageLabelTokenRe.FindAllStringIndex(text, -1)
 	if len(locs) == 0 {
@@ -35,29 +37,65 @@ func stripMessageLabelsAnywhere(text string) string {
 		return text
 	}
 	b.WriteString(text[last:])
-	return strings.TrimSpace(repeatedHorizontalSpaceRe.ReplaceAllString(b.String(), " "))
+	out := repeatedHorizontalSpaceRe.ReplaceAllString(b.String(), " ")
+	out = spaceBeforePunctRe.ReplaceAllString(out, "$1")
+	return strings.TrimSpace(out)
 }
 
 // repeatedHorizontalSpaceRe — двойные пробелы, оставшиеся после вырезания
 // метки; переводы строк (многострочное сообщение) не трогаем.
 var repeatedHorizontalSpaceRe = regexp.MustCompile(`[ \t]{2,}`)
 
-// messageLabelCandidate — найденная подстрока действительно метка: границы с
-// обеих сторон не разрезают слово, форма каноническая или достаточно длинная.
+// spaceBeforePunctRe — пробел перед знаком препинания после вырезанной метки
+// («привет , как ты» → «привет, как ты»).
+var spaceBeforePunctRe = regexp.MustCompile(`\s+([,.;:!?])`)
+
+// messageLabelCandidate — найденная подстрока действительно метка: стоит
+// отдельным токеном, форма каноническая или достаточно длинная.
 func messageLabelCandidate(text string, start, end int) bool {
-	if start > 0 && isWordRune(rune(text[start-1])) {
-		return false
+	if start > 0 {
+		r, _ := utf8.DecodeLastRuneInString(text[:start])
+		if !labelBoundaryBefore(r) {
+			return false
+		}
 	}
-	if end < len(text) && isWordRune(rune(text[end])) {
-		return false
+	if end < len(text) {
+		r, _ := utf8.DecodeRuneInString(text[end:])
+		if !labelBoundaryAfter(r) {
+			return false
+		}
 	}
 	token := strings.ToLower(text[start:end])
 	prefix := strings.TrimRight(token, "0123456789")
 	digits := len(token) - len(prefix)
-	if prefix != "#m" && digits < 3 {
-		return false
+	switch prefix {
+	case "#m":
+		return true
+	case "m":
+		return digits >= 4
+	case "#":
+		return digits >= 5
 	}
-	return true
+	return false
+}
+
+// labelBoundaryBefore — перед меткой допустимы начало строки, пробел или
+// пунктуация; «/», «.», «-», «_», «=» и буквы/цифры — часть слова или URL.
+func labelBoundaryBefore(r rune) bool {
+	if unicode.IsSpace(r) || unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return unicode.IsSpace(r)
+	}
+	switch r {
+	case '(', '[', '{', '"', '\'', '«', '»', '…', ',', ';', ':', '!', '?':
+		return true
+	}
+	return false
+}
+
+// labelBoundaryAfter — после метки недопустимы буквы/цифры, «_» и «/» (URL);
+// точка и другая пунктуация — конец предложения, метку режем.
+func labelBoundaryAfter(r rune) bool {
+	return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '/')
 }
 
 func isWordRune(r rune) bool {

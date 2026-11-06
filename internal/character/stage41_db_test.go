@@ -148,3 +148,60 @@ func TestApplyDefersReplyLaterAtDailyLimitDB(t *testing.T) {
 		t.Fatalf("создано намерение %q, хочу reply_later", kind)
 	}
 }
+
+// TestConcurrentApplyKeepsDailyLimitDB — m23: два конкурентных применения в
+// одном чате при исчерпанном на день-минус-один лимите не создают третью
+// инициативу (advisory-лок чата в транзакции применения).
+func TestConcurrentApplyKeepsDailyLimitDB(t *testing.T) {
+	f, ctx := newFixture(t)
+	// Today=2 (лимит §14.3 исчерпан): разрешён ровно один «слот» сверх него —
+	// если очередь пуста; конкурентное применение не должно добавить второй.
+	seedDeliveredInitiative(t, ctx, f, 7101, 71001, "check_in")
+	seedDeliveredInitiative(t, ctx, f, 7102, 71002, "share")
+	f.seedTurn(t, ctx, 4110, "первый")
+	f.seedTurn(t, ctx, 4111, "второй")
+
+	results := []TurnResult{
+		{Decision: DecisionAnswer, Messages: []string{"раз"},
+			Intentions: []IntentionProposal{
+				{Kind: "check_in", Topic: "проверить раз", Reason: "повод", DelayHours: 2},
+				{Kind: "share", Topic: "поделиться раз", Reason: "повод", DelayHours: 1},
+			}},
+		{Decision: DecisionAnswer, Messages: []string{"два"},
+			Intentions: []IntentionProposal{
+				{Kind: "check_in", Topic: "проверить два", Reason: "повод", DelayHours: 2},
+				{Kind: "share", Topic: "поделиться два", Reason: "повод", DelayHours: 1},
+			}},
+	}
+	type outcome struct {
+		created int
+		limited int
+		err     error
+	}
+	ch := make(chan outcome, 2)
+	for i, turnID := range []int64{4110, 4111} {
+		go func(i int, turnID int64) {
+			res, err := ApplyTurn(ctx, f.pool, ApplyOptions{
+				TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+				Result:          results[i],
+				PersonaBaseline: f.persona.MoodBaseline,
+				Journal:         f.journal,
+			})
+			ch <- outcome{created: len(res.IntentionIDs), limited: len(res.LimitedIntentions), err: err}
+		}(i, turnID)
+	}
+	created, limited := 0, 0
+	for i := 0; i < 2; i++ {
+		out := <-ch
+		if out.err != nil {
+			t.Fatalf("применение: %v", out.err)
+		}
+		created += out.created
+		limited += out.limited
+	}
+	// Один «слот» сверх исчерпанного лимита на чат и три отклонённых
+	// предложения — независимо от порядка конкурентных применений.
+	if created != 1 || limited != 3 {
+		t.Fatalf("конкурентные применения: создано %d, ограничено %d — хочу 1/3", created, limited)
+	}
+}

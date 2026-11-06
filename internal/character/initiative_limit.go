@@ -54,8 +54,12 @@ func InitiativeDailyExhausted(usage InitiativeUsage) bool {
 // Тот же запрос, что был в гейте фона (ProactiveUsage).
 func ReadInitiativeUsage(ctx context.Context, db DBTX, chatID int64) (InitiativeUsage, error) {
 	var usage InitiativeUsage
+	// 41.2 M6: дневной счёт — только check_in/share; reply_later (отложенный
+	// ответ на прямой вопрос) дневной потолок не расходует. Время последней
+	// инициативы (для паузы между инициативами) считается по всем видам.
 	err := db.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE i.updated_at >= date_trunc('day', now())),
+		SELECT count(*) FILTER (WHERE i.kind <> 'reply_later'
+		                         AND i.updated_at >= date_trunc('day', now())),
 		       max(i.updated_at)
 		FROM intentions i
 		WHERE i.kind = ANY($1)

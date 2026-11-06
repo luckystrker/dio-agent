@@ -202,6 +202,7 @@ func TestProactiveCaps(t *testing.T) {
 	cfg := f.withModel(t,
 		&events.ModelResponse{Message: &events.ModelMessage{Content: initiativeTurnJSON}},
 		&events.ModelResponse{Message: &events.ModelMessage{Content: initiativeTurnJSON}},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: initiativeTurnJSON}},
 	)
 	f.seedPrivateChat(t, ctx, "давно не общались про музыку", f.now.Add(-6*time.Hour))
 
@@ -242,15 +243,24 @@ func TestProactiveCaps(t *testing.T) {
 		t.Fatalf("после паузы инициатива должна исполниться, статус %s", st)
 	}
 
-	// 4) третья за сутки — дневной лимит (§14.3: не более 2). С 2026-11-05
-	// (af3e0a9) первая в очереди инициатива не отменяется навсегда, а
-	// переносится на следующий дневной слот — статус остаётся pending.
+	// 4) вторая за сутки (reply_later в п.1 не считается — 41.2 M6): проходит.
 	d := f.createIntention(t, ctx, KindCheckIn, "просто скучаю", -6, bgChatID)
 	f.setNow(f.now.Add(5 * time.Hour))
 	if err := f.sched.Tick(ctx); err != nil {
 		t.Fatalf("такт 4 не удался: %v", err)
 	}
-	if st := f.intentionStatus(t, ctx, d); st != "pending" {
+	if st := f.intentionStatus(t, ctx, d); st != "completed" {
+		t.Fatalf("вторая за сутки инициатива должна исполниться, статус %s", st)
+	}
+
+	// 4б) третья check_in/share за сутки — дневной лимит (§14.3: не более 2).
+	// С 2026-11-05 (af3e0a9) первая в очереди инициатива не отменяется
+	// навсегда, а переносится на следующий дневной слот — статус pending.
+	d2 := f.createIntention(t, ctx, KindCheckIn, "ещё скучаю", -6, bgChatID)
+	if err := f.sched.Tick(ctx); err != nil {
+		t.Fatalf("такт 4б не удался: %v", err)
+	}
+	if st := f.intentionStatus(t, ctx, d2); st != "pending" {
 		t.Fatalf("третья инициатива за сутки должна быть перенесена (pending), статус %s", st)
 	}
 
@@ -266,8 +276,8 @@ func TestProactiveCaps(t *testing.T) {
 		t.Fatalf("check_in в группу должен быть отменён (§14.3), статус %s", st)
 	}
 
-	if got := len(cfg.Calls()); got != 2 {
-		t.Fatalf("модель должна вызваться ровно дважды (два исполнения), вызвалась %d", got)
+	if got := len(cfg.Calls()); got != 3 {
+		t.Fatalf("модель должна вызваться ровно трижды (reply_later + share + check_in), вызвалась %d", got)
 	}
 }
 

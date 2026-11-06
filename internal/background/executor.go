@@ -201,13 +201,12 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			// очереди переносим на ближайший дневной слот, остальные отменяем.
 			// Иначе после дня с двумя инициативами наступает тишина, пока
 			// человек сам не напишет (живой смоук 2026-11-04).
-			if dailyLimitDeferral(reason) {
+			if until, ok := initiativeDeferralUntil(reason, it.Kind, s.now(), s.location); ok {
 				other, herr := s.intentions.HasOtherPending(ctx, it.TargetChatID, it.ID)
 				if herr != nil {
 					return out, herr
 				}
 				if !other {
-					until := nextDailySlot(s.now(), s.location, initiativeDailySlotHour)
 					// Срок намерения может истечь раньше слота: переносить
 					// некуда, честно отменяем, а не оставляем мёртвый pending.
 					if canDeferTo(until, it.ExpiresAt) {
@@ -519,6 +518,22 @@ const initiativeDailySlotHour = 10
 // намерение не отменяется, а переносится на следующий дневной слот.
 func dailyLimitDeferral(reason string) bool {
 	return strings.HasPrefix(reason, "достигнут дневной лимит инициатив")
+}
+
+// initiativeDeferralUntil — до какого момента переносится инициатива, которую
+// гейт не пустил (41.2 M6): дневной лимит — следующий дневной слот, пауза между
+// инициативами — её окончание. Отложенный ответ на прямой вопрос не должен
+// отменяться из-за паузы.
+func initiativeDeferralUntil(reason, kind string, now time.Time, loc *time.Location) (time.Time, bool) {
+	if dailyLimitDeferral(reason) {
+		return nextDailySlot(now, loc, initiativeDailySlotHour), true
+	}
+	// Пауза между инициативами переносит только reply_later (defer): для
+	// check_in/share «слишком рано» по-прежнему повод отменить инициативу.
+	if kind == KindReplyLater && strings.HasPrefix(reason, "между инициативами прошло меньше") {
+		return now.Add(MinProactiveGap), true
+	}
+	return time.Time{}, false
 }
 
 // canDeferTo — перенос на until имеет смысл, только если намерение ещё не

@@ -382,6 +382,17 @@ func (m *ToolLimitMiddleware) SetClosed() {
 	m.mu.Unlock()
 }
 
+// SetClosedByLimit отмечает закрытие инструментов отказом ЛИМИТА из другого
+// middleware (суточный веб-лимит, 39.2): невалидный финальный ответ прямого
+// хода деградирует в видимую реакцию (39.1), как при отказе самого лимита
+// обращений (M4 различает «закрыли, потому что не нужны» и «закрыли отказом»).
+func (m *ToolLimitMiddleware) SetClosedByLimit() {
+	m.mu.Lock()
+	m.toolsClosed = true
+	m.closedByReject = true
+	m.mu.Unlock()
+}
+
 // SetDirect отмечает прямой ход: стоп-кран ответит видимой реакцией.
 func (m *ToolLimitMiddleware) SetDirect(direct bool) {
 	m.mu.Lock()

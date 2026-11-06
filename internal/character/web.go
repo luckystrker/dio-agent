@@ -15,6 +15,7 @@ package character
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strings"
 	"sync"
@@ -196,30 +197,48 @@ func (c *webURLCollector) all() map[string]bool {
 	return out
 }
 
-// collectPageImageURLs — картинки из структурированного блока web_fetch:
-// «URL — alt» построчно. Берётся ПОСЛЕДНЕЕ вхождение заголовка: блок всегда
-// дописан в конец результата инструмента, поэтому поддельный заголовок в тексте
-// страницы (раньше) не может подсунуть свои адреса.
-func collectPageImageURLs(text string) map[string]string {
-	idx := strings.LastIndex(text, web.ImagesBlockHeader)
-	if idx < 0 {
+// collectPageImageURLs — картинки из структурированного парта web_fetch:
+// список [{url, alt}]. Свободный текст результата не разбирается (41.2 M2):
+// страница не управляет множеством разрешённых image_url.
+func collectPageImageURLs(data any) map[string]string {
+	m := normalizeJSONData(data)
+	if m == nil {
 		return nil
 	}
-	block := text[idx+len(web.ImagesBlockHeader):]
-	out := make(map[string]string)
-	for _, line := range strings.Split(block, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	items, _ := m["images"].([]any)
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		switch v := item.(type) {
+		case string:
+			out[v] = ""
+		case map[string]any:
+			u, _ := v["url"].(string)
+			if u == "" {
+				continue
+			}
+			alt, _ := v["alt"].(string)
+			out[u] = alt
 		}
-		raw, tail, _ := strings.Cut(line, " — ")
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		out[raw] = strings.TrimSpace(tail)
 	}
 	return out
+}
+
+// normalizeJSONData приводит значение выдачи к map[string]any через JSON:
+// инструменты ago кладут в DataInput Go-структуры (toolpacks.*SearchResponse),
+// а не map — обход по полям должен видеть одинаковую форму (41.2 M2).
+func normalizeJSONData(data any) map[string]any {
+	if m, ok := data.(map[string]any); ok {
+		return m
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // searchResultFieldKeys — поля JSON-выдачи поиска, которые являются адресами
@@ -251,7 +270,7 @@ func collectSearchResultURLs(data any) []string {
 			}
 		}
 	}
-	walk(data)
+	walk(normalizeJSONData(data))
 	return out
 }
 
@@ -345,8 +364,8 @@ func (m *webResultMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *event
 	switch ev.Name {
 	case webFetchToolName:
 		for _, p := range out.Result.Parts {
-			if part, ok := events.AsValue(p).(events.TextInput); ok {
-				if pairs := collectPageImageURLs(part.Content); len(pairs) > 0 {
+			if part, ok := events.AsValue(p).(events.DataInput); ok {
+				if pairs := collectPageImageURLs(part.Data); len(pairs) > 0 {
 					m.collector.addStructured(pairs)
 				}
 			}
@@ -388,8 +407,10 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 		return next(ev, cx)
 	}
 	m.mu.Lock()
-	m.remaining--
-	over := m.remaining < 0
+	over := m.remaining <= 0
+	if !over {
+		m.remaining-- // резерв: параллельные вызовы одного блока не переберут лимит
+	}
 	m.mu.Unlock()
 	if over {
 		if m.logger != nil {
@@ -404,22 +425,24 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 		}, nil
 	}
 	result, err := next(ev, cx)
-	m.recordSuccessfulSearch(result, err)
-	return result, err
-}
-
-// recordSuccessfulSearch — m16: в суточный счётчик идёт только УСПЕШНЫЙ
-// поиск: отказ инструмента (сеть, провайдер, лимит) не тратит дневной бюджет.
-func (m *webUsageMW) recordSuccessfulSearch(result events.Event, err error) {
-	if err != nil {
-		return
-	}
-	if _, failed := events.AsValue(result).(events.ToolErrorEvent); failed {
-		return
+	// m16: неуспешный поиск не тратит ни суточный счётчик, ни бюджет хода —
+	// резерв возвращается. В счётчик идёт только успешный вызов.
+	if err != nil || isToolFailure(result) {
+		m.mu.Lock()
+		m.remaining++
+		m.mu.Unlock()
+		return result, err
 	}
 	if ierr := (web.UsageStore{}).IncrementSearch(context.Background(), m.db); ierr != nil && m.logger != nil {
 		m.logger.Printf("веб: поиск не учтён в суточном счётчике: %v", ierr)
 	}
+	return result, err
+}
+
+// isToolFailure — вызов завершился ошибкой инструмента (сеть/провайдер).
+func isToolFailure(result events.Event) bool {
+	_, failed := events.AsValue(result).(events.ToolErrorEvent)
+	return failed
 }
 
 // imageVerdict — решение проверки картинки хода ДО применения (41.2 M1):
@@ -459,6 +482,12 @@ func (r *Runner) fetchImage(ctx context.Context, turnID int64, v imageVerdict) *
 	if v.URL == "" {
 		return nil
 	}
+	if r.ImageFetcher == nil {
+		// Вердикт мог быть записан при включённом вебе, а после рестарта веб
+		// выключен (m1): не паникуем — картинки просто нет.
+		r.logf("ход %d: вердикт картинки есть, но fetch-слой не настроен — картинка не отправлена", turnID)
+		return nil
+	}
 	img, err := r.ImageFetcher.FetchImage(ctx, v.URL)
 	if err != nil {
 		r.logf("ход %d: картинка %q не скачана — ход без картинки: %v", turnID, redactURLSecrets(v.URL), err)
@@ -471,10 +500,4 @@ func (r *Runner) fetchImage(ctx context.Context, turnID int64, v imageVerdict) *
 	r.logf("ход %d: картинка к отправке: %s (%s, %d байт)",
 		turnID, redactURLSecrets(img.URL), img.ContentType, len(img.Bytes))
 	return &OutboxImage{SourceURL: img.URL, ContentType: img.ContentType, Bytes: img.Bytes, Alt: v.Alt}
-}
-
-// resolveImage — проверка и скачивание картинки хода одной функцией (старый
-// вход для тестов и простых путей): allowed nil — проверка пропускается.
-func (r *Runner) resolveImage(ctx context.Context, turnID int64, rawURL, alt string, allowed map[string]bool) *OutboxImage {
-	return r.fetchImage(ctx, turnID, r.verifyImage(turnID, rawURL, alt, allowed))
 }

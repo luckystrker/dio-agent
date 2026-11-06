@@ -64,8 +64,8 @@ func newTestPool(t *testing.T) *runtime.Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 24 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 24/0", result.Applied, result.Skipped)
+	if want := migrations.Count(migrations.FS); result.Applied != want || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу %d/0", result.Applied, result.Skipped, want)
 	}
 	return pool
 }

@@ -12,6 +12,7 @@ import (
 	neturl "net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // allowedImageTypes — что можно отправлять в чат картинкой (Telegram
@@ -80,7 +81,7 @@ func ExtractPageImages(pageHTML, baseURL string) []PageImage {
 		}
 		abs.Fragment = ""
 		key := abs.String()
-		alt = strings.TrimSpace(html.UnescapeString(alt))
+		alt = oneLineAlt(html.UnescapeString(alt))
 		if idx, ok := seen[key]; ok {
 			if out[idx].Alt == "" {
 				out[idx].Alt = alt
@@ -222,4 +223,25 @@ func (c *Client) FetchImage(ctx context.Context, rawURL string) (*Image, error) 
 		return nil, fmt.Errorf("web: пустая картинка")
 	}
 	return &Image{URL: resp.Request.URL.String(), ContentType: mediaType, Bytes: body}, nil
+}
+
+// oneLineAlt — подпись картинки одной строкой (41.2 M2/m11): перевод строки и
+// управляющие символы из HTML-атрибута не должны создавать «новые строки»
+// списка картинок (подделка структурированной выдачи) и раздувать историю.
+// Потолок — 300 рун: подпись идёт в промпт и в память.
+func oneLineAlt(alt string) string {
+	var b strings.Builder
+	for _, r := range alt {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t' || unicode.IsControl(r):
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	if runes := []rune(out); len(runes) > 300 {
+		out = strings.TrimSpace(string(runes[:299])) + "…"
+	}
+	return out
 }

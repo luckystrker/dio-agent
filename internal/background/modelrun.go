@@ -88,11 +88,32 @@ type usageCounter struct {
 	capCalls  int
 	capTokens int64
 	capped    bool
-	onCap     func()
+	// pendingCap — потолок достигнут на прошлом вызове: инструменты выключаются
+	// ПЕРЕД следующим модельным ходом, а не сразу (m4): tool-call'ы уже
+	// полученного ответа не должны отбрасываться.
+	pendingCap bool
+	onCap      func()
 }
 
 func (u *usageCounter) OnLLMCall(next agomiddleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
+	// Потолок, достигнутый прошлым вызовом, применяется к этому ходу: модель
+	// обязана выдать финальный TurnResult с уже найденным.
+	u.mu.Lock()
+	fire := u.pendingCap && !u.capped
+	if fire {
+		u.capped = true
+	}
+	onCap := u.onCap
+	u.mu.Unlock()
+	if fire && onCap != nil {
+		onCap()
+	}
+
 	resp, err := next(evs, cx)
+	if err != nil {
+		// m4: неуспешный вызов (сеть/провайдер) не тратит потолок задачи.
+		return resp, err
+	}
 	u.mu.Lock()
 	u.calls++
 	if resp != nil {
@@ -105,15 +126,10 @@ func (u *usageCounter) OnLLMCall(next agomiddleware.LLMCallFunc, evs []events.Ev
 	}
 	overCalls := u.capCalls > 0 && u.calls >= u.capCalls
 	overTokens := u.capTokens > 0 && u.tokens >= u.capTokens
-	fire := (overCalls || overTokens) && !u.capped
 	if overCalls || overTokens {
-		u.capped = true
+		u.pendingCap = true
 	}
-	onCap := u.onCap
 	u.mu.Unlock()
-	if fire && onCap != nil {
-		onCap()
-	}
 	return resp, err
 }
 

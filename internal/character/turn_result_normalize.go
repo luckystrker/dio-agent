@@ -131,7 +131,8 @@ func normalizeOptionalFields(r TurnResult) TurnResult {
 				dropped = append(dropped, "notes")
 				continue
 			}
-			kept = append(kept, truncateOptional(note, maxNoteLength))
+			// m10: служебные метки не должны оседать в заметках хода.
+			kept = append(kept, truncateOptional(stripMessageLabelsAnywhere(note), maxNoteLength))
 		}
 		if len(kept) == 0 {
 			kept = nil
@@ -194,13 +195,18 @@ func normalizeOptionalFields(r TurnResult) TurnResult {
 		}
 	}
 
+	// Кандидаты памяти: метка — служебный мусор, не часть воспоминания (m10).
+	for i := range r.Memory {
+		r.Memory[i].Text = stripMessageLabelsAnywhere(r.Memory[i].Text)
+	}
+
 	// Намерения: мусорная/пустая тема или основание — предложение не создаётся,
 	// длинные режутся (38.3), остальные намерения хода живут.
 	if len(r.Intentions) > 0 {
 		kept := make([]IntentionProposal, 0, len(r.Intentions))
 		for _, p := range r.Intentions {
-			p.Topic = optionalText(p.Topic, maxIntentionTopicLength)
-			p.Reason = optionalText(p.Reason, maxReasonLength)
+			p.Topic = optionalText(stripMessageLabelsAnywhere(p.Topic), maxIntentionTopicLength)
+			p.Reason = optionalText(stripMessageLabelsAnywhere(p.Reason), maxReasonLength)
 			if p.Topic == "" || p.Reason == "" {
 				dropped = append(dropped, "intentions")
 				continue
