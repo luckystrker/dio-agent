@@ -473,6 +473,39 @@ jq -r '.request.messages[-1].content' /var/lib/dio/dumps/turn-<id>-call-1.json |
 jq -r '.response.choices[0].message.reasoning_content' /var/lib/dio/dumps/turn-<id>-call-1.json
 ```
 
+### Replay с абляциями (этап 40.2)
+
+Проиграть дамп тому же провайдеру, меняя только вход, — быстрый способ
+проверить гипотезу «модель подражает своим прошлым репликам». Команда ничего
+не пишет в базу и не отправляет в Telegram; ключ и endpoint берутся из `.env`
+(как у бота), `url` и `x-opencode-session` — из дампа.
+
+```bash
+cd /opt/dio-agent
+./dio-agent replay /var/lib/dio/dumps/turn-246-call-1.json
+./dio-agent replay /var/lib/dio/dumps/turn-246-call-1.json --variant no-labels --n 5
+./dio-agent replay /var/lib/dio/dumps/turn-246-call-1.json --variant no-panel,assistant-as-json
+./dio-agent replay dump.json --variant history-last-20,no-timestamps,temperature=0.2
+```
+
+Абляции (`--variant` повторяется или перечисляется через запятую):
+
+| Абляция | Что делает |
+|---|---|
+| `no-labels` | вырезает метки `#mNNN` из всех messages (проверка: не путают ли метки модель) |
+| `no-timestamps` | срезает ведущие `[пн 02.11 17:02] ` из messages |
+| `no-panel` | убирает панель состояния из последнего user-сообщения |
+| `history-last-N` | оставляет system + N последних сообщений |
+| `assistant-as-json` | подряд идущие реплики бота — одним JSON `{"decision":"answer","messages":[…]}` |
+| `merge-assistant` | склеивает подряд идущие реплики бота в одно сообщение |
+| `no-tools` | убирает `tools` и `tool_choice` |
+| `temperature=X` | подменяет температуру |
+
+Печатается `content`, вердикт (`TurnResult` валиден или брак) и
+`reasoning_content`. `--n K` повторяет запрос K раз (стохастика) и в конце
+показывает долю брака. Replay тратит токены провайдера, но не дневной бюджет
+приложения (§16): это обслуживающая команда, а не ход.
+
 ## 11. Частые проблемы
 
 | Симптом | Что смотреть |

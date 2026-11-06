@@ -489,6 +489,10 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 	}, nil
 }
 
+// LoadModelSettings читает только группу MODEL_* — для обслуживающих команд
+// (replay дампа, 40.2): им нужен endpoint и ключ, а не база и Telegram.
+func LoadModelSettings(env Getenv) (*ModelSettings, error) { return parseModelSettings(env) }
+
 // boolEnv читает булеву переменную: не задана или пустая — значение по
 // умолчанию (паритет с числовыми: «пусто» не ошибка); иное, кроме true/false
 // (регистр и края не важны), — явная ошибка запуска.

@@ -39,6 +39,8 @@ const usage = `dio-agent — живой персонаж в Telegram.
 Обслуживающие команды:
   entity-unmerge <id>   откатить объединение сущностей по журналу:
                         <id> — id поглощённой (невыжившей) сущности.
+  replay <дамп.json>    проиграть сохранённый дамп модельного вызова с
+                        абляциями (см. dio-agent replay --help).
 `
 
 func main() {
@@ -69,6 +71,8 @@ func runCommand(args []string) error {
 			return fmt.Errorf("id сущности должен быть положительным числом: %q", args[1])
 		}
 		return entityUnmerge(context.Background(), id)
+	case "replay":
+		return replay(args[1:])
 	default:
 		return fmt.Errorf("неизвестная команда %q\n\n%s", args[0], usage)
 	}
