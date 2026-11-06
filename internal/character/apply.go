@@ -273,6 +273,11 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			}
 		}
 	case DecisionReact:
+		// Реакция необязательна: react может доставлять один стикер (38.2,
+		// деградация пустого answer со стикером) — тогда reaction не ставим.
+		if opts.Result.Reaction == "" {
+			break
+		}
 		target, err := reactionTarget(ctx, tx, opts.TurnID)
 		if err != nil {
 			return ApplyResult{}, err

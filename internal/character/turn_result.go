@@ -6,7 +6,8 @@
 // интерфейса спеки здесь закрытые типы с ограничениями размеров.
 //
 // Правила результата (§11.2): ignore/defer без сообщений; react с допустимой
-// реакцией; answer 1–4 сообщения или стикер/реакция без текста; defer требует
+// реакцией или стикером; answer — 1–4 сообщения (пустой answer после repair
+// деградирует в react/ignore на уровне Runner'а, этап 38.2); defer требует
 // reply_later с notBefore
 // (поле defer_hours — относительное время, намерение создаёт runtime).
 //
@@ -41,11 +42,13 @@ const (
 	maxEntityName        = 200
 	maxEntityLinks       = 3
 	maxIntentions        = 2
-	maxReasonLength      = 500
-	maxReactionLen       = 64
-	minDeferHours        = 0.05
-	maxDeferHours        = 168
-	minDelayHours        = 0.05
+	// maxIntentionTopicLength — потолок темы намерения (обрезка, не ошибка).
+	maxIntentionTopicLength = 200
+	maxReasonLength         = 500
+	maxReactionLen          = 64
+	minDeferHours           = 0.05
+	maxDeferHours           = 168
+	minDelayHours           = 0.05
 	// maxImageNotes — не больше картинок хода (telegram.MaxImagesPerTurn = 6).
 	maxImageNotes = 6
 	// maxImageNoteLength — короткая фраза об одной картинке (этап 37.1).
@@ -196,6 +199,9 @@ func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
 	if dec.More() {
 		return TurnResult{}, fmt.Errorf("turnresult: после JSON-объекта есть лишний текст")
 	}
+	// Общая нормализация мусора и длин необязательных полей (38.1, 38.3):
+	// «null»/«н/д»/пунктуация = отсутствие поля, длинное — обрезка с «…».
+	r = normalizeOptionalFields(r)
 	// Инертные противоречия вычищаются ДО валидации (17.8): мусор в полях без
 	// эффекта при выбранном decision не должен ронять проверку диапазона —
 	// ответ, валидный по смыслу, уходил в repair и терминальный пропуск хода.
@@ -207,7 +213,10 @@ func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
 	r.Messages = stripLeadingMessageLabels(r.Messages)
 	r.Messages = stripCopiedAuthors(r.Messages, history)
 	if err := r.Validate(); err != nil {
-		return TurnResult{}, err
+		// Нормализованный, но невалидный результат возвращается вместе с
+		// ошибкой: repair-путь деградирует пустой answer в react/ignore (38.2)
+		// и не должен терять реакцию/стикер из ответа модели.
+		return r, err
 	}
 	return r, nil
 }
@@ -420,8 +429,8 @@ func (r TurnResult) Validate() error {
 		default:
 			return fmt.Errorf("turnresult: намерение %d: неизвестный kind %q", i, p.Kind)
 		}
-		if strings.TrimSpace(p.Topic) == "" || runeLen(p.Topic) > 200 {
-			return fmt.Errorf("turnresult: намерение %d: topic от 1 до 200 символов", i)
+		if strings.TrimSpace(p.Topic) == "" || runeLen(p.Topic) > maxIntentionTopicLength {
+			return fmt.Errorf("turnresult: намерение %d: topic от 1 до %d символов", i, maxIntentionTopicLength)
 		}
 		if strings.TrimSpace(p.Reason) == "" || runeLen(p.Reason) > maxReasonLength {
 			return fmt.Errorf("turnresult: намерение %d: reason от 1 до %d символов", i, maxReasonLength)
@@ -465,15 +474,17 @@ func (r TurnResult) Validate() error {
 	// --- правила действия (§11.2) ---
 	switch r.Decision {
 	case DecisionAnswer:
-		// Ответ без текста допустим, если ход всё равно что-то доставляет:
-		// стикер или реакцию (живой смоук 2026-11-03: модель ответила на гифку
-		// стикером+реакцией с пустым messages, ход целиком ушёл в скип).
-		if len(r.Messages) == 0 && r.Sticker == "" && r.Reaction == "" {
-			return fmt.Errorf("turnresult: answer требует от 1 до %d сообщений (или стикер/реакцию без текста)", maxMessages)
+		// Ответ без текста — ошибка формы (38.2): Runner даёт один repair, а
+		// после него деградирует в react/ignore. Прежнее молчаливое принятие
+		// «answer с одной реакцией» (577fb25) отменено: пустой answer — не ответ.
+		if len(r.Messages) == 0 {
+			return fmt.Errorf("turnresult: answer требует от 1 до %d сообщений; хочешь только реакцию — decision=react", maxMessages)
 		}
 	case DecisionReact:
-		if r.Reaction == "" {
-			return fmt.Errorf("turnresult: react требует reaction (эмодзи)")
+		// Реакция — смысл react; стикер без текста тоже доставляет что-то
+		// видимое (38.2: деградация пустого answer со стикером остаётся react).
+		if r.Reaction == "" && r.Sticker == "" {
+			return fmt.Errorf("turnresult: react требует reaction (эмодзи) или sticker")
 		}
 		if len(r.Messages) > 0 {
 			return fmt.Errorf("turnresult: react не содержит сообщений")
@@ -577,7 +588,9 @@ func sanitizeMessageReplies(replies []MessageReply, messageCount int, allowed bo
 	out := make([]MessageReply, 0, len(replies))
 	for _, reply := range replies {
 		ref := strings.TrimSpace(reply.Ref)
-		if ref == "" || reply.Index < 1 || reply.Index > messageCount {
+		// ref — метка сообщения (#m<id>); текст/пунктуация — мусор формы, ход
+		// живёт без реплая (38.1).
+		if ref == "" || !validMessageRef(ref) || reply.Index < 1 || reply.Index > messageCount {
 			continue
 		}
 		if _, ok := seen[reply.Index]; ok {

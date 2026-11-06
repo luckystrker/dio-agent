@@ -265,6 +265,16 @@ func (m *TypingMiddleware) OnTurn(next middleware.TurnFunc, ev *events.ModelRequ
 	return next(ev, cx)
 }
 
+// ToolKindCap — потолок одного вида инструментов за ход (38.4): память ≤2,
+// поиск ≤2, страницы ≤2. Отказ вида не выключает остальные инструменты: модель
+// может завершить ответ другим видом, а не потерять ход.
+type ToolKindCap struct {
+	Kind   string   // memory | search | fetch (имя вида — для карты счётчиков)
+	Limit  int      // потолок обращений этого вида; 0 — не ограничивать
+	Names  []string // имена инструментов вида
+	Reject string   // текст tool-error модели
+}
+
 // ToolLimitMiddleware — ограничение числа обращений к инструментам за ход
 // (§11.2: лимит конфигурируемый). Превышение отвечает модели ошибкой вместо
 // исполнения: модель видит отказ и обязана завершить ход финальным ответом.
@@ -285,6 +295,9 @@ type ToolLimitMiddleware struct {
 	// идущих отказов лимита (обращение в лимите серию обнуляет).
 	seen    int
 	rejects int
+	// kindCaps — раздельные потолки видов (38.4); kindSeen — счётчики по видам.
+	kindCaps []ToolKindCap
+	kindSeen map[string]int
 	// onExhausted — колбэк харнесса на первый отказ лимита: он выключает
 	// инструменты на конфиге хода, чтобы СЛЕДУЮЩИЙ вызов модели шёл без них.
 	onExhausted func()
@@ -321,28 +334,66 @@ func (m *ToolLimitMiddleware) SetDirect(direct bool) {
 	m.mu.Unlock()
 }
 
+// SetKindCaps задаёт раздельные потолки видов (38.4). Вызывается до запуска
+// агента; отказ вида не дёргает onExhausted — остальные виды работают.
+func (m *ToolLimitMiddleware) SetKindCaps(caps []ToolKindCap) {
+	m.mu.Lock()
+	m.kindCaps = caps
+	if m.kindSeen == nil {
+		m.kindSeen = make(map[string]int, len(caps))
+	}
+	m.mu.Unlock()
+}
+
+// kindCapOver считает обращение вида и возвращает потолок, если он превышен
+// (вызывается под m.mu).
+func (m *ToolLimitMiddleware) kindCapOver(name string) *ToolKindCap {
+	for i := range m.kindCaps {
+		cap := &m.kindCaps[i]
+		for _, toolName := range cap.Names {
+			if toolName != name {
+				continue
+			}
+			m.kindSeen[cap.Kind]++
+			if cap.Limit > 0 && m.kindSeen[cap.Kind] > cap.Limit {
+				return cap
+			}
+			return nil
+		}
+	}
+	return nil
+}
+
 // OnToolExecution считает обращения и гасит лишние.
 func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
 	m.mu.Lock()
 	m.seen++
+	overKind := m.kindCapOver(ev.Name)
 	over := m.limit > 0 && m.seen > m.limit
+	rejected := overKind != nil || over
 	firstReject := false
-	if over {
+	if rejected {
 		m.rejects++
-		if !m.exhausted {
+		if over && !m.exhausted {
 			m.exhausted = true
 			firstReject = true
 		}
 	} else {
 		m.rejects = 0
 	}
-	crane := over && m.rejects >= stopCraneRejects
+	crane := rejected && m.rejects >= stopCraneRejects
 	direct := m.direct
 	onExhausted := m.onExhausted
+	rejectText := "лимит обращений к инструментам за ход исчерпан — завершай ход финальным ответом"
+	if overKind != nil {
+		rejectText = overKind.Reject
+	}
 	m.mu.Unlock()
 
-	// Первый отказ: харнесс выключает инструменты — следующий модельный вызов
-	// получит пустой opts.Tools и обязан выдать финальный TurnResult.
+	// Первый отказ ОБЩЕГО лимита: харнесс выключает инструменты — следующий
+	// модельный вызов получит пустой opts.Tools и обязан выдать финальный
+	// TurnResult. Отказ вида (память/поиск) инструменты не выключает: другим
+	// видом ход ещё можно завершить (38.4).
 	if firstReject && onExhausted != nil {
 		onExhausted()
 	}
@@ -380,11 +431,11 @@ func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *
 			Result:   events.NewToolResult(true, string(body)),
 		}, nil
 	}
-	if over {
-		m.logger.Printf("лимит обращений к инструментам исчерпан (%d) — вызов %q отклонён", m.limit, ev.Name)
+	if rejected {
+		m.logger.Printf("лимит обращений к инструментам исчерпан (%d) — вызов %q отклонён: %s", m.limit, ev.Name, rejectText)
 		return &events.ToolErrorEvent{
 			ToolResultEvent: events.ToolResultEvent{ParentID: ev.ID, Name: ev.Name},
-			Error:           "лимит обращений к инструментам за ход исчерпан — завершай ход финальным ответом",
+			Error:           rejectText,
 		}, nil
 	}
 	return next(ev, cx)

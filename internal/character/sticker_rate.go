@@ -9,8 +9,6 @@ package character
 import (
 	"context"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // stickerRateWindow — окно частоты: не больше одного стикера на столько
@@ -20,13 +18,13 @@ const stickerRateWindow = 3
 // stickerTooFrequent сообщает, уходил ли стикер в предыдущих ходах окна чата.
 // Считаются только уже поставленные в outbox стикеры — то есть доставленные
 // или ожидающие доставки ответы персонажа; чужие стикеры входящих событий не
-// в счёт.
-func stickerTooFrequent(ctx context.Context, tx pgx.Tx, chatID, turnID int64) (bool, error) {
+// в счёт. DBTX: проверка нужна и при сборке контекста (38.1), и при применении.
+func stickerTooFrequent(ctx context.Context, db DBTX, chatID, turnID int64) (bool, error) {
 	if stickerRateWindow <= 1 {
 		return false, nil
 	}
 	var recent int
-	if err := tx.QueryRow(ctx, `
+	if err := db.QueryRow(ctx, `
 		SELECT count(*) FROM delivery_outbox o
 		WHERE o.payload->>'kind' = 'sticker' AND o.turn_id IN (
 			SELECT id FROM turns

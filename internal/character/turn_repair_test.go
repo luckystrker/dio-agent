@@ -18,9 +18,8 @@ func TestRepairHintAnswerWithoutMessages(t *testing.T) {
 	for _, want := range []string{
 		"Твой последний ответ не прошёл валидацию",
 		"answer требует от 1 до 4 сообщений",
-		"decision=answer требует 1–4 сообщения",
-		"добавь sticker или reaction",
-		"decision=react с эмодзи или ignore",
+		"Ты выбрал decision=answer, но не написал ни одного сообщения",
+		"напиши текст в messages или выбери decision=react",
 	} {
 		if !strings.Contains(hint, want) {
 			t.Fatalf("в repair-подсказке нет %q:\n%s", want, hint)
@@ -28,7 +27,7 @@ func TestRepairHintAnswerWithoutMessages(t *testing.T) {
 	}
 	// Другая ошибка не получает подсказку про непустой answer.
 	other := repairHint(errors.New("turnresult: react требует reaction (эмодзи)"))
-	if strings.Contains(other, "добавь sticker или reaction") {
+	if strings.Contains(other, "не написал ни одного сообщения") {
 		t.Fatalf("подсказка про answer приклеена к чужой ошибке:\n%s", other)
 	}
 	if !strings.Contains(other, "Верни строго один JSON-объект по схеме TurnResult") {

@@ -26,8 +26,14 @@ func TestParseTurnResultImageNotes(t *testing.T) {
 		t.Fatalf("позиции описаний сдвинуты: %v", ok.ImageNotes)
 	}
 
-	if _, err := ParseTurnResult([]byte(`{"decision":"ignore","image_notes":["` + strings.Repeat("а", maxImageNoteLength+1) + `"]}`)); err == nil {
-		t.Fatal("слишком длинное описание принято")
+	// Длинное описание режется по рунам с «…» (38.3), а не роняет ход: это
+	// необязательная фраза, её потеря не отменяет ответ.
+	long, err := ParseTurnResult([]byte(`{"decision":"ignore","image_notes":["` + strings.Repeat("а", maxImageNoteLength+1) + `"]}`))
+	if err != nil {
+		t.Fatalf("длинное описание отвергло ход: %v", err)
+	}
+	if n := len([]rune(long.ImageNotes[0])); n != maxImageNoteLength {
+		t.Fatalf("описание обрезано до %d рун, хочу %d", n, maxImageNoteLength)
 	}
 	raw := `{"decision":"ignore","image_notes":["`
 	parts := make([]string, maxImageNotes+1)

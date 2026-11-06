@@ -172,8 +172,8 @@ func TestTurnReasoningInSkippedDB(t *testing.T) {
 	turnID := int64(2003)
 	f.seedTurn(t, ctx, turnID, "Ну?")
 	f.withReasoningModel(
-		reasoningReply{content: `{"decision":"answer"}`, reasoning: "первая мысль"},
-		reasoningReply{content: `{"decision":"answer"}`, reasoning: "вторая мысль"},
+		reasoningReply{content: `{"decision":"react"}`, reasoning: "первая мысль"},
+		reasoningReply{content: `{"decision":"react"}`, reasoning: "вторая мысль"},
 	)
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,

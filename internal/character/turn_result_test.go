@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func validAnswerJSON() string {
@@ -204,21 +205,20 @@ func TestTurnResultBlankStickerInert(t *testing.T) {
 	}
 }
 
-// TestTurnResultAnswerMediaOnly — answer без текста допустим, если доставляет
-// стикер или реакцию (2026-11-03: ответ стикером на гифку уходил в скип).
-func TestTurnResultAnswerMediaOnly(t *testing.T) {
+// TestTurnResultAnswerWithoutMessagesRejected — answer без текста не проходит
+// разбор: после repair ход деградирует (react/ignore) на уровне Runner'а —
+// этап 38.2, см. TestDegradeAnswerWithoutText. Молчаливое принятие «answer с
+// одной реакцией» (577fb25) отменено: пустой answer — ошибка формы.
+func TestTurnResultAnswerWithoutMessagesRejected(t *testing.T) {
 	cases := []string{
 		`{"decision":"answer","messages":[],"sticker":"#4"}`,
 		`{"decision":"answer","messages":[],"reaction":"🤣"}`,
 		`{"decision":"answer","messages":[],"sticker":"#4","reaction":"🤣"}`,
 	}
 	for _, raw := range cases {
-		r, err := ParseTurnResult([]byte(raw))
-		if err != nil {
-			t.Fatalf("answer без текста, но со стикером/реакцией отвергнут: %v (%s)", err, raw)
-		}
-		if len(r.Messages) != 0 || (r.Sticker == "" && r.Reaction == "") {
-			t.Fatalf("поля прочитаны неверно: %+v", r)
+		if _, err := ParseTurnResult([]byte(raw)); err == nil ||
+			!strings.Contains(err.Error(), "answer требует") {
+			t.Fatalf("answer без текста должен уйти в repair: %v (%s)", err, raw)
 		}
 	}
 }
@@ -257,32 +257,48 @@ func TestTurnResultLengthLimits(t *testing.T) {
 		t.Fatalf("пять сообщений не пойманы: %v", err)
 	}
 
+	// Необязательные заметки длиннее потолка режутся с «…», а не роняют ход
+	// (38.3): заметка — не сообщение, её потеря не отменяет ответ.
 	raw = `{"decision":"ignore","notes":["` + strings.Repeat("ы", maxNoteLength+1) + `"]}`
-	if _, err := ParseTurnResult([]byte(raw)); err == nil || !strings.Contains(err.Error(), "2000") {
-		t.Fatalf("заметка длиннее 2000 не поймана: %v", err)
+	r, err := ParseTurnResult([]byte(raw))
+	if err != nil {
+		t.Fatalf("длинная заметка отвергла ход: %v", err)
+	}
+	if n := utf8.RuneCountInString(r.Notes[0]); n != maxNoteLength {
+		t.Fatalf("заметка обрезана до %d рун, хочу %d", n, maxNoteLength)
 	}
 }
 
+// TestTurnResultDeltasRequireReason — дельта без основания неприменима: ход
+// живёт, а дельта отбрасывается как мусор (38.1: необязательное поле без
+// содержательного основания = отсутствие поля). Прежнее терминальное падение
+// хода из-за пустого reason отменено.
 func TestTurnResultDeltasRequireReason(t *testing.T) {
 	raw := `{"decision":"ignore","mood_delta":{"valence":0.5}}`
-	_, err := ParseTurnResult([]byte(raw))
-	if err == nil || !strings.Contains(err.Error(), "основание") {
-		t.Fatalf("дельта без основания не поймана: %v", err)
+	r, err := ParseTurnResult([]byte(raw))
+	if err != nil {
+		t.Fatalf("дельта без основания отвергла ход: %v", err)
+	}
+	if r.MoodDelta != nil {
+		t.Fatalf("дельта без основания не отброшена: %+v", r.MoodDelta)
 	}
 	raw = `{"decision":"ignore","relationship_delta":{"trust":0.5}}`
-	_, err = ParseTurnResult([]byte(raw))
-	if err == nil || !strings.Contains(err.Error(), "основание") {
-		t.Fatalf("дельта отношений без основания не поймана: %v", err)
+	r, err = ParseTurnResult([]byte(raw))
+	if err != nil {
+		t.Fatalf("дельта отношений без основания отвергла ход: %v", err)
+	}
+	if r.RelationshipDelta != nil {
+		t.Fatalf("дельта отношений без основания не отброшена: %+v", r.RelationshipDelta)
 	}
 }
 
 func TestTurnResultDeltaRanges(t *testing.T) {
-	raw := `{"decision":"ignore","mood_delta":{"valence":2,"reason":"r"}}`
+	raw := `{"decision":"ignore","mood_delta":{"valence":2,"reason":"тест"}}`
 	_, err := ParseTurnResult([]byte(raw))
 	if err == nil || !strings.Contains(err.Error(), "valence") {
 		t.Fatalf("valence вне [-1..1] не пойман: %v", err)
 	}
-	raw = `{"decision":"ignore","relationship_delta":{"trust":1.5,"reason":"r"}}`
+	raw = `{"decision":"ignore","relationship_delta":{"trust":1.5,"reason":"тест"}}`
 	_, err = ParseTurnResult([]byte(raw))
 	if err == nil || !strings.Contains(err.Error(), "trust") {
 		t.Fatalf("trust вне [0..1] не пойман: %v", err)

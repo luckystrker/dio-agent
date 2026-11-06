@@ -8,10 +8,47 @@
 // требование §11.2/§17.
 package character
 
-// TurnResultJSONSchema — hand-written форма схемы (как в TS TURN_RESULT_JSON_SCHEMA),
-// но лимиты подставлены из констант. Описания полей — подсказки модели.
+// TurnSchemaFeatures — какие необязательные поля применимы на этом ходе
+// (этап 38.1). Схема — часть запроса к модели, поэтому набор вариантов держим
+// маленьким и детерминированным: поля всегда в одном порядке (map маршалится
+// с сортировкой ключей), меняются только сами наборы.
+type TurnSchemaFeatures struct {
+	// Images — в пачке есть картинки (фото/стикер/видео): только тогда модель
+	// может их описать. Нет картинок — поля image_notes в схеме нет.
+	Images bool
+	// UnknownSticker — в пачке есть стикер, которого нет в коллекции: только
+	// тогда уместно save_sticker.
+	UnknownSticker bool
+	// StickerAllowed — коллекция не пуста и предохранитель частоты позволяет
+	// отправить стикер на этом ходе.
+	StickerAllowed bool
+	// Web — веб-инструменты выданы на этом ходе: image_url принимается только
+	// из их выдачи.
+	Web bool
+	// HistoryRefs — в истории/пачке есть метки сообщений #m<id>: только тогда
+	// осмысленны reply/forward.
+	HistoryRefs bool
+}
+
+// allTurnSchemaFeatures — полный набор (совместимость прежних вызовов).
+func allTurnSchemaFeatures() TurnSchemaFeatures {
+	return TurnSchemaFeatures{Images: true, UnknownSticker: true, StickerAllowed: true, Web: true, HistoryRefs: true}
+}
+
+// TurnResultJSONSchema — полная hand-written форма схемы (как в TS
+// TURN_RESULT_JSON_SCHEMA), но лимиты подставлены из констант. Описания полей —
+// подсказки модели. Используется там, где ситуация хода неизвестна (тесты,
+// документирование контракта); на проводе — TurnResultJSONSchemaFor.
 func TurnResultJSONSchema() map[string]any {
-	return map[string]any{
+	return TurnResultJSONSchemaFor(allTurnSchemaFeatures())
+}
+
+// TurnResultJSONSchemaFor — схема хода по ситуации (38.1): неприменимые
+// необязательные поля не попадают в схему вовсе, и модель не заполняет их
+// мусором. Парсер при этом терпит лишние поля: необязательное поле, которого
+// нет в схеме, мягко обнуляется, а не роняет ход.
+func TurnResultJSONSchemaFor(f TurnSchemaFeatures) map[string]any {
+	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"decision": map[string]any{"type": "string", "enum": []string{DecisionAnswer, DecisionReact, DecisionIgnore, DecisionDefer}},
@@ -161,4 +198,26 @@ func TurnResultJSONSchema() map[string]any {
 		"required":             []string{"decision"},
 		"additionalProperties": false,
 	}
+
+	// Неприменимые поля убираем, а не оставляем пустыми: модель заполняет всё,
+	// что видит в схеме (живой прогон 2026-11-04…06 — «forward», «sticker» и
+	// выдуманные image_url почти в каждом ходе).
+	props := schema["properties"].(map[string]any)
+	if !f.Web {
+		delete(props, "image_url")
+	}
+	if !f.Images {
+		delete(props, "image_notes")
+	}
+	if !f.UnknownSticker {
+		delete(props, "save_sticker")
+	}
+	if !f.StickerAllowed {
+		delete(props, "sticker")
+	}
+	if !f.HistoryRefs {
+		delete(props, "forward")
+		delete(props, "reply_to_by_message")
+	}
+	return schema
 }

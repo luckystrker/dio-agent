@@ -4,7 +4,9 @@
 // explore фона, но выдаются разговорному ходу по решению харнесса: только если
 // веб включён и суточный лимит поисков разговорного пула не исчерпан. Модель
 // решает, идти ли в веб; лимиты (2 поиска + 2 страницы за ход, общий потолок
-// обращений к инструментам 5) — страховка.
+// обращений к инструментам 5) — страховка. С 38.4 у каждого вида инструментов
+// свой потолок: память ≤2, поиск ≤2, страницы ≤2 — иначе память съедает общий
+// лимит раньше, чем модель дойдёт до ответа.
 //
 // Картинка — одна за ход: модель называет URL, runtime принимает его ТОЛЬКО
 // если адрес встретился в результатах инструментов этого хода, качает через
@@ -22,6 +24,7 @@ import (
 	"github.com/luckystrker/ago/events"
 	agomiddleware "github.com/luckystrker/ago/middleware"
 
+	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/web"
 )
 
@@ -81,6 +84,56 @@ func conversationToolLimit(memoryEnabled bool, memoryLimit int, webEnabled bool,
 		limit = configured
 	}
 	return limit
+}
+
+// Виды инструментов разговорного хода (38.4): у каждого свой потолок, чтобы
+// память не съедала общий лимит на ходе с вебом (живой ход 238: пять вызовов
+// памяти из пяти возможных).
+const (
+	toolKindMemory = "memory"
+	toolKindSearch = "search"
+	toolKindFetch  = "fetch"
+)
+
+// conversationKindCaps — раздельные потолки видов на ход: память ≤2, поиск ≤2,
+// страницы ≤2 (38.4). Конфигурация может только снизить потолок памяти;
+// выше двойки он не поднимается никогда.
+func conversationKindCaps(memoryEnabled bool, memoryLimit int, webEnabled bool, searchName string) []ToolKindCap {
+	var caps []ToolKindCap
+	if memoryEnabled {
+		limit := memoryLimit
+		if limit <= 0 || limit > memoryToolsLimit {
+			limit = memoryToolsLimit
+		}
+		caps = append(caps, ToolKindCap{
+			Kind:   toolKindMemory,
+			Limit:  limit,
+			Names:  memoryToolNames(),
+			Reject: "лимит обращений к памяти на ход исчерпан — отвечай тем, что уже есть",
+		})
+	}
+	if webEnabled {
+		if searchName != "" {
+			caps = append(caps, ToolKindCap{
+				Kind:   toolKindSearch,
+				Limit:  WebSearchesPerTurn,
+				Names:  []string{searchName},
+				Reject: "лимит поиска на ход исчерпан — отвечай тем, что уже есть, или без поиска",
+			})
+		}
+		caps = append(caps, ToolKindCap{
+			Kind:   toolKindFetch,
+			Limit:  WebFetchesPerTurn,
+			Names:  []string{webFetchToolName},
+			Reject: "лимит страниц на ход исчерпан — отвечай тем, что уже есть",
+		})
+	}
+	return caps
+}
+
+// memoryToolNames — имена инструментов памяти (потолок вида, 38.4).
+func memoryToolNames() []string {
+	return []string{memory.ToolSearch, memory.ToolFindEntities, memory.ToolEntityCard}
 }
 
 // ImageFetcher — скачивание картинки через fetch-слой §15 (SSRF-проверки,

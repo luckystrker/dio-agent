@@ -8,7 +8,8 @@
 //     состояния первой частью пачки, карточка памяти вместо принудительного
 //     поиска (решение 2026-11-02), строгая валидация TurnResult (§11.2), один
 //     repair-retry (§11.3), невалидный результат не применяется — терминальный
-//     пропуск;
+//     пропуск. Схема TurnResult — по ситуации хода (38.1); пустой answer после
+//     repair деградирует в react/ignore (38.2), а не пропускает ход;
 //  3. model_output записывается ДО применения (§12.1);
 //  4. применение «всё или ничего» одной транзакцией (apply.go).
 //
@@ -425,7 +426,7 @@ func truncateRawOutput(text string) string {
 func repairHint(perr error) string {
 	hint := RepairHint(perr, "TurnResult")
 	if strings.Contains(perr.Error(), "answer требует") {
-		hint += " decision=answer требует 1–4 сообщения; если текста нет — добавь sticker или reaction, иначе decision=react с эмодзи или ignore."
+		hint += " Ты выбрал decision=answer, но не написал ни одного сообщения: напиши текст в messages или выбери decision=react."
 	}
 	return hint
 }
@@ -450,6 +451,10 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	// Веб (36.1): харнесс решает по конфигурации и суточному остатку,
 	// посчитанным при сборке контекста; модель решает, идти ли в поиск.
 	webOn := bctx.WebTools && r.Web != nil && r.Web.Enabled()
+	searchName := ""
+	if webOn {
+		searchName = r.Web.SearchToolName()
+	}
 	r.logMemoryTurn(in, bctx, plan)
 	// План инструментов памяти — durable событие журнала (этап 31.2):
 	// метрики §20 читают причины из базы, а не парсят логи. Сбой записи не
@@ -481,8 +486,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	budgetMW := NewBudgetMiddleware(r.Budget, operation, r.DailyCallsLimit, r.Logger)
 	toolLimit := conversationToolLimit(plan.Enabled, plan.Limit, webOn, r.ToolCallsLimit)
 	toolMW := NewToolLimitMiddleware(toolLimit, r.Logger)
-	// Исчерпание лимита отключает инструменты на конфиге хода: следующий
+	// Раздельные потолки видов (38.4): память ≤2, поиск ≤2, страницы ≤2 —
+	// память не может съесть общий лимит на ходе с вебом.
+	toolMW.SetKindCaps(conversationKindCaps(plan.Enabled, plan.Limit, webOn, searchName))
+	// Исчерпание ОБЩЕГО лимита отключает инструменты на конфиге хода: следующий
 	// модельный вызов идёт без tools и без forced tool_choice (bug 2026-11-02).
+	// Отказ вида инструменты не выключает — другим видом ход ещё завершим.
 	toolMW.SetOnExhausted(cfg.DisableTools)
 	// Прямой ход на стоп-кране отвечает видимой реакцией, а не молчанием.
 	toolMW.SetDirect(in.Direct)
@@ -500,7 +509,6 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	if webOn {
 		// Бюджеты веба на ход (§15/§16): 2 поиска + 2 страницы; адреса выдачи
 		// собираются для проверки image_url (36.2); суточный счётчик — в базе.
-		searchName := r.Web.SearchToolName()
 		webBudget, err := web.BudgetMiddleware(searchName, WebSearchesPerTurn, WebFetchesPerTurn)
 		if err != nil {
 			return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
@@ -541,7 +549,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			// Системный промпт из шаблона §7.1; constraints — отдельная структурная
 			// секция контекста (§17), не смешанная с данными пачки.
 			agent.WithPromptFragments(bctx.Constraints),
-			agent.WithResponseSchema(response.RawSchema(TurnResultJSONSchema(),
+			agent.WithResponseSchema(response.RawSchema(TurnResultJSONSchemaFor(bctx.Schema),
 				response.WithRawName("TurnResult"),
 				response.WithRawDescription("Цельный результат хода: решение, сообщения, кандидаты памяти, дельты состояния."))),
 		}
@@ -612,6 +620,19 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		reasoningOut.Repair = reasoning.Take()
 		var repairBody string
 		result, repairBody, perr = parseReply(fixed, bctx.History)
+		if perr != nil && strings.Contains(perr.Error(), "answer требует") {
+			// 38.2: answer без сообщений после repair — не терминальный
+			// пропуск, а деградация: есть реакция/стикер — decision=react
+			// (стикер остаётся), иначе ignore. Модель не написала текст, но ход
+			// всё ещё может доставить что-то видимое.
+			if degraded, ok := degradeAnswerWithoutText(result); ok {
+				if verr := degraded.Validate(); verr == nil {
+					r.logf("ход %d: answer без текста после repair — деградация в %s (38.2)",
+						in.TurnID, degraded.Decision)
+					result, perr = degraded, nil
+				}
+			}
+		}
 		if perr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, &invalidResultError{
 				err: perr, first: body, repair: repairBody,
