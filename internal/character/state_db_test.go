@@ -739,21 +739,19 @@ func TestTurnToolLimitStopCraneDirectReacts(t *testing.T) {
 	}
 }
 
-// TestTurnToolLimitStopCraneBatch — стоп-кран срабатывает и внутри одной пачки
-// вызовов (16.5): упорствующая модель может запросить несколько инструментов
-// одним ответом; когда третий подряд отказ лимита приходится на вызов из пачки,
-// executor ago получает финальный результат и замыкает ход без следующего
-// модельного вызова. Порядок исполнения пачки параллелен, поэтому детерминированы
-// счётчики (2 отказа + кран), а не имена вызовов.
-func TestTurnToolLimitStopCraneBatch(t *testing.T) {
+// TestTurnToolLimitBatchRejectsWithoutCrane — B1 (этап 41.1): вызовы одного
+// блока tool-call'ов исполняются параллельно и подсказку о закрытии ещё не
+// видели — стоп-кран внутри блока НЕ взводится. Пачка сверх лимита получает
+// отказы, после неё идёт финальный вызов с tool_choice=none и ход заканчивается
+// текстом, а не принудительным 🤔.
+func TestTurnToolLimitBatchRejectsWithoutCrane(t *testing.T) {
 	f, ctx := newFixture(t)
 	f.runner.ToolCallsLimit = 1
 	turnID := int64(214)
 	f.seedTurn(t, ctx, turnID, "поищи пачкой")
 
-	// Круг 1 — один вызов в лимите; круг 2 — пачка из четырёх: все сверх лимита,
-	// серия доходит до крана прямо внутри пачки. Сценария на третий модельный
-	// вызов нет намеренно: без стоп-крана прогон исчерпает сценарий.
+	// Круг 1 — один вызов в лимите; круг 2 — пачка из четырёх (все сверх
+	// лимита); круг 3 — финальный ответ с закрытыми инструментами.
 	script := f.withModel(
 		toolRoundResp("c1", "пластинки"),
 		&events.ModelResponse{ToolCalls: events.ToolCallsEvent{Calls: []events.ToolCallEvent{
@@ -762,33 +760,31 @@ func TestTurnToolLimitStopCraneBatch(t *testing.T) {
 			{ID: "c4", Name: memory.ToolSearch, Arguments: `{"query":"в"}`},
 			{ID: "c5", Name: memory.ToolSearch, Arguments: `{"query":"г"}`},
 		}}},
+		&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"answer","messages":["нашёл, вот"]}`}},
 	)
 
 	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
 		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поищи пачкой"}}})
 	if err != nil {
-		t.Fatalf("ход со стоп-краном в пачке упал: %v", err)
+		t.Fatalf("ход с пачкой отказов упал: %v", err)
 	}
 	if out.Skipped || !out.Apply.Applied {
 		t.Fatalf("ход не применился: %+v", out)
 	}
-	// Модельных вызовов ровно два: разрешённый круг + пачка, с которой пришёл
-	// кран; третьего платного круга нет.
-	if calls := len(script.Calls()); calls != 2 {
-		t.Fatalf("модельных вызовов %d, хочу 2 — кран не сработал в пачке", calls)
+	if calls := len(script.Calls()); calls != 3 {
+		t.Fatalf("модельных вызовов %d, хочу 3 (tool + пачка + финальный текст)", calls)
 	}
-	if out.LLMCalls != 2 {
-		t.Fatalf("LLMCalls = %d, хочу 2", out.LLMCalls)
+	if out.LLMCalls != 3 {
+		t.Fatalf("LLMCalls = %d, хочу 3", out.LLMCalls)
 	}
-	var outbox int
-	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&outbox); err != nil {
-		t.Fatalf("outbox не читается: %v", err)
+	var text string
+	if err := f.pool.QueryRow(ctx, `SELECT payload->>'text' FROM delivery_outbox WHERE turn_id = $1`, turnID).Scan(&text); err != nil {
+		t.Fatalf("ответ хода не доставлен: %v", err)
 	}
-	if outbox != 0 {
-		t.Fatalf("стоп-кран не должен ставить сообщения в доставку, outbox=%d", outbox)
+	if text != "нашёл, вот" {
+		t.Fatalf("текст ответа = %q, хочу «нашёл, вот»", text)
 	}
-	// Журнал: пять обращений (c1 + пачка), отказ лимита один (первый вызов
-	// пачки закрывает инструменты), остальные вызовы пачки замыкаются краном.
+	// Журнал: пять обращений (c1 + пачка), отказов лимита четыре, крана нет.
 	calls, limitErrs, cranes := 0, 0, 0
 	evs, err := f.journal.History(ctx, turnID)
 	if err != nil {
@@ -807,10 +803,8 @@ func TestTurnToolLimitStopCraneBatch(t *testing.T) {
 			}
 		}
 	}
-	// Пачка из четырёх сверх лимита: первый — отказ, остальные — кран (какие
-	// именно вызовы — решает планировщик горутин, число детерминировано).
-	if calls != 5 || limitErrs < 1 || cranes < 1 {
-		t.Fatalf("журнал: calls=%d отказов_лимита=%d кранов=%d, хочу 5/>=1/>=1", calls, limitErrs, cranes)
+	if calls != 5 || limitErrs != 4 || cranes != 0 {
+		t.Fatalf("журнал: calls=%d отказов_лимита=%d кранов=%d, хочу 5/4/0", calls, limitErrs, cranes)
 	}
 }
 

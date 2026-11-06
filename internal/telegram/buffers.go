@@ -480,7 +480,12 @@ var ErrReactionTurnCapped = errors.New("потолок ходов по реак�
 // сбой createTurn откатывает и слот (следующий повтор не теряет реакцию).
 func takeReactionTurnSlot(ctx context.Context, tx pgx.Tx, chatID int64) (bool, error) {
 	key := reactionTurnKeyPrefix + strconv.FormatInt(chatID, 10)
-	now := time.Now().Unix()
+	// Время — часами БД, как у остальных лимитов (m29): расхождение часов
+	// приложения и базы сдвигало бы окно 10 минут.
+	var now int64
+	if err := tx.QueryRow(ctx, `SELECT extract(epoch FROM now())::bigint`).Scan(&now); err != nil {
+		return false, fmt.Errorf("буфер: время слота реакции чата %d не прочитано: %w", chatID, err)
+	}
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO runtime_state (key, value) VALUES ($1, to_jsonb($2::bigint))
 		ON CONFLICT (key) DO UPDATE

@@ -4,6 +4,7 @@ package character
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -13,11 +14,11 @@ import (
 // «answer без сообщений» подсказка прямо говорит, что делать вместо пустого
 // answer (react/ignore).
 func TestRepairHintAnswerWithoutMessages(t *testing.T) {
-	perr := errors.New("turnresult: answer требует от 1 до 4 сообщений")
+	perr := fmt.Errorf("%w: от 1 до 4 сообщений; хочешь только реакцию — decision=react", ErrAnswerWithoutText)
 	hint := repairHint(perr)
 	for _, want := range []string{
 		"Твой последний ответ не прошёл валидацию",
-		"answer требует от 1 до 4 сообщений",
+		"от 1 до 4 сообщений",
 		"Ты выбрал decision=answer, но не написал ни одного сообщения",
 		"напиши текст в messages или выбери decision=react",
 	} {

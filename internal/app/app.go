@@ -208,6 +208,7 @@ func (a *App) Start(ctx context.Context) error {
 				Now:                    a.opts.Now,
 				ConversationCallsLimit: dailyCallsLimit(a.opts.Config),
 				BackgroundCallsLimit:   backgroundCallsLimit(a.opts.Config),
+				WebSearchesLimit:       character.WebSearchDailyLimit,
 			}),
 		})
 		if merr != nil {

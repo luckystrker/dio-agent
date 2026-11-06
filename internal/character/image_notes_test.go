@@ -52,7 +52,8 @@ func TestImageNumberingLine(t *testing.T) {
 		{EventID: 2, Kind: imageKindGIF, First: 2, Count: 5, Label: "кадры гифки"},
 	}
 	line := ImageNumberingLine(groups)
-	for _, want := range []string{"1 — фото от Данила", "2–6 — кадры гифки (5 кадров)"} {
+	// 41.2 M7: нумерация — позиции групп, кадры гифки — одна позиция.
+	for _, want := range []string{"1 — фото от Данила", "2 — кадры гифки (5 кадров)", "всего 2"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("нумерация %q не содержит %q", line, want)
 		}

@@ -133,6 +133,16 @@ func (j *TurnJournal) WriteToolResultFor(ctx context.Context, turnID int64, ev *
 // пустые строки в событие не попадают (omitempty).
 func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result TurnResult,
 	usage map[string]any, repairs int, reasoning, reasoningRepair string, imageNotes []EventImageNote) error {
+	return j.WriteModelOutputWithImage(ctx, turnID, result, usage, repairs,
+		reasoning, reasoningRepair, imageNotes, imageVerdict{})
+}
+
+// WriteModelOutputWithImage — model_output с вердиктом проверки картинки хода
+// (41.2 M1): проверенный адрес и подпись сохраняются ДО применения, поэтому
+// восстановление не качает URL, который при генерации был отклонён.
+func (j *TurnJournal) WriteModelOutputWithImage(ctx context.Context, turnID int64, result TurnResult,
+	usage map[string]any, repairs int, reasoning, reasoningRepair string, imageNotes []EventImageNote,
+	image imageVerdict) error {
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return fmt.Errorf("журнал хода: результат не сериализуется: %w", err)
@@ -144,6 +154,8 @@ func (j *TurnJournal) WriteModelOutput(ctx context.Context, turnID int64, result
 		Reasoning:       truncateReasoning(reasoning),
 		ReasoningRepair: truncateReasoning(reasoningRepair),
 		ImageNotes:      imageNotes,
+		ImageURL:        image.URL,
+		ImageAlt:        image.Alt,
 	})
 }
 
@@ -205,6 +217,10 @@ type TurnState struct {
 	// ImageNotes — описания картинок, сопоставленные с событиями пачки при
 	// генерации (этап 37.1): восстановление применяет их без новых картинок.
 	ImageNotes []EventImageNote
+	// ImageURL/ImageAlt — сохранённый вердикт проверки картинки хода (41.2 M1):
+	// восстановление качает только проверенный адрес и не теряет alt (m18).
+	ImageURL string
+	ImageAlt string
 }
 
 // LoadTurnState читает состояние хода из журнала (§12.2: recovery есть
@@ -242,6 +258,8 @@ func stateOfEvents(evs []events.Event) TurnState {
 			st.Usage = e.Usage
 			st.Repairs = e.Repairs
 			st.ImageNotes = e.ImageNotes
+			st.ImageURL = e.ImageURL
+			st.ImageAlt = e.ImageAlt
 		case DeltasApplied:
 			st.Applied = true
 		case DeliveryQueued:

@@ -59,8 +59,12 @@ func TestIngestReactionOnBotMessage(t *testing.T) {
 		t.Fatalf("текст события = %q", text)
 	}
 
-	// Снятие реакции — отдельное событие с той же цитатой.
+	// Снятие реакции — отдельное событие с той же цитатой и всегда история
+	// (41.3 m28): случайно поставленная и снятая реакция не создаёт ход.
 	removed := mustIngest(t, pool, rawReactionOf(901, 42, 77, "😂", ""))
+	if removed.Status != StatusJournalOnly {
+		t.Fatalf("снятие реакции создало ход: %+v", removed)
+	}
 	var removedText string
 	if err := pool.QueryRow(ctx, `SELECT text FROM social_events WHERE id = $1`, removed.EventID).Scan(&removedText); err != nil {
 		t.Fatalf("текст снятия не читается: %v", err)

@@ -314,11 +314,14 @@ var curiosityThemeGreetings = map[string]bool{
 	"как дела": true, "чё как": true, "че как": true, "что как": true,
 	"как оно": true, "как жизнь": true, "ну как": true,
 	"ты тут": true, "ты здесь": true, "что делаешь": true, "чем занят": true,
+	// односложные вопросы-слова: формально тема, по смыслу — пустышка
+	"как": true, "что": true, "где": true, "когда": true, "почему": true,
+	"зачем": true, "кто": true, "чем": true,
 }
 
 // validCuriosityTheme — тема-сид годится для поиска интереса: не пустышка, не
-// приветствие/вопрос-формула, содержит ≥2 слов или ≥8 букв (короткое слово вроде
-// «море» — не тема для исследования).
+// приветствие/вопрос-формула, содержит ≥2 слов или ≥3 букв (41.2 M10: «море»,
+// «лес», «джаз» — годные однословные интересы, раньше порог 8 букв их терял).
 func validCuriosityTheme(theme string) bool {
 	if strings.HasSuffix(strings.TrimSpace(theme), "?") {
 		return false // вопрос — не тема для исследования
@@ -336,7 +339,7 @@ func validCuriosityTheme(theme string) bool {
 	if letters == 0 {
 		return false
 	}
-	return len(strings.Fields(t)) >= 2 || letters >= 8
+	return len(strings.Fields(t)) >= 2 || letters >= 3
 }
 
 // normalizeCuriosityTheme — нижний регистр, обрамляющая пунктуация прочь,
@@ -385,7 +388,7 @@ const curiosityThemeLimit = 120
 func trimCuriosityTheme(theme string) string {
 	theme = strings.TrimSpace(theme)
 	if runes := []rune(theme); len(runes) > curiosityThemeLimit {
-		theme = strings.TrimSpace(string(runes[:curiosityThemeLimit]))
+		theme = strings.TrimSpace(string(runes[:curiosityThemeLimit-1])) + "…"
 	}
 	return theme
 }

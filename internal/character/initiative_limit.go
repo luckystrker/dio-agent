@@ -34,6 +34,15 @@ func IsInitiativeKind(kind string) bool {
 	return false
 }
 
+// IsDailyLimitedInitiative — вид считается в ДНЕВНОМ лимите инициатив (§14.3,
+// 41.2 M6): check_in/share — проактивные сообщения, а reply_later — отложенный
+// ответ на прямой вопрос (defer): лимитируется расстоянием до следующей
+// инициативы, а не дневным потолком. Иначе исчерпанный лимит молча съедал бы
+// отложенный ответ — пользователь не получает ни сейчас, ни позже.
+func IsDailyLimitedInitiative(kind string) bool {
+	return kind == "check_in" || kind == "share"
+}
+
 // InitiativeDailyExhausted — дневной лимит инициатив чата исчерпан (§14.3).
 func InitiativeDailyExhausted(usage InitiativeUsage) bool {
 	return usage.Today >= InitiativePerChatPerDay

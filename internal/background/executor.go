@@ -366,6 +366,21 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 				out.Latency = s.now().Sub(started)
 				return out, nil
 			}
+			// Постоянный отказ провайдера (401/403/400 формы запроса, m5 ревью
+			// 2026-11-06) повтором не лечится: терминально failed, а не пять
+			// попыток с мёртвым ключом. Контекст-длина сюда не входит (M5).
+			if character.IsPermanentProviderError(err) {
+				reason := "постоянный отказ провайдера: " + err.Error()
+				if turnID > 0 {
+					s.skipTurn(ctx, turnID, "generate", reason)
+				}
+				_ = s.intentions.Fail(ctx, it.ID, reason)
+				_ = s.wal.StepDone(ctx, unitID, stepGenerate, map[string]any{"failed": true})
+				_ = task.Fail(err)
+				out.Outcome, out.Detail = "failed", reason
+				out.Latency = s.now().Sub(started)
+				return out, nil
+			}
 			// Транзитный сбой (сеть/бюджет/БД): turn_started без model_output →
 			// повтор с тем же unit и новой попыткой (§12.2). Исчерпанный бюджет
 			// сюда тоже попадает (гонка с соседней задачей) — это не сбой
@@ -575,7 +590,16 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 			if err != nil {
 				return false, "", err
 			}
-			if allowed, reason := ProactiveAllowed(true, usage, now); !allowed {
+			// 41.2 M6: дневной лимит — только check_in/share; reply_later
+			// ограничен паузой между инициативами, а не дневным потолком.
+			var allowed bool
+			var reason string
+			if isDailyLimitedKind(it.Kind) {
+				allowed, reason = ProactiveAllowed(true, usage, now)
+			} else {
+				allowed, reason = proactiveGapAllowed(usage, now)
+			}
+			if !allowed {
 				return true, reason, nil
 			}
 		}

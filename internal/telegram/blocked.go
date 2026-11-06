@@ -68,15 +68,16 @@ func CountBlockedChats(ctx context.Context, db DB) (int64, error) {
 }
 
 // ChatBlockedError — 403, которым Telegram сообщает, что писать больше некуда:
-// пользователь заблокировал бота, удалил аккаунт или чат не существует.
-// Только личка: в группе 403 значит «бота выгнали/нет прав» — это не повод
-// отменять личные намерения.
+// пользователь заблокировал бота, удалил аккаунт или бота выгнали из группы.
+// 400 «chat not found»/«peer_id_invalid» сюда НЕ входит (m6 ревью 2026-11-06):
+// это бывает и ошибкой нашего id — ложная блокировка снималась бы только
+// входящим сообщением, которого может не быть никогда.
 func ChatBlockedError(err error) bool {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
 		return false
 	}
-	if apiErr.HTTPStatus != 403 && apiErr.HTTPStatus != 400 {
+	if apiErr.HTTPStatus != 403 {
 		return false
 	}
 	msg := strings.ToLower(apiErr.Description)

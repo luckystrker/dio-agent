@@ -11,15 +11,36 @@ import (
 	"unicode"
 )
 
-// junkOptionalPrefixes — начала строк, которыми модель говорит «поля нет».
-var junkOptionalPrefixes = []string{
-	"нечего", "не используется", "не нужен", "не нужна", "не нужно",
-	"не требуется", "нет стикера", "не надо", "без стикера",
+// junkOptionalPhrases — точные строки, которыми модель говорит «поля нет»
+// (38.1, 41.2 M9). Только целые фразы: префиксное правило выбрасывало
+// содержательные причины («не нужно откладывать — дата поджимает») и темы
+// («Нечего бояться»).
+var junkOptionalPhrases = map[string]bool{
+	"нечего":           true,
+	"нечего сохранять": true,
+	"нечего сказать":   true,
+	"нечего добавить":  true,
+	"нечего описывать": true,
+	"нечего отметить":  true,
+	"не используется":  true,
+	"не использую":     true,
+	"не нужен":         true,
+	"не нужна":         true,
+	"не нужно":         true,
+	"не требуются":     true,
+	"не требуется":     true,
+	"нет стикера":      true,
+	"не надо":          true,
+	"без стикера":      true,
+	"нет описания":     true,
+	"без описания":     true,
+	"нет заметки":      true,
+	"без заметки":      true,
 }
 
 // junkOptionalString — необязательная строка заполнена «ничем» (38.1): пусто,
-// null/none/nil/н/д/нет, прочерк, только пунктуация, «нечего…», «не
-// используется…». Эмодзи содержимым не считается только для стикера — там
+// null/none/nil/н/д/нет, прочерк, только пунктуация, точная фраза «нечего…»/
+// «не используется…». Эмодзи содержимым не считается только для стикера — там
 // своя проверка (stickerLabelNone).
 func junkOptionalString(s string) bool {
 	t := strings.ToLower(strings.TrimSpace(s))
@@ -39,8 +60,25 @@ func junkOptionalString(s string) bool {
 	if hasContent < 2 {
 		return true // только пунктуация/пробелы/символы или одна буква
 	}
-	for _, prefix := range junkOptionalPrefixes {
-		if strings.HasPrefix(t, prefix) {
+	t = strings.TrimRight(t, " \t.,!;:…—–-")
+	if junkOptionalPhrases[t] {
+		return true
+	}
+	// «не используется в этом ходу», «не нужен новый стикер» — короткое
+	// уточнение без пояснения. Длинная содержательная строка с объяснением
+	// («не нужно откладывать — дата поджимает») остаётся (M9).
+	for _, prefix := range []string{
+		"не используется", "не нужен", "не нужна", "не нужно",
+		"не требуется", "не надо", "без стикера", "нет стикера",
+	} {
+		if !strings.HasPrefix(t, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(t, prefix))
+		if rest == "" {
+			return true
+		}
+		if len([]rune(rest)) <= 20 && !strings.ContainsAny(rest, "—–:;,") {
 			return true
 		}
 	}
@@ -102,14 +140,16 @@ func normalizeOptionalFields(r TurnResult) TurnResult {
 	}
 
 	// Описания картинок: позиции не сдвигаем (37.1) — мусор становится пустой
-	// фразой «картинку не описываю», а не описанием соседней картинки.
+	// фразой «картинку не описываю», а не описанием соседней картинки. Одна
+	// строка, без меток и скобок (M8, m10): описание попадает в доверенную
+	// историю и не должно подделывать её строки.
 	for i := range r.ImageNotes {
 		note := strings.TrimSpace(r.ImageNotes[i])
 		if junkOptionalString(note) {
 			note = ""
 			dropped = append(dropped, "image_notes")
 		}
-		r.ImageNotes[i] = truncateOptional(note, maxImageNoteLength)
+		r.ImageNotes[i] = truncateOptional(sanitizeInlineNote(note), maxImageNoteLength)
 	}
 
 	// Заметка сохранения стикера: «н/д»/«нечего сохранять» = сохранять нечего.
@@ -207,6 +247,10 @@ func degradeAnswerWithoutText(r TurnResult) (TurnResult, bool) {
 	r.ImageURL = ""
 	if r.Reaction != "" || r.Sticker != "" {
 		r.Decision = DecisionReact
+		// m1: у react нет сообщений, к которым привязать пересылку/реплай:
+		// неожиданная пересылка старого сообщения после деградации недопустима.
+		r.Forward = ""
+		r.ReplyToByMessage = nil
 		return r, true
 	}
 	r.Decision = DecisionIgnore
@@ -214,4 +258,12 @@ func degradeAnswerWithoutText(r TurnResult) (TurnResult, bool) {
 	r.Forward = ""
 	r.ReplyToByMessage = nil
 	return r, true
+}
+
+// canDegradeEmptyAnswer — допустима ли деградация пустого answer после repair
+// (41.2 M3): видимая (react — реакция/стикер) допустима всегда, а молчаливый
+// ignore на ПРЯМОМ ходе съедал бы вопрос — там пустой ответ остаётся
+// терминальным пропуском с причиной в журнале (философия №8).
+func canDegradeEmptyAnswer(direct bool, degraded TurnResult) bool {
+	return !direct || degraded.Decision != DecisionIgnore
 }
