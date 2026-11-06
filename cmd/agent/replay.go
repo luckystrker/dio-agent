@@ -172,6 +172,12 @@ func cloneRequest(raw json.RawMessage) (map[string]any, error) {
 
 // replayVerdict разбирает content как TurnResult (40.2, правила брака 40.4):
 // валиден или брак. Пустой content — тоже брак: модель ничего не сказала.
+//
+// Replay — инструмент отладки, поэтому брак проверяется по СЫРЫМ messages из
+// ответа модели, до нормализации/срезки служебных меток в ParseTurnResult
+// (этап 41, m10 иначе прячет метку #mNNN и вердикт врёт «валиден»). Валидность
+// схемы по-прежнему даёт ParseTurnResult; в вердикте видно и то, что останется
+// после нормализации бота.
 func replayVerdict(content string) (string, bool) {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
@@ -181,16 +187,35 @@ func replayVerdict(content string) (string, bool) {
 	if err != nil {
 		return "невалидный TurnResult: " + err.Error(), true
 	}
-	var bad []string
-	for i, m := range result.Messages {
-		if reason := character.MessageGarbageReason(m); reason != "" {
-			bad = append(bad, fmt.Sprintf("messages[%d]: %s", i+1, reason))
+	rawBad := character.GarbageReasons(rawMessages(trimmed))
+	normalizedBad := character.GarbageReasons(result.Messages)
+	switch {
+	case len(rawBad) > 0:
+		verdict := "брак в сырых messages: " + strings.Join(rawBad, "; ")
+		if len(normalizedBad) > 0 {
+			verdict += "; после нормализации: " + strings.Join(normalizedBad, "; ")
+		} else {
+			verdict += fmt.Sprintf("; после нормализации бота: %q (replay оценивает сырой ответ)",
+				result.Messages)
 		}
-	}
-	if len(bad) > 0 {
-		return "брак в messages: " + strings.Join(bad, "; "), true
+		return verdict, true
+	case len(normalizedBad) > 0:
+		return "брак в messages: " + strings.Join(normalizedBad, "; "), true
 	}
 	return fmt.Sprintf("валиден (decision=%s, сообщений %d)", result.Decision, len(result.Messages)), false
+}
+
+// rawMessages — messages из сырого JSON ответа модели: до нормализации полей и
+// срезки меток #mNNN. Не JSON-объект/чужая форма — пусто (валидность уже
+// проверил ParseTurnResult).
+func rawMessages(content string) []string {
+	var raw struct {
+		Messages []string `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return nil
+	}
+	return raw.Messages
 }
 
 // printable — content для печати: как есть, но без гигантских простыней.

@@ -7,8 +7,10 @@ import (
 	"testing"
 )
 
-// TestReplayVerdict — пустой content, невалидный JSON, брак в messages и
-// здоровый ответ различаются.
+// TestReplayVerdict — пустой content, невалидный JSON, брак в СЫРЫХ messages
+// (до нормализации бота) и здоровый ответ различаются. Replay — инструмент
+// отладки: он обязан оценивать сырой ответ модели, даже если ParseTurnResult
+// уже срезал служебные метки (этап 41, m10).
 func TestReplayVerdict(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -18,11 +20,13 @@ func TestReplayVerdict(t *testing.T) {
 	}{
 		{"пусто", "   ", true, "пустой content"},
 		{"не JSON", "привет", true, "невалидный TurnResult"},
-		{"брак-пунктуация", `{"decision":"answer","messages":[","]}`, true, "брак в messages"},
+		{"брак-пунктуация", `{"decision":"answer","messages":[","]}`, true, "брак"},
 		{"брак-поле схемы", `{"decision":"answer","messages":["mood_delta},"]}`, true, "mood_delta"},
-		{"брак-метка", `{"decision":"answer","messages":["привет #m12"]}`, true, "#m"},
+		{"брак-метка в тексте", `{"decision":"answer","messages":["привет #m12"]}`, true, "#m"},
+		{"брак-метка в начале", `{"decision":"answer","messages":["#m1034 привет"]}`, true, "после нормализации"},
 		{"здоровый", `{"decision":"answer","messages":["привет, как ты?"]}`, false, "валиден"},
 		{"ignore", `{"decision":"ignore"}`, false, "валиден"},
+		{"код не брак", `{"decision":"answer","messages":["func main() {"]}`, false, "валиден"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
