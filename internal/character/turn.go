@@ -38,6 +38,7 @@ import (
 	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -450,6 +451,11 @@ type turnReasoning struct {
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток, число модельных вызовов и reasoning попыток.
 func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, fallbackText, operation string, images []Photo, webURLs *webURLCollector) (TurnResult, int, int, turnReasoning, error) {
+	// Отладочный вызов модели (этап 40): id хода едет в context — транспорт
+	// пишет дамп 40.1 и достаёт reasoning_content (40.3), который ago в
+	// не-стрим ответе не разбирает (ago v0.6.0 читает message.reasoning).
+	call := modebug.NewCall("turn", fmt.Sprintf("%d", in.TurnID))
+	ctx = modebug.WithCall(ctx, call)
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
@@ -647,8 +653,9 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
 	}
-	// Reasoning первой попытки (весь tool-цикл Ask) — до repair.
-	reasoningOut := turnReasoning{First: reasoning.Take()}
+	// Reasoning первой попытки (весь tool-цикл Ask) — до repair. Если ago
+	// его не отдал, берём добытое транспортом (40.3).
+	reasoningOut := turnReasoning{First: modebug.TakeReasoning(call, reasoning.Take())}
 
 	// --- строгая валидация ответа (§11.2); один repair-retry (§11.3) ---
 	repairs := 0
@@ -663,7 +670,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		if ferr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr
 		}
-		reasoningOut.Repair = reasoning.Take()
+		reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
 		var repairBody string
 		result, repairBody, perr = parseReply(fixed, bctx.History)
 		if perr != nil && strings.Contains(perr.Error(), "answer требует") {

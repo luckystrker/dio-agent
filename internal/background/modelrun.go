@@ -24,6 +24,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
@@ -171,6 +172,10 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 // обращений §11.2), следующий модельный вызов обязан выдать финальный
 // TurnResult с уже найденным.
 func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, caps modelCaps, extraMW []agomiddleware.Factory) (turnModelRun, error) {
+	// Отладочный вызов модели (этап 40): имя фоновой задачи едет в context —
+	// дамп 40.1 и reasoning_content из транспорта (40.3) без глобалов.
+	call := modebug.NewCall("bg", dumpTask(operation))
+	ctx = modebug.WithCall(ctx, call)
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -249,7 +254,7 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 	if err != nil {
 		return turnModelRun{Stats: counting.stats()}, err
 	}
-	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: reasoning.Take()}
+	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: modebug.TakeReasoning(call, reasoning.Take())}
 
 	result, perr := parseTurnReply(first)
 	if perr != nil {
@@ -258,7 +263,7 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 		if ferr != nil {
 			return reasoningOut, ferr
 		}
-		reasoningOut.ReasoningRepair = reasoning.Take()
+		reasoningOut.ReasoningRepair = modebug.TakeReasoning(call, reasoning.Take())
 		result, perr = parseTurnReply(fixed)
 		if perr != nil {
 			return reasoningOut, &errInvalidResult{err: perr}
@@ -536,4 +541,11 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// dumpTask — имя фоновой задачи для дампа модельных вызовов (40.1):
+// operation без служебного префикса, «model:bg:intention:42:1» →
+// bg-intention-42-1-call-N.json (modebug ещё санитизирует имя под файл).
+func dumpTask(operation string) string {
+	return strings.TrimPrefix(operation, "model:bg:")
 }

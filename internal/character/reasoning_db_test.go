@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +19,8 @@ import (
 	"github.com/luckystrker/ago/config"
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
+
+	"github.com/luckystrker/dio-agent/internal/modebug"
 )
 
 // reasoningReply — один ответ фейкового провайдера: тело и reasoning.
@@ -195,5 +199,48 @@ func TestTurnReasoningInSkippedDB(t *testing.T) {
 	}
 	if f.modelOutputOf(t, ctx, turnID) != nil {
 		t.Fatal("при терминальном пропуске записан model_output")
+	}
+}
+
+// TestTurnReasoningFromTransportDB — этап 40.3: ago v0.6.0 в не-стрим ответе
+// ищет message.reasoning, а провайдер отдаёт reasoning_content, поэтому
+// журнал хода был пуст. Транспорт достаёт reasoning_content в context-коллектор
+// хода, и model_output.reasoning заполняется даже без события ModelReasoning.
+func TestTurnReasoningFromTransportDB(t *testing.T) {
+	f, ctx := newFixture(t)
+	turnID := int64(2004)
+	f.seedTurn(t, ctx, turnID, "О чём думаешь?")
+
+	body, err := json.Marshal(validFinalJSON())
+	if err != nil {
+		t.Fatalf("ответ не сериализуется: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"finish_reason":"stop","message":{"content":` +
+			string(body) + `,"reasoning_content":"думаю из транспорта"}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	// В тесте приложение не запускается — ставим обёртку транспорта руками
+	// (в бою это делает app.Start).
+	saved := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = saved })
+	modebug.InstallDefaultTransport(nil)
+
+	f.runner.Model = NewChatConfig(server.URL, "test-key", "test-model", 100, 0, 0)
+	out, err := f.runner.Run(ctx, Input{TurnID: turnID, ChatID: testChatID, ScopeID: testScopeID,
+		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "О чём думаешь?"}}})
+	if err != nil {
+		t.Fatalf("ход: %v", err)
+	}
+	if out.Skipped {
+		t.Fatalf("ход пропущен: %s", out.SkipReason)
+	}
+	mo := f.modelOutputOf(t, ctx, turnID)
+	if mo == nil {
+		t.Fatal("model_output не записан")
+	}
+	if mo.Reasoning != "думаю из транспорта" {
+		t.Fatalf("reasoning в model_output = %q, хочу из транспорта", mo.Reasoning)
 	}
 }

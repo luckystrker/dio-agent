@@ -263,3 +263,47 @@ func TestDumperPruneRemovesOldFiles(t *testing.T) {
 		t.Fatalf("свежий дамп удалён: %v", err)
 	}
 }
+
+// TestTransportExtractsReasoningContent — этап 40.3: ago v0.6.0 в не-стрим
+// ответе читает только message.reasoning, а провайдер отдаёт
+// reasoning_content. Транспорт достаёт его сам — иначе journal хода пуст.
+func TestTransportExtractsReasoningContent(t *testing.T) {
+	installForTest(t, nil) // дамп выключен, сбор reasoning — всегда
+
+	var bodies []string
+	var headers []http.Header
+	server := chatServer(t, &bodies, &headers)
+
+	call := NewCall("turn", "1")
+	ctx := WithCall(context.Background(), call)
+	params := config.CompatParams{APIKey: "k", BaseURL: server.URL, Model: "m"}
+	if _, err := config.RunChatCompat(ctx, params, nil, nil, config.CallOptions{}); err != nil {
+		t.Fatalf("вызов упал: %v", err)
+	}
+	if got := call.TakeReasoning(); got != "думаю про кашу" {
+		t.Fatalf("reasoning из транспорта = %q, хочу reasoning_content ответа", got)
+	}
+	if got := call.TakeReasoning(); got != "" {
+		t.Fatalf("повторный Take вернул %q, хочу пусто", got)
+	}
+}
+
+// TestTakeReasoningPrefersMiddleware — если ago отдал reasoning событием,
+// транспортный дубль не мешает: берётся собранное middleware, накопитель
+// очищается, чтобы repair не получил reasoning первой попытки.
+func TestTakeReasoningPrefersMiddleware(t *testing.T) {
+	call := NewCall("turn", "1")
+	call.AddReasoning("из транспорта")
+	if got := TakeReasoning(call, "из middleware"); got != "из middleware" {
+		t.Fatalf("reasoning = %q, хочу middleware", got)
+	}
+	if got := call.TakeReasoning(); got != "" {
+		t.Fatalf("накопитель не очищен: %q", got)
+	}
+
+	call2 := NewCall("turn", "2")
+	call2.AddReasoning("из транспорта")
+	if got := TakeReasoning(call2, ""); got != "из транспорта" {
+		t.Fatalf("фолбэк на транспорт = %q", got)
+	}
+}

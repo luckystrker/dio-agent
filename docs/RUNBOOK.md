@@ -473,6 +473,12 @@ jq -r '.request.messages[-1].content' /var/lib/dio/dumps/turn-<id>-call-1.json |
 jq -r '.response.choices[0].message.reasoning_content' /var/lib/dio/dumps/turn-<id>-call-1.json
 ```
 
+Reasoning провайдера (`reasoning_content`) теперь попадает и в журнал хода —
+`model_output.reasoning`: ago v0.6.0 в не-стрим ответе ищет поле
+`message.reasoning`, поэтому транспорт вынимает `reasoning_content` сам
+(этап 40.3). Если в `model_output.reasoning` пусто, а в дампе
+`reasoning_content` есть — это дефект, а не «модель не думала».
+
 ### Replay с абляциями (этап 40.2)
 
 Проиграть дамп тому же провайдеру, меняя только вход, — быстрый способ
