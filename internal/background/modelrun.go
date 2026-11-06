@@ -24,6 +24,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
@@ -187,6 +188,10 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 // обращений §11.2), следующий модельный вызов обязан выдать финальный
 // TurnResult с уже найденным.
 func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, caps modelCaps, extraMW []agomiddleware.Factory) (turnModelRun, error) {
+	// Отладочный вызов модели (этап 40): имя фоновой задачи едет в context —
+	// дамп 40.1 и reasoning_content из транспорта (40.3) без глобалов.
+	call := modebug.NewCall("bg", dumpTask(operation))
+	ctx = modebug.WithCall(ctx, call)
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -265,23 +270,50 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 	if err != nil {
 		return turnModelRun{Stats: counting.stats()}, err
 	}
-	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: reasoning.Take()}
+	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: modebug.TakeReasoning(call, reasoning.Take())}
 
 	result, perr := parseTurnReply(first)
+	validationRepair := false
 	if perr != nil {
 		// Один repair-retry (§11.3): тот же контекст, модели показана ошибка.
 		fixed, ferr := first.Ask(ctx, character.RepairHint(perr, "TurnResult"))
 		if ferr != nil {
 			return reasoningOut, ferr
 		}
-		reasoningOut.ReasoningRepair = reasoning.Take()
+		reasoningOut.ReasoningRepair = modebug.TakeReasoning(call, reasoning.Take())
 		result, perr = parseTurnReply(fixed)
-		if perr != nil {
-			return reasoningOut, &errInvalidResult{err: perr}
-		}
-		reasoningOut.Result = result
+		validationRepair = true
 		reasoningOut.Repairs = 1
-		return reasoningOut, nil
+	}
+
+	// 40.4: валидный JSON, но messages — брак (как у разговорного хода):
+	// один repair «в messages — только текст», иначе чистка первого ответа.
+	if perr == nil && result.Decision == character.DecisionAnswer {
+		if bad := character.GarbageReasons(result.Messages); len(bad) > 0 {
+			s.logInfo("фон %s: брак в messages (%s) — repair 40.4", operation, strings.Join(bad, "; "))
+			firstAnswer := result
+			attempted := false
+			var dropped []string
+			result, _, dropped = character.FixGarbageMessages(firstAnswer, !validationRepair, func() (character.TurnResult, error) {
+				fixed, ferr := first.Ask(ctx, character.GarbageRepairHint)
+				if ferr != nil {
+					return character.TurnResult{}, ferr
+				}
+				attempted = true
+				reasoningOut.ReasoningRepair = modebug.TakeReasoning(call, reasoning.Take())
+				return parseTurnReply(fixed)
+			})
+			if attempted {
+				reasoningOut.Repairs = 1
+			}
+			if len(dropped) > 0 {
+				s.logInfo("фон %s: бракованные сообщения выкинуты (%s), осталось %d; decision=%s",
+					operation, strings.Join(dropped, "; "), len(result.Messages), result.Decision)
+			}
+		}
+	}
+	if perr != nil {
+		return reasoningOut, &errInvalidResult{err: perr}
 	}
 	reasoningOut.Result = result
 	return reasoningOut, nil
@@ -310,6 +342,8 @@ func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system
 	if err != nil {
 		return consolidationProposal{}, modelStats{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
 	}
+	// Дамп модельных вызовов (40.1): консолидация тоже видна в MODEL_DEBUG_DUMP_DIR.
+	ctx = modebug.WithCall(ctx, modebug.NewCall("bg", dumpTask(operation)))
 
 	fragments := []string{
 		"Ограничения (runtime, не обсуждаемое):",
@@ -552,4 +586,11 @@ func clamp01(v float64) float64 {
 		return 1
 	}
 	return v
+}
+
+// dumpTask — имя фоновой задачи для дампа модельных вызовов (40.1):
+// operation без служебного префикса, «model:bg:intention:42:1» →
+// bg-intention-42-1-call-N.json (modebug ещё санитизирует имя под файл).
+func dumpTask(operation string) string {
+	return strings.TrimPrefix(operation, "model:bg:")
 }

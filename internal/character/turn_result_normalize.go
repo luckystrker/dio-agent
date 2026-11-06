@@ -255,6 +255,8 @@ func degradeAnswerWithoutText(r TurnResult) (TurnResult, bool) {
 		r.Decision = DecisionReact
 		// m1: у react нет сообщений, к которым привязать пересылку/реплай:
 		// неожиданная пересылка старого сообщения после деградации недопустима.
+		// Текста ответа больше нет: пересылка/реплаи к выкинутым сообщениям
+		// не должны пережить деградацию (m8 ревью 2026-11-06).
 		r.Forward = ""
 		r.ReplyToByMessage = nil
 		return r, true

@@ -22,6 +22,11 @@ const (
 	statePanelClose = "[/состояние]"
 )
 
+// StatePanelMarkers — открывающий и закрывающий маркеры панели состояния.
+// Нужны replay-абляции no-panel (40.2): пакет modebug не импортирует
+// character (character импортирует modebug), поэтому строки отдаются наружу.
+func StatePanelMarkers() (open, close string) { return statePanelOpen, statePanelClose }
+
 // weekdayShort — русские сокращения дней недели в порядке time.Weekday.
 var weekdayShort = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
 

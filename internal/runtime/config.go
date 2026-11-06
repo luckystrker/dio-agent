@@ -110,10 +110,13 @@ type Config struct {
 	// этап 35): явный путь, иначе PATH, иначе $HOME/.local/bin/ffmpeg.
 	// Пусто — раскадровка выключена, видео идёт превью-кадром.
 	FFmpegPath string
-	Model      *ModelSettings
-	Telegram   *TelegramSettings
-	Embedding  *EmbeddingSettings
-	Web        *WebSettings
+	// ModelDebugDumpDir — каталог дампа модельных вызовов (MODEL_DEBUG_DUMP_DIR,
+	// этап 40.1). Пусто — дамп выключен (обычный режим).
+	ModelDebugDumpDir string
+	Model             *ModelSettings
+	Telegram          *TelegramSettings
+	Embedding         *EmbeddingSettings
+	Web               *WebSettings
 }
 
 // WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
@@ -203,10 +206,12 @@ func LoadConfig(env Getenv) (Config, error) {
 		MetricsPort: metricsPort,
 		Timezone:    timezone,
 		FFmpegPath:  parseFFmpegPath(env),
-		Model:       model,
-		Telegram:    telegram,
-		Embedding:   embedding,
-		Web:         web,
+		// Дамп модельных вызовов (40.1): не задан или пуст — выключен.
+		ModelDebugDumpDir: strings.TrimSpace(lookupOrEmpty(env, "MODEL_DEBUG_DUMP_DIR")),
+		Model:             model,
+		Telegram:          telegram,
+		Embedding:         embedding,
+		Web:               web,
 	}, nil
 }
 
@@ -483,6 +488,10 @@ func parseModelSettings(env Getenv) (*ModelSettings, error) {
 		MemoryPrefetch:       memoryPrefetch,
 	}, nil
 }
+
+// LoadModelSettings читает только группу MODEL_* — для обслуживающих команд
+// (replay дампа, 40.2): им нужен endpoint и ключ, а не база и Telegram.
+func LoadModelSettings(env Getenv) (*ModelSettings, error) { return parseModelSettings(env) }
 
 // boolEnv читает булеву переменную: не задана или пустая — значение по
 // умолчанию (паритет с числовыми: «пусто» не ошибка); иное, кроме true/false

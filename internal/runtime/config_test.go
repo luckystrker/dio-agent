@@ -580,3 +580,49 @@ func TestLoadConfigFFmpegPath(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadModelSettingsWithoutDatabase — replay дампа (40.2) — обслуживающая
+// команда: ей нужна только группа MODEL_*, без DATABASE_URL и Telegram.
+func TestLoadModelSettingsWithoutDatabase(t *testing.T) {
+	m, err := LoadModelSettings(envOf(map[string]string{
+		"MODEL_ENDPOINT": "https://model.example/v1",
+		"MODEL_API_KEY":  "k",
+		"MODEL_MODEL":    "m",
+	}))
+	if err != nil {
+		t.Fatalf("MODEL_* без базы не читаются: %v", err)
+	}
+	if m == nil || m.Endpoint != "https://model.example/v1" || m.APIKey != "k" || m.Model != "m" {
+		t.Fatalf("настройки модели = %+v", m)
+	}
+	m, err = LoadModelSettings(envOf(map[string]string{}))
+	if err != nil || m != nil {
+		t.Fatalf("без MODEL_*: %+v, %v (хочу nil, nil)", m, err)
+	}
+}
+
+// TestLoadConfigModelDebugDumpDir — этап 40.1: MODEL_DEBUG_DUMP_DIR включает
+// дамп модельных вызовов; не задана или пуста — выключен (не ошибка запуска).
+func TestLoadConfigModelDebugDumpDir(t *testing.T) {
+	cfg, err := LoadConfig(envOf(map[string]string{
+		"DATABASE_URL":         "x",
+		"MODEL_DEBUG_DUMP_DIR": " /var/lib/dio/dumps ",
+	}))
+	if err != nil {
+		t.Fatalf("конфиг: %v", err)
+	}
+	if cfg.ModelDebugDumpDir != "/var/lib/dio/dumps" {
+		t.Fatalf("ModelDebugDumpDir = %q", cfg.ModelDebugDumpDir)
+	}
+
+	cfg, err = LoadConfig(envOf(map[string]string{
+		"DATABASE_URL":         "x",
+		"MODEL_DEBUG_DUMP_DIR": "   ",
+	}))
+	if err != nil {
+		t.Fatalf("пустой каталог не должен валить запуск: %v", err)
+	}
+	if cfg.ModelDebugDumpDir != "" {
+		t.Fatalf("пустой MODEL_DEBUG_DUMP_DIR дал %q, хочу пусто", cfg.ModelDebugDumpDir)
+	}
+}

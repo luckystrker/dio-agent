@@ -15,6 +15,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/media"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/metrics"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -150,6 +151,25 @@ func (a *App) Start(ctx context.Context) error {
 
 	a.runCtx, a.cancelRun = context.WithCancel(context.Background())
 	a.intakeCtx, a.cancelIntake = context.WithCancel(a.runCtx)
+
+	// --- отладка модельных вызовов (этап 40) ---
+	// Обёртка http.DefaultTransport ставится ВСЕГДА: она добывает
+	// reasoning_content, который ago v0.6.0 в не-стрим ответе не разбирает
+	// (40.3). Дамп запрос/ответ включается только MODEL_DEBUG_DUMP_DIR (40.1).
+	dumper, derr := modebug.NewDumper(a.opts.Config.ModelDebugDumpDir, a.logger.Printf)
+	if derr != nil {
+		a.logger.Printf("дамп модельных вызовов выключен: %v", derr)
+	}
+	modebug.InstallDefaultTransport(dumper)
+	if dumper != nil {
+		a.logger.Printf("дамп модельных вызовов: %s (ретенция %d дней, ключ API не пишется)",
+			dumper.Dir(), int(modebug.Retention.Hours()/24))
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			dumper.RunPrune(a.runCtx, 24*time.Hour)
+		}()
+	}
 
 	// --- БД и схема ---
 	pool, err := runtime.NewPool(ctx, a.opts.Config.DatabaseURL, a.opts.Config.DBMaxConns)

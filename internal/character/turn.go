@@ -38,6 +38,7 @@ import (
 	agotools "github.com/luckystrker/ago/tools"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -462,6 +463,11 @@ type turnReasoning struct {
 // (не более одного repair-retry, §11.3). Возвращает результат, число
 // repair-попыток, число модельных вызовов и reasoning попыток.
 func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userText, fallbackText, operation string, images []Photo, webURLs *webURLCollector) (TurnResult, int, int, turnReasoning, error) {
+	// Отладочный вызов модели (этап 40): id хода едет в context — транспорт
+	// пишет дамп 40.1 и достаёт reasoning_content (40.3), который ago в
+	// не-стрим ответе не разбирает (ago v0.6.0 читает message.reasoning).
+	call := modebug.NewCall("turn", fmt.Sprintf("%d", in.TurnID))
+	ctx = modebug.WithCall(ctx, call)
 	// Свой конфиг на ход: все запуски агента внутри хода (первый Ask и
 	// repair-продолжение через reply.Ask) делят один счётчик вызовов, поэтому
 	// forced tool_choice встаёт ровно на первый вызов хода, а repair §11.3
@@ -659,8 +665,9 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 	if err != nil {
 		return TurnResult{}, 0, budgetMW.callCount(), turnReasoning{}, err
 	}
-	// Reasoning первой попытки (весь tool-цикл Ask) — до repair.
-	reasoningOut := turnReasoning{First: reasoning.Take()}
+	// Reasoning первой попытки (весь tool-цикл Ask) — до repair. Если ago
+	// его не отдал, берём добытое транспортом (40.3).
+	reasoningOut := turnReasoning{First: modebug.TakeReasoning(call, reasoning.Take())}
 
 	// --- строгая валидация ответа (§11.2); один repair-retry (§11.3) ---
 	repairs := 0
@@ -675,7 +682,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		if ferr != nil {
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr
 		}
-		reasoningOut.Repair = reasoning.Take()
+		reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
 		var repairBody string
 		result, repairBody, perr = parseReply(fixed, bctx.History)
 		if perr != nil && errors.Is(perr, ErrAnswerWithoutText) {
@@ -707,6 +714,47 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, &invalidResultError{
 				err: perr, first: body, repair: repairBody,
 				firstReasoning: reasoningOut.First, repairReasoning: reasoningOut.Repair,
+			}
+		}
+	}
+	if perr == nil && result.Decision == DecisionAnswer {
+		// 40.4: формат валиден, но messages — брак (обрывки JSON, имена полей
+		// схемы, служебные метки, одна пунктуация). Один repair «в messages —
+		// только текст для собеседника» (если repair валидации ещё не было),
+		// затем бракованные выкидываются; все брак — деградация 38.2. Repair не
+		// удался или не дал answer с чистыми репликами — чистим первый ответ:
+		// валидные реплики не теряются, транзиентный сбой repair не откладывает
+		// ход на завтра. У react/ignore мусорные messages не доставляются —
+		// лишний вызов не нужен.
+		if bad := GarbageReasons(result.Messages); len(bad) > 0 {
+			r.logf("ход %d: брак в messages (%s) — repair 40.4", in.TurnID, strings.Join(bad, "; "))
+			firstAnswer := result
+			attempted := false
+			var garbageRepairs int
+			var dropped []string
+			result, garbageRepairs, dropped = FixGarbageMessages(firstAnswer, repairs == 0, func() (TurnResult, error) {
+				fixed, ferr := reply.Ask(ctx, GarbageRepairHint)
+				if ferr != nil {
+					r.logf("ход %d: repair брака не удался (%v) — остаюсь на первом ответе", in.TurnID, ferr)
+					return TurnResult{}, ferr
+				}
+				attempted = true
+				reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
+				repaired, _, rerr := parseReply(fixed, bctx.History)
+				if rerr != nil {
+					r.logf("ход %d: repair брака не дал валидного TurnResult (%v) — остаюсь на первом ответе", in.TurnID, rerr)
+				}
+				return repaired, rerr
+			})
+			if attempted {
+				repairs = 1
+			}
+			if attempted && garbageRepairs == 0 {
+				r.logf("ход %d: repair брака не дал answer с чистыми репликами — чищу первый ответ", in.TurnID)
+			}
+			if len(dropped) > 0 {
+				r.logf("ход %d: бракованные сообщения выкинуты (%s), осталось %d; decision=%s",
+					in.TurnID, strings.Join(dropped, "; "), len(result.Messages), result.Decision)
 			}
 		}
 	}
