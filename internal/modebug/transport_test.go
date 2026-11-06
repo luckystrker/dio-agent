@@ -358,3 +358,77 @@ func TestNewDumperTightensExistingDir(t *testing.T) {
 		t.Fatalf("права существующего каталога %o, хочу 700", perm)
 	}
 }
+
+// TestDumperPruneKeepsForeignJSON — ретенция удаляет только свои файлы
+// (turn-*-call-*.json / bg-*-call-*.json): ошибка в MODEL_DEBUG_DUMP_DIR не
+// должна снести чужие JSON.
+func TestDumperPruneKeepsForeignJSON(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDumper(dir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	own := filepath.Join(dir, "turn-7-call-1.json")
+	foreign := filepath.Join(dir, "notes.json")
+	for _, path := range []string{own, foreign} {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatalf("файл не создан: %v", err)
+		}
+	}
+	stale := time.Now().Add(-Retention - time.Hour)
+	for _, path := range []string{own, foreign} {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatalf("время не подменено: %v", err)
+		}
+	}
+	removed, err := d.Prune(time.Now(), Retention)
+	if err != nil {
+		t.Fatalf("ретенция: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("удалено %d, хочу только свой файл (1)", removed)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("чужой JSON удалён: %v", err)
+	}
+}
+
+// TestTransportHidesAuthLikeHeaders — не только Authorization: x-api-key и
+// cookie тоже не должны попасть в дамп (смена провайдера не должна тихо
+// писать credential).
+func TestTransportHidesAuthLikeHeaders(t *testing.T) {
+	dumpDir := t.TempDir()
+	d, err := NewDumper(dumpDir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	installForTest(t, d)
+
+	var bodies []string
+	var headers []http.Header
+	server := chatServer(t, &bodies, &headers)
+	ctx := WithCall(context.Background(), NewCall("turn", "11"))
+	params := config.CompatParams{
+		APIKey:  "k",
+		BaseURL: server.URL,
+		Model:   "m",
+		ExtraHeaders: map[string]string{
+			"x-api-key": "secret",
+			"Cookie":    "session=secret",
+			"x-trace":   "trace-1",
+		},
+	}
+	if _, err := config.RunChatCompat(ctx, params, nil, nil, config.CallOptions{}); err != nil {
+		t.Fatalf("вызов упал: %v", err)
+	}
+	rec, _, _ := readRecord(t, dumpDir)
+	for name := range rec.Headers {
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, "api-key") || strings.Contains(lower, "cookie") {
+			t.Fatalf("credential-заголовок в дампе: %s", name)
+		}
+	}
+	if rec.Headers["x-trace"] != "trace-1" {
+		t.Fatalf("безобидный заголовок потерян: %v", rec.Headers)
+	}
+}

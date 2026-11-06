@@ -101,3 +101,41 @@ func TestReplayerAppendsChatPath(t *testing.T) {
 		t.Fatalf("путь по умолчанию = %q", path)
 	}
 }
+
+// TestReplayerRejectsForeignHost — url из файла дампа не должен уводить ключ
+// из .env на чужой хост (файл можно скачать/подменить).
+func TestReplayerRejectsForeignHost(t *testing.T) {
+	rep := &Replayer{Endpoint: "https://provider.example/v1", APIKey: "secret-key"}
+	_, err := rep.Send(context.Background(), "https://evil.example/v1/chat/completions",
+		map[string]any{"model": "m"}, nil)
+	if err == nil {
+		t.Fatal("чужой хост принят — ключ ушёл бы наружу")
+	}
+	if !strings.Contains(err.Error(), "чужому хосту") {
+		t.Fatalf("ошибка не объясняет причину: %v", err)
+	}
+}
+
+// TestReplayerForcesNonStream — replay всегда не-стрим: иначе SSE-ответ
+// разберётся как пустой content и вердикт будет ложным.
+func TestReplayerForcesNonStream(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	rep := &Replayer{Endpoint: server.URL, APIKey: "k", Client: server.Client()}
+	body := map[string]any{"model": "m", "stream": true, "stream_options": map[string]any{"include_usage": true}}
+	if _, err := rep.Send(context.Background(), "", body, nil); err != nil {
+		t.Fatalf("replay упал: %v", err)
+	}
+	if got["stream"] != false {
+		t.Fatalf("stream не выключен: %v", got["stream"])
+	}
+	if _, has := got["stream_options"]; has {
+		t.Fatalf("stream_options остался: %v", got["stream_options"])
+	}
+}

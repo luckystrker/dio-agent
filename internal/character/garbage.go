@@ -24,11 +24,14 @@ const garbageRepairHint = "Ты вернул валидный JSON, но в mess
 
 // schemaFieldTokens — имена полей схемы TurnResult (40.4): если такое имя
 // попало в текст реплики токеном, это скопированный служебный формат.
+// Вложенные поля mood_delta/relationship_delta/намерений — тоже.
 var schemaFieldTokens = []string{
 	"decision", "messages", "notes", "memory", "reaction",
 	"reply_to_by_message", "forward", "sticker", "save_sticker",
 	"image_url", "image_notes", "intentions", "defer_hours",
 	"mood_delta", "relationship_delta", "reason",
+	"valence", "arousal", "socialEnergy", "affinity", "trust",
+	"delay_hours", "entities", "salience", "confidence",
 }
 
 // schemaFieldRe — поле схемы как слово. \b в Go ASCII-семантики, поэтому
@@ -40,8 +43,17 @@ var schemaFieldRe = regexp.MustCompile(`(?i)\b(?:` + strings.Join(schemaFieldTok
 var turnResultMetaRe = regexp.MustCompile(`(?is)turnresult|\bjson\b.{0,40}(?:схем|schema)|(?:схем|schema).{0,40}\bjson\b`)
 
 // jsonInstructionRe — прямое указание себе «верни/укажи/выдай JSON», в том
-// числе без слова «схема»: «верни JSON», «JSON only» — тоже не реплика.
-var jsonInstructionRe = regexp.MustCompile(`(?is)(?:верни|укажи|выдай|пришли|return|output|respond|reply|send).{0,30}json|json.{0,30}(?:only|схем|schema|формат|format)`)
+// числе без слова «схема»: «верни JSON», «Выведи JSON», «JSON only» — не
+// реплика. Живая техническая речь («Мне нравится формат JSON», «Send me the
+// JSON later») под шаблон не попадает: нужен императив из списка.
+var jsonInstructionRe = regexp.MustCompile(`(?is)(?:^|[^\p{L}])(?:верни|укажи|выдай|пришли|выведи|сгенерируй|напиши|ответь|отдай|сформируй|return|output|respond|reply)[^\p{L}].{0,30}json|\bjson\b\s*only\b`)
+
+// schemeMetaRe — «по схеме Turn/…» без слова JSON: тоже служебная речь.
+var schemeMetaRe = regexp.MustCompile(`(?is)по\s+схеме`)
+
+// stickerLabelOnlyRe — сообщение из одной метки стикера (#3) или метки
+// сообщения (#m12): это не реплика.
+var stickerLabelOnlyRe = regexp.MustCompile(`^#\d+$`)
 
 // messageLabelAnyRe — метка сообщения внутри текста (ведущую срезает
 // stripLeadingMessageLabels, здесь — любая: признак скопированного формата).
@@ -108,7 +120,10 @@ func MessageGarbageReason(s string) string {
 	if token := fieldTokenGarbage(text); token != "" {
 		return fmt.Sprintf("имя поля TurnResult как токен: %s", token)
 	}
-	if turnResultMetaRe.MatchString(text) || jsonInstructionRe.MatchString(text) {
+	if stickerLabelOnlyRe.MatchString(text) {
+		return "только метка стикера в тексте: " + text
+	}
+	if turnResultMetaRe.MatchString(text) || jsonInstructionRe.MatchString(text) || schemeMetaRe.MatchString(text) {
 		return "служебная речь про JSON/схему"
 	}
 	for _, frag := range jsonFragmentPrefixes {
@@ -131,10 +146,11 @@ func MessageGarbageReason(s string) string {
 }
 
 // jsonNeighbor — знак рядом с токеном, выдающий скопированный формат:
-// `mood_delta:`, `"messages":`, `sticker #3` не считается (пробел).
+// `mood_delta:`, `"messages":`, `sticker: #3`. Запятая и «=» сюда НЕ входят:
+// «See the notes, please» — живая речь, а не формат.
 func jsonNeighbor(r rune) bool {
 	switch r {
-	case ':', ',', '{', '}', '[', ']', '"', '=':
+	case ':', '{', '}', '[', ']', '"':
 		return true
 	default:
 		return false
@@ -147,16 +163,24 @@ func isLatin(r rune) bool { return unicode.IsLetter(r) && r <= 0x024F }
 
 // fieldTokenGarbage — имя поля схемы в «форматном» окружении. Живая
 // английская речь не должна выкидываться: «no reason to worry» — не брак.
-// Признаки формата: имя с подчёркиванием (mood_delta, image_url…), JSON-знак
-// рядом (`sticker:`), склейка с не-латиницей, ВСЕ ЗАГЛАВНЫЕ или два разных
-// поля схемы в одном сообщении.
+// Признаки формата: сообщение состоит только из имени поля (и пунктуации),
+// два РАЗНЫХ поля схемы, имя с подчёркиванием (mood_delta, image_url…),
+// JSON-знак рядом (`sticker:`), склейка с не-латиницей или ВСЕ ЗАГЛАВНЫЕ.
 func fieldTokenGarbage(text string) string {
 	matches := schemaFieldRe.FindAllStringIndex(text, -1)
 	if len(matches) == 0 {
 		return ""
 	}
 	token := text[matches[0][0]:matches[0][1]]
-	if len(matches) >= 2 {
+	// Совсем без речи, кроме имён полей: «messages», «decision:», «sticker».
+	if !speechContent(schemaFieldRe.ReplaceAllString(text, "")) {
+		return token
+	}
+	distinct := make(map[string]struct{}, len(matches))
+	for _, m := range matches {
+		distinct[strings.ToLower(text[m[0]:m[1]])] = struct{}{}
+	}
+	if len(distinct) >= 2 {
 		return token
 	}
 	if strings.Contains(token, "_") {
@@ -242,4 +266,32 @@ func remapReplies(replies []MessageReply, keptIdx []int) []MessageReply {
 		return nil
 	}
 	return out
+}
+
+// GarbageRepairHint — подсказка repair при браке в messages (40.4); нужна
+// фоновому пути, который чинит answer теми же правилами.
+const GarbageRepairHint = garbageRepairHint
+
+// GarbageReasons — причины брака сообщений (для лога/replay); пусто — реплики.
+func GarbageReasons(messages []string) []string { return garbageMessages(messages) }
+
+// FixGarbageMessages — страховка 40.4 для пути, где ответ уже разобран:
+// если в answer есть брак, ask делает один repair (repairAllowed); результат
+// repair принимается, только если это answer с чистыми репликами. Иначе
+// чистится ПЕРВЫЙ ответ — валидные реплики не теряются, ошибка repair не
+// роняет ход. Возвращает итог, число repair-вызовов и выкинутый брак.
+func FixGarbageMessages(first TurnResult, repairAllowed bool, ask func() (TurnResult, error)) (TurnResult, int, []string) {
+	if first.Decision != DecisionAnswer || len(garbageMessages(first.Messages)) == 0 {
+		return first, 0, nil
+	}
+	if repairAllowed {
+		if repaired, err := ask(); err == nil {
+			cleaned, dropped := dropGarbageMessages(repaired)
+			if cleaned.Decision == DecisionAnswer && len(cleaned.Messages) > 0 {
+				return cleaned, 1, dropped
+			}
+		}
+	}
+	out, dropped := dropGarbageMessages(first)
+	return out, 0, dropped
 }

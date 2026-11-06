@@ -709,25 +709,37 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		// 40.4: формат валиден, но messages — брак (обрывки JSON, имена полей
 		// схемы, служебные метки, одна пунктуация). Один repair «в messages —
 		// только текст для собеседника» (если repair валидации ещё не было),
-		// затем бракованные выкидываются; все брак — деградация 38.2. У react/
-		// ignore мусорные messages не доставляются — лишний вызов не нужен.
-		if bad := garbageMessages(result.Messages); len(bad) > 0 {
+		// затем бракованные выкидываются; все брак — деградация 38.2. Repair не
+		// удался или не дал answer с чистыми репликами — чистим первый ответ:
+		// валидные реплики не теряются, транзиентный сбой repair не откладывает
+		// ход на завтра. У react/ignore мусорные messages не доставляются —
+		// лишний вызов не нужен.
+		if bad := GarbageReasons(result.Messages); len(bad) > 0 {
 			r.logf("ход %d: брак в messages (%s) — repair 40.4", in.TurnID, strings.Join(bad, "; "))
-			if repairs == 0 {
-				fixed, ferr := reply.Ask(ctx, garbageRepairHint)
-				if ferr != nil {
-					return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr
-				}
-				reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
-				repairs = 1
-				if repaired, _, rerr := parseReply(fixed, bctx.History); rerr == nil {
-					result = repaired
-				} else {
-					r.logf("ход %d: repair брака не дал валидного TurnResult (%v) — чищу первый ответ", in.TurnID, rerr)
-				}
-			}
+			firstAnswer := result
+			attempted := false
+			var garbageRepairs int
 			var dropped []string
-			result, dropped = dropGarbageMessages(result)
+			result, garbageRepairs, dropped = FixGarbageMessages(firstAnswer, repairs == 0, func() (TurnResult, error) {
+				fixed, ferr := reply.Ask(ctx, GarbageRepairHint)
+				if ferr != nil {
+					r.logf("ход %d: repair брака не удался (%v) — остаюсь на первом ответе", in.TurnID, ferr)
+					return TurnResult{}, ferr
+				}
+				attempted = true
+				reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
+				repaired, _, rerr := parseReply(fixed, bctx.History)
+				if rerr != nil {
+					r.logf("ход %d: repair брака не дал валидного TurnResult (%v) — остаюсь на первом ответе", in.TurnID, rerr)
+				}
+				return repaired, rerr
+			})
+			if attempted {
+				repairs = 1
+			}
+			if attempted && garbageRepairs == 0 {
+				r.logf("ход %d: repair брака не дал answer с чистыми репликами — чищу первый ответ", in.TurnID)
+			}
 			if len(dropped) > 0 {
 				r.logf("ход %d: бракованные сообщения выкинуты (%s), осталось %d; decision=%s",
 					in.TurnID, strings.Join(dropped, "; "), len(result.Messages), result.Decision)

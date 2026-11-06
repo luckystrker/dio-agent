@@ -58,10 +58,22 @@ const maxStreamDumpChunks = 2000
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.Base
 	if base == nil {
-		base = http.DefaultTransport
+		// Нулевое значение Transport не должно рекурсировать: если обёртка
+		// сама стоит в http.DefaultTransport — берём чистый транспорт.
+		if def, ok := http.DefaultTransport.(*Transport); ok && def == t {
+			base = &http.Transport{}
+		} else {
+			base = http.DefaultTransport
+		}
 	}
 	call := CallFromContext(req.Context())
-	dump := t.Dumper != nil && call != nil
+	if call == nil {
+		// Не модельный вызов хода (эмбеддинги, веб, Telegram): полный
+		// pass-through, тело не читаем и не буферизуем — чужие лимиты
+		// (например 16 МиБ в memory/embed.go) продолжают работать.
+		return base.RoundTrip(req)
+	}
+	dump := t.Dumper != nil
 
 	var reqBody []byte
 	if dump && req.Body != nil {
@@ -130,7 +142,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		call.AddReasoning(reasoningFromResponse(data))
 	}
 	if dump {
-		t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, jsonOrString(data), nil))
+		t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, dumpPayload(data), nil))
 	}
 	return resp, nil
 }
@@ -145,7 +157,7 @@ func (t *Transport) record(call *Call, seq int, req *http.Request, reqBody []byt
 		At:        started,
 		URL:       redactURL(req.URL),
 		Headers:   dumpHeaders(req.Header),
-		Request:   jsonOrString(reqBody),
+		Request:   dumpPayload(reqBody),
 		Response:  response,
 		Status:    status,
 		LatencyMs: time.Since(started).Milliseconds(),
@@ -182,7 +194,7 @@ func parseID(s string) int64 {
 func dumpHeaders(h http.Header) map[string]string {
 	out := make(map[string]string, len(h))
 	for k, values := range h {
-		if strings.EqualFold(k, "Authorization") {
+		if sensitiveHeader(k) {
 			continue
 		}
 		out[strings.ToLower(k)] = strings.Join(values, ", ")
@@ -191,6 +203,21 @@ func dumpHeaders(h http.Header) map[string]string {
 		return nil
 	}
 	return out
+}
+
+// sensitiveHeader — заголовок, который может нести credential: не только
+// Authorization (смена провайдера не должна тихо писать ключ в файл).
+func sensitiveHeader(name string) bool {
+	n := strings.ToLower(name)
+	for _, marker := range []string{
+		"authorization", "api-key", "apikey", "x-api-key", "auth-token",
+		"cookie", "proxy-authorization",
+	} {
+		if strings.Contains(n, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // sensitiveQueryParam — имя параметра URL, значение которого может быть
@@ -213,6 +240,9 @@ func redactURL(u *url.URL) string {
 		return ""
 	}
 	cp := *u
+	if cp.User != nil {
+		cp.User = url.User("REDACTED") // userinfo может содержать ключ
+	}
 	if cp.RawQuery != "" {
 		q := cp.Query()
 		for name := range q {
@@ -223,6 +253,20 @@ func redactURL(u *url.URL) string {
 		cp.RawQuery = q.Encode()
 	}
 	return cp.String()
+}
+
+// dumpPayload — тело для дампа: JSON/строка, но не больше maxDumpBodyBytes
+// (большие тела — с пометкой truncated и началом; полный запрос в таком
+// дампе replay не восстановит, зато диск и память не растут без предела).
+func dumpPayload(data []byte) any {
+	if len(data) > maxDumpBodyBytes {
+		return map[string]any{
+			"truncated": true,
+			"bytes":     len(data),
+			"prefix":    string(data[:maxDumpBodyBytes]),
+		}
+	}
+	return jsonOrString(data)
 }
 
 // jsonOrString — тело как JSON, если это JSON, иначе строкой (ошибки HTML и

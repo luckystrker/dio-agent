@@ -3,6 +3,7 @@
 package character
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,7 @@ func TestMessageGarbageReasonLive(t *testing.T) {
 		{"Укажи JSON по схеме Turn", "JSON"},
 		{"ответ }", "обрывок"},
 		{"sticker: #3", "sticker"},
+		{"#3", "метка стикера"},
 	}
 	for _, tc := range cases {
 		got := MessageGarbageReason(tc.text)
@@ -55,7 +57,6 @@ func TestMessageGarbageReasonNormal(t *testing.T) {
 		"не, я про другое",
 		"Ага",
 		"давай завтра, я устал",
-		"#3", // метка стикера в поле sticker — не текст сообщения
 	}
 	for _, text := range normal {
 		if reason := MessageGarbageReason(text); reason != "" {
@@ -117,5 +118,83 @@ func TestGarbageRepairHint(t *testing.T) {
 		if !strings.Contains(garbageRepairHint, want) {
 			t.Fatalf("в подсказке нет %q:\n%s", want, garbageRepairHint)
 		}
+	}
+}
+
+// TestMessageGarbageReasonNoFalsePositives — живая речь с запятыми, повторным
+// словом и техническим упоминанием JSON не должна выкидываться (находка
+// критика: страховка не имеет права терять валидный ответ).
+func TestMessageGarbageReasonNoFalsePositives(t *testing.T) {
+	normal := []string{
+		"I have a bad memory, you know",
+		"See the notes, please",
+		"Мой reaction, если честно, спокойный",
+		"Мне нравится формат JSON",
+		"Send me the JSON later",
+		"ты очень kind, спасибо",
+		"я не помню, что было в messages, но ладно", // одно поле в живой речи
+	}
+	for _, text := range normal {
+		if reason := MessageGarbageReason(text); reason != "" {
+			t.Fatalf("ложное срабатывание на %q: %s", text, reason)
+		}
+	}
+}
+
+// TestMessageGarbageReasonStandaloneFieldsAndImperatives — сообщение из одного
+// имени поля и приказ себе «выведи/напиши JSON» — брак: это скопированный
+// формат, а не реплика.
+func TestMessageGarbageReasonStandaloneFieldsAndImperatives(t *testing.T) {
+	garbage := []string{
+		"messages", "decision", "sticker", "notes", "reason",
+		"delay_hours", "valence",
+		"Выведи JSON", "Сгенерируй JSON", "Напиши JSON", "Ответь JSON", "Отдай JSON",
+		"Верни по схеме Turn",
+	}
+	for _, text := range garbage {
+		if reason := MessageGarbageReason(text); reason == "" {
+			t.Fatalf("брак не найден: %q", text)
+		}
+	}
+}
+
+// TestFixGarbageMessagesKeepsFirstOnRepairFailure — сбой repair не роняет ход
+// и не теряет чистые реплики первого ответа.
+func TestFixGarbageMessagesKeepsFirstOnRepairFailure(t *testing.T) {
+	first := TurnResult{Decision: DecisionAnswer, Messages: []string{",", "привет"}}
+	got, repairs, dropped := FixGarbageMessages(first, true, func() (TurnResult, error) {
+		return TurnResult{}, fmt.Errorf("сеть")
+	})
+	if repairs != 0 {
+		t.Fatalf("repair посчитан (%d) при ошибке", repairs)
+	}
+	if len(got.Messages) != 1 || got.Messages[0] != "привет" || len(dropped) != 1 {
+		t.Fatalf("чистые реплики первого ответа потеряны: %+v (%v)", got, dropped)
+	}
+}
+
+// TestFixGarbageMessagesPrefersCleanRepair — repair с чистым answer принимается.
+func TestFixGarbageMessagesPrefersCleanRepair(t *testing.T) {
+	first := TurnResult{Decision: DecisionAnswer, Messages: []string{">»"}}
+	got, repairs, dropped := FixGarbageMessages(first, true, func() (TurnResult, error) {
+		return TurnResult{Decision: DecisionAnswer, Messages: []string{"я тут"}}, nil
+	})
+	if repairs != 1 || len(got.Messages) != 1 || got.Messages[0] != "я тут" || len(dropped) != 0 {
+		t.Fatalf("чистый repair не принят: %+v repairs=%d dropped=%v", got, repairs, dropped)
+	}
+}
+
+// TestFixGarbageMessagesKeepsFirstWhenRepairWorse — repair вернул ignore (или
+// мусор): не теряем валидные реплики первого ответа.
+func TestFixGarbageMessagesKeepsFirstWhenRepairWorse(t *testing.T) {
+	first := TurnResult{Decision: DecisionAnswer, Messages: []string{",", "как ты?"}}
+	got, repairs, _ := FixGarbageMessages(first, true, func() (TurnResult, error) {
+		return TurnResult{Decision: DecisionIgnore}, nil
+	})
+	if repairs != 0 {
+		t.Fatalf("repair посчитан (%d), хотя он не принят", repairs)
+	}
+	if len(got.Messages) != 1 || got.Messages[0] != "как ты?" {
+		t.Fatalf("первый ответ потерян: %+v", got)
 	}
 }

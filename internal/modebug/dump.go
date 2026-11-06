@@ -64,9 +64,17 @@ func NewDumper(dir string, logf func(format string, args ...any)) (*Dumper, erro
 		return nil, fmt.Errorf("каталог дампа модели %q не создан: %w", dir, err)
 	}
 	// Уже существующий каталог MkdirAll не ужесточает: дамп приватный, права
-	// приводятся к 0700 явно (файлы всё равно 0600).
+	// приводятся к 0700 явно (файлы всё равно 0600). Смена прав существующего
+	// каталога — в лог: оператор должен видеть, что права поменялись.
+	oldPerm := os.FileMode(0)
+	if info, serr := os.Stat(dir); serr == nil {
+		oldPerm = info.Mode().Perm()
+	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("каталог дампа модели %q: права 0700 не выставлены: %w", dir, err)
+	}
+	if logf != nil && oldPerm != 0 && oldPerm != 0o700 {
+		logf("дамп модели: права каталога %s %o → 700 (дамп приватный)", dir, oldPerm)
 	}
 	return &Dumper{dir: dir, logf: logf}, nil
 }
@@ -99,16 +107,35 @@ func (d *Dumper) Write(rec Record) {
 		return
 	}
 	name := filepath.Join(d.dir, recordFileName(rec))
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// Атомарная запись: temp + rename — падение процесса не оставит битый JSON
+	// на месте готового дампа (временный файл ретенция удалит как чужой).
+	tmp := name + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		d.log("дамп модели: файл %s не создан: %v", name, err)
+		d.log("дамп модели: файл %s не создан: %v", tmp, err)
 		return
 	}
-	if _, err := f.Write(raw); err != nil {
-		d.log("дамп модели: файл %s не записан: %v", name, err)
+	fail := func(format string, args ...any) {
+		d.log(format, args...)
+		_ = f.Close()
+		_ = os.Remove(tmp)
 	}
-	if err := f.Close(); err != nil {
-		d.log("дамп модели: файл %s не закрыт: %v", name, err)
+	if _, werr := f.Write(raw); werr != nil {
+		fail("дамп модели: файл %s не записан: %v", tmp, werr)
+		return
+	}
+	if cerr := f.Chmod(0o600); cerr != nil {
+		fail("дамп модели: права %s не выставлены: %v", tmp, cerr)
+		return
+	}
+	if cerr := f.Close(); cerr != nil {
+		_ = os.Remove(tmp)
+		d.log("дамп модели: файл %s не закрыт: %v", tmp, cerr)
+		return
+	}
+	if rerr := os.Rename(tmp, name); rerr != nil {
+		_ = os.Remove(tmp)
+		d.log("дамп модели: файл %s не переименован: %v", name, rerr)
 	}
 }
 
@@ -159,7 +186,7 @@ func (d *Dumper) Prune(now time.Time, maxAge time.Duration) (int, error) {
 	cutoff := now.Add(-maxAge)
 	removed := 0
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() || !isDumpFileName(e.Name()) {
 			continue
 		}
 		info, ierr := e.Info()
@@ -174,6 +201,33 @@ func (d *Dumper) Prune(now time.Time, maxAge time.Duration) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// isDumpFileName — только файлы дампа (turn-<id>-call-<n>.json /
+// bg-<task>-call-<n>.json): ретенция не имеет права сносить чужие JSON,
+// если MODEL_DEBUG_DUMP_DIR по ошибке указал на чужой каталог.
+func isDumpFileName(name string) bool {
+	if !strings.HasSuffix(name, ".json") {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".json")
+	if !strings.HasPrefix(base, "turn-") && !strings.HasPrefix(base, "bg-") {
+		return false
+	}
+	idx := strings.LastIndex(base, "-call-")
+	if idx < 0 {
+		return false
+	}
+	n := base[idx+len("-call-"):]
+	if n == "" {
+		return false
+	}
+	for _, r := range n {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // RunPrune чистит дамп при старте и затем раз в сутки до отмены ctx.

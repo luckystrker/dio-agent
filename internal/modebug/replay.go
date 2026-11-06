@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -79,6 +80,18 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	if target == "" {
 		return nil, fmt.Errorf("replay: пустой MODEL_ENDPOINT и нет url в дампе")
 	}
+	// Ключ из .env уходит только на хост MODEL_ENDPOINT: url берётся из файла
+	// дампа, а файл можно скачать/подменить — credential не должен уехать
+	// чужому хосту.
+	if err := r.sameProviderHost(target); err != nil {
+		return nil, err
+	}
+	// replay всегда не-стрим: SSE-ответ нельзя разобрать как Chat Completions,
+	// иначе вердикт был бы ложным «пустой content».
+	if stream, ok := request["stream"].(bool); ok && stream {
+		request["stream"] = false
+		delete(request, "stream_options")
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("replay: запрос не сериализуется: %w", err)
@@ -102,8 +115,8 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 		req.Header.Set("Authorization", "Bearer "+r.APIKey)
 	}
 	for k, v := range headers {
-		switch strings.ToLower(k) {
-		case "authorization", "content-type", "accept":
+		switch {
+		case sensitiveHeader(k), strings.EqualFold(k, "content-type"), strings.EqualFold(k, "accept"):
 			// Ключ и тип тела — из конфигурации, не из файла.
 		default:
 			req.Header.Set(k, v)
@@ -113,7 +126,10 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	started := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("replay: провайдер недоступен: %w", err)
+		// *url.Error печатает полный URL: если endpoint содержит секрет в
+		// query, он не должен попасть в терминал/лог replay.
+		msg := strings.ReplaceAll(err.Error(), target, redactURL(req.URL))
+		return nil, fmt.Errorf("replay: провайдер недоступен: %s", msg)
 	}
 	defer resp.Body.Close()
 	body, readErr := io.ReadAll(resp.Body)
@@ -127,16 +143,48 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	return reply, nil
 }
 
+// sameProviderHost — host url (дампа или endpoint) должен совпадать с
+// MODEL_ENDPOINT: ключ не отправляется чужому хосту.
+func (r *Replayer) sameProviderHost(target string) error {
+	if strings.TrimSpace(r.Endpoint) == "" {
+		return nil
+	}
+	ep, err := url.Parse(ensureChatPath(r.Endpoint))
+	if err != nil {
+		return nil // кривой endpoint — пусть ответит сеть, ошибка не про хосты
+	}
+	tp, err := url.Parse(target)
+	if err != nil {
+		return fmt.Errorf("replay: url не разобран: %v", err)
+	}
+	if !strings.EqualFold(ep.Host, tp.Host) {
+		return fmt.Errorf("replay: host url из дампа (%s) не совпадает с MODEL_ENDPOINT (%s) — ключ не отправляется чужому хосту; обнови MODEL_ENDPOINT или используй дамп того же провайдера", tp.Host, ep.Host)
+	}
+	return nil
+}
+
 // ensureChatPath добавляет /chat/completions, если адрес — только база.
+// Путь меняется у разобранного URL, а не конкатенацией строки: иначе endpoint
+// с query (?api_key=…) получил бы путь после query (находка критика).
 func ensureChatPath(base string) string {
-	base = strings.TrimSuffix(strings.TrimSpace(base), "/")
+	base = strings.TrimSpace(base)
 	if base == "" {
 		return ""
 	}
-	if strings.HasSuffix(base, "/chat/completions") {
-		return base
+	u, err := url.Parse(base)
+	if err != nil || u.Host == "" {
+		base = strings.TrimSuffix(base, "/")
+		if strings.HasSuffix(base, "/chat/completions") {
+			return base
+		}
+		return base + "/chat/completions"
 	}
-	return base + "/chat/completions"
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	if strings.HasSuffix(u.Path, "/chat/completions") {
+		return u.String()
+	}
+	u.Path += "/chat/completions"
+	return u.String()
 }
 
 // ChatReply — разобранный не-стрим ответ Chat Completions: то, что нужно

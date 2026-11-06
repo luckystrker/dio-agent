@@ -11,6 +11,7 @@ package modebug
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -78,6 +79,13 @@ func (c *Call) AddReasoning(s string) {
 	}
 	if size >= maxCallReasoningBytes {
 		return
+	}
+	// Один гигантский чанк режем по остатку лимита (по границе рун, чтобы не
+	// оставить битый UTF-8).
+	if remain := maxCallReasoningBytes - size; len(s) > remain {
+		cut := string([]byte(s)[:remain])
+		cut = strings.ToValidUTF8(cut, "")
+		s = cut
 	}
 	c.reasoning = append(c.reasoning, s)
 }
