@@ -61,8 +61,8 @@ func newTestPool(t *testing.T) *Pool {
 	if err != nil {
 		t.Fatalf("схема не применена: %v", err)
 	}
-	if result.Applied != 23 || result.Skipped != 0 {
-		t.Fatalf("миграции: applied=%d skipped=%d, хочу 23/0", result.Applied, result.Skipped)
+	if result.Applied != 24 || result.Skipped != 0 {
+		t.Fatalf("миграции: applied=%d skipped=%d, хочу 24/0", result.Applied, result.Skipped)
 	}
 	return pool
 }

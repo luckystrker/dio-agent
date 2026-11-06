@@ -29,6 +29,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
 )
 
@@ -542,6 +543,15 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 	}
 	if dup {
 		return true, "идентичное намерение уже ждёт исполнения (§14.1)", nil
+	}
+
+	// Чат заблокировал бота (38.7): писать в него некуда — намерение
+	// отменяется до модельного вызова, даже explore (его находка стала бы
+	// share в тот же чат).
+	if blocked, berr := telegram.ChatBlocked(ctx, s.pool, it.TargetChatID); berr != nil {
+		return false, "", berr
+	} else if blocked {
+		return true, "чат заблокировал бота — инициативы не отправляются (§13.2, 38.7)", nil
 	}
 
 	if isInitiativeKind(it.Kind) {

@@ -223,10 +223,12 @@ func (s *Scheduler) curiosityTheme(ctx context.Context) (string, int64, error) {
 // написать первым (§14.3: инициативы в группы выключены).
 func (s *Scheduler) latestPrivateChat(ctx context.Context) (int64, error) {
 	var chatID int64
+	// Заблокировавшие бота чаты пропускаются (38.7): share туда не дойдёт.
 	err := s.pool.QueryRow(ctx, `
-		SELECT chat_id FROM social_events
-		WHERE chat_type = 'private'
-		ORDER BY id DESC LIMIT 1`).Scan(&chatID)
+		SELECT chat_id FROM social_events e
+		WHERE e.chat_type = 'private'
+		  AND NOT EXISTS (SELECT 1 FROM blocked_chats b WHERE b.chat_id = e.chat_id)
+		ORDER BY e.id DESC LIMIT 1`).Scan(&chatID)
 	if isNoRows(err) {
 		return 0, nil
 	}

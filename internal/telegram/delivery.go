@@ -483,6 +483,18 @@ func (l *DeliveryLoop) handleSendError(ctx context.Context, row OutboxItem, send
 	decision := classifySendError(sendErr, row.Attempts, l.opts.MaxAttempts, l.opts.RetryBase)
 	qctx, cancel := l.persistCtx()
 	defer cancel()
+	// Чат заблокировал бота / аккаунт удалён / чат не найден (38.7): пометка в
+	// БД отменяет ожидающие намерения, чтобы фон не долбился в закрытую дверь.
+	// Исход строки по §13.2 остаётся прежним (403 — постоянная ошибка → failed).
+	if ChatBlockedError(sendErr) {
+		cancelled, berr := MarkChatBlocked(qctx, l.db, row.ChatID, message)
+		if berr != nil {
+			l.logger.Printf("delivery: чат %d не помечен заблокированным: %v", row.ChatID, berr)
+		} else {
+			l.logger.Printf("delivery: чат %d заблокировал бота — пометка в blocked_chats, отменено намерений %d (§13.2, 38.7)",
+				row.ChatID, cancelled)
+		}
+	}
 	switch decision.kind {
 	case outcomeRetryWait:
 		if err := l.repo.MarkRetryWait(qctx, row.ID, time.Now().Add(decision.wait), message); err != nil {

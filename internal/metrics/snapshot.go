@@ -109,6 +109,9 @@ type Deliveries struct {
 	// (этапы 37.2–37.3): редкие действия, видимые в outbox.
 	RepliesSent24h  int64 `json:"replies_sent_24h"`
 	ForwardsSent24h int64 `json:"forwards_sent_24h"`
+	// BlockedChats — чаты, заблокировавшие бота (38.7): инициативы в них не
+	// создаются и не исполняются, пока пользователь снова не напишет.
+	BlockedChats int64 `json:"blocked_chats"`
 }
 
 // DeliveryStatusCounts — счётчики статусов delivery_outbox (§13.2).
