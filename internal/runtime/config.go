@@ -110,10 +110,13 @@ type Config struct {
 	// этап 35): явный путь, иначе PATH, иначе $HOME/.local/bin/ffmpeg.
 	// Пусто — раскадровка выключена, видео идёт превью-кадром.
 	FFmpegPath string
-	Model      *ModelSettings
-	Telegram   *TelegramSettings
-	Embedding  *EmbeddingSettings
-	Web        *WebSettings
+	// ModelDebugDumpDir — каталог дампа модельных вызовов (MODEL_DEBUG_DUMP_DIR,
+	// этап 40.1). Пусто — дамп выключен (обычный режим).
+	ModelDebugDumpDir string
+	Model             *ModelSettings
+	Telegram          *TelegramSettings
+	Embedding         *EmbeddingSettings
+	Web               *WebSettings
 }
 
 // WebSettings — веб-инструменты exploration (§15/§16): поиск опционален
@@ -203,10 +206,12 @@ func LoadConfig(env Getenv) (Config, error) {
 		MetricsPort: metricsPort,
 		Timezone:    timezone,
 		FFmpegPath:  parseFFmpegPath(env),
-		Model:       model,
-		Telegram:    telegram,
-		Embedding:   embedding,
-		Web:         web,
+		// Дамп модельных вызовов (40.1): не задан или пуст — выключен.
+		ModelDebugDumpDir: strings.TrimSpace(lookupOrEmpty(env, "MODEL_DEBUG_DUMP_DIR")),
+		Model:             model,
+		Telegram:          telegram,
+		Embedding:         embedding,
+		Web:               web,
 	}, nil
 }
 

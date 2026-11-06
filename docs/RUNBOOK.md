@@ -434,6 +434,45 @@ cd /opt/dio-agent            # каталог деплоя
 «не найдено». Если выжившая сущность успела склеиться дальше, откат
 отклоняется — сначала откатите более позднюю склейку.
 
+### Дамп модельных вызовов (этап 40.1)
+
+Зачем: разобрать «кашу» в ответах (валидный JSON, но messages — мусор) на
+живом ходе, а не гадать. Дамп пишет **ровно то, что ушло провайдеру и пришло
+от него** — на уровне HTTP-транспорта, поэтому в файле видны messages, tools,
+tool_choice, response_format, сырой ответ и reasoning_content.
+
+Включение — одна переменная в `.env`, перезапуск службы:
+
+```ini
+MODEL_DEBUG_DUMP_DIR=/var/lib/dio/dumps
+```
+
+```bash
+mkdir -p /var/lib/dio/dumps && chown dio:dio /var/lib/dio/dumps   # если каталога нет
+systemctl restart dio-agent
+journalctl -u dio-agent -n 20 | grep 'дамп модельных вызовов'
+```
+
+Файлы: `turn-<id>-call-<n>.json` (разговорный ход) и
+`bg-<task>-call-<n>.json` (фон: инициатива, explore, консолидация). В файле:
+`at`, `url`, `headers` (без `Authorization`; `x-opencode-session` есть),
+`request`, `response`, `status`, `latency_ms`. Для стрим-ответа `response` —
+свёртка: склеенный `content`, `reasoning` и сырые чанки (ограниченно).
+
+Права: каталог 0700, файлы 0600. Ретенция — 3 дня (чистка при старте и раз в
+сутки). **Ключ API в дамп не попадает, но приватная переписка — попадает**:
+включайте на время разбора и выключайте (уберёте переменную — перезапуск).
+Скачивать файлы с VPS стоит только для разбора, не хранить у себя.
+
+Проверить, что дамп появился:
+
+```bash
+ls -l /var/lib/dio/dumps | tail
+jq '{turn_id, call, status, latency_ms}' /var/lib/dio/dumps/turn-*.json | tail -40
+jq -r '.request.messages[-1].content' /var/lib/dio/dumps/turn-<id>-call-1.json | head -40
+jq -r '.response.choices[0].message.reasoning_content' /var/lib/dio/dumps/turn-<id>-call-1.json
+```
+
 ## 11. Частые проблемы
 
 | Симптом | Что смотреть |

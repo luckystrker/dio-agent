@@ -580,3 +580,29 @@ func TestLoadConfigFFmpegPath(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadConfigModelDebugDumpDir — этап 40.1: MODEL_DEBUG_DUMP_DIR включает
+// дамп модельных вызовов; не задана или пуста — выключен (не ошибка запуска).
+func TestLoadConfigModelDebugDumpDir(t *testing.T) {
+	cfg, err := LoadConfig(envOf(map[string]string{
+		"DATABASE_URL":         "x",
+		"MODEL_DEBUG_DUMP_DIR": " /var/lib/dio/dumps ",
+	}))
+	if err != nil {
+		t.Fatalf("конфиг: %v", err)
+	}
+	if cfg.ModelDebugDumpDir != "/var/lib/dio/dumps" {
+		t.Fatalf("ModelDebugDumpDir = %q", cfg.ModelDebugDumpDir)
+	}
+
+	cfg, err = LoadConfig(envOf(map[string]string{
+		"DATABASE_URL":         "x",
+		"MODEL_DEBUG_DUMP_DIR": "   ",
+	}))
+	if err != nil {
+		t.Fatalf("пустой каталог не должен валить запуск: %v", err)
+	}
+	if cfg.ModelDebugDumpDir != "" {
+		t.Fatalf("пустой MODEL_DEBUG_DUMP_DIR дал %q, хочу пусто", cfg.ModelDebugDumpDir)
+	}
+}
