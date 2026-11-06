@@ -705,6 +705,34 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			}
 		}
 	}
+	if perr == nil {
+		// 40.4: формат валиден, но messages — брак (обрывки JSON, имена полей
+		// схемы, служебные метки, одна пунктуация). Один repair «в messages —
+		// только текст для собеседника» (если repair валидации ещё не было),
+		// затем бракованные выкидываются; все брак — деградация 38.2.
+		if bad := garbageMessages(result.Messages); len(bad) > 0 {
+			r.logf("ход %d: брак в messages (%s) — repair 40.4", in.TurnID, strings.Join(bad, "; "))
+			if repairs == 0 {
+				fixed, ferr := reply.Ask(ctx, garbageRepairHint)
+				if ferr != nil {
+					return TurnResult{}, repairs, budgetMW.callCount(), reasoningOut, ferr
+				}
+				reasoningOut.Repair = modebug.TakeReasoning(call, reasoning.Take())
+				repairs = 1
+				if repaired, _, rerr := parseReply(fixed, bctx.History); rerr == nil {
+					result = repaired
+				} else {
+					r.logf("ход %d: repair брака не дал валидного TurnResult (%v) — чищу первый ответ", in.TurnID, rerr)
+				}
+			}
+			var dropped []string
+			result, dropped = dropGarbageMessages(result)
+			if len(dropped) > 0 {
+				r.logf("ход %d: бракованные сообщения выкинуты (%s), осталось %d; decision=%s",
+					in.TurnID, strings.Join(dropped, "; "), len(result.Messages), result.Decision)
+			}
+		}
+	}
 	if mediaFallback {
 		// Модель видела только текст: придуманные описания картинок были бы
 		// ложью, картинок в запросе нет (37.1).
