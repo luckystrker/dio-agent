@@ -672,7 +672,8 @@ func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope
 			return turnModelRun{}, err
 		}
 	}
-	return s.runTurnModel(ctx, op, system, character.ComposeUserText(panel, userText), tools, scope, sessionForChat(it.TargetChatID), extra)
+	return s.runTurnModelCapped(ctx, op, system, character.ComposeUserText(panel, userText), tools, scope,
+		sessionForChat(it.TargetChatID), modelCaps{Calls: exploreMaxCalls, Tokens: exploreMaxTokens}, extra)
 }
 
 // stateContext — статичный системный промпт из шаблона §7.1 + addendum задачи.

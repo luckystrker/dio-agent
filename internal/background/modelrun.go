@@ -50,6 +50,20 @@ const (
 	episodeTextLimit  = 300 // символов события в промпте консолидации
 )
 
+// Потолки explore на задачу (этап 38.8): живой прогон 2026-11-06 дошёл до
+// 9 модельных вызовов и 78 705 токенов на мусорную тему — задача обязана
+// заканчиваться тем, что уже найдено, а не крутиться до лимита инструментов.
+const (
+	exploreMaxCalls  = 6
+	exploreMaxTokens = 40_000
+)
+
+// modelCaps — потолок одной фоновой задачи. Нули — без потолка.
+type modelCaps struct {
+	Calls  int
+	Tokens int64
+}
+
 // errInvalidResult — ответ модели не прошёл валидацию ни с первой, ни с
 // repair-попытки: терминальный случай (повтор с тем же контекстом бессмыслен).
 type errInvalidResult struct{ err error }
@@ -63,11 +77,18 @@ type modelStats struct {
 }
 
 // usageCounter — наблюдаемость модельного цикла фона: число вызовов и токены.
+// Потолок задачи (этап 38.8): при достижении capCalls/capTokens один раз
+// зовётся onCap — харнесс выключает инструменты, и модель обязана выдать
+// финальный TurnResult с тем, что уже найдено.
 type usageCounter struct {
 	agomiddleware.Base
-	mu     sync.Mutex
-	calls  int
-	tokens int64
+	mu        sync.Mutex
+	calls     int
+	tokens    int64
+	capCalls  int
+	capTokens int64
+	capped    bool
+	onCap     func()
 }
 
 func (u *usageCounter) OnLLMCall(next agomiddleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
@@ -82,7 +103,17 @@ func (u *usageCounter) OnLLMCall(next agomiddleware.LLMCallFunc, evs []events.Ev
 			u.tokens += *resp.Usage.CompletionTokens
 		}
 	}
+	overCalls := u.capCalls > 0 && u.calls >= u.capCalls
+	overTokens := u.capTokens > 0 && u.tokens >= u.capTokens
+	fire := (overCalls || overTokens) && !u.capped
+	if overCalls || overTokens {
+		u.capped = true
+	}
+	onCap := u.onCap
 	u.mu.Unlock()
+	if fire && onCap != nil {
+		onCap()
+	}
 	return resp, err
 }
 
@@ -132,6 +163,14 @@ func (s *Scheduler) cognitionMiddleware() agomiddleware.Middleware {
 }
 
 func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, extraMW []agomiddleware.Factory) (turnModelRun, error) {
+	return s.runTurnModelCapped(ctx, operation, system, userText, tools, scopeID, sessionID, modelCaps{}, extraMW)
+}
+
+// runTurnModelCapped — то же с потолком задачи (38.8): исчерпание вызовов или
+// токенов выключает инструменты на конфиге хода (тот же приём, что лимит
+// обращений §11.2), следующий модельный вызов обязан выдать финальный
+// TurnResult с уже найденным.
+func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, userText string, tools []agotools.Tool, scopeID, sessionID string, caps modelCaps, extraMW []agomiddleware.Factory) (turnModelRun, error) {
 	overrides := map[string]any(nil)
 	if sessionID != "" {
 		overrides = map[string]any{"session_id": sessionID}
@@ -160,7 +199,14 @@ func (s *Scheduler) runTurnModel(ctx context.Context, operation, system, userTex
 	}
 	toolMW.SetOnExhausted(chatCfg.DisableTools)
 
-	counting := &usageCounter{}
+	counting := &usageCounter{capCalls: caps.Calls, capTokens: caps.Tokens}
+	if caps.Calls > 0 || caps.Tokens > 0 {
+		counting.onCap = func() {
+			chatCfg.DisableTools()
+			s.logInfo("потолок фоновой задачи достигнут (%d вызовов / %d токенов) — дальше без инструментов, финал с тем, что есть",
+				caps.Calls, caps.Tokens)
+		}
+	}
 	reasoning := character.NewReasoningCapture()
 	opts := []agent.Option{
 		agent.WithConfig(cfg),
