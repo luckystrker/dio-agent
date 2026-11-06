@@ -44,6 +44,14 @@ func LoadDump(path string) (*Dump, error) {
 		// абляция temperature упала бы присваиванием в nil-map.
 		return nil, fmt.Errorf("дамп %q: пустой request — нужен JSON-объект", path)
 	}
+	var probe struct {
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(request, &probe); err == nil && probe.Truncated {
+		// Дамп >16 МиБ пишется заглушкой {truncated,prefix}: replay такого
+		// запроса бессмыслен (m7 ревью).
+		return nil, fmt.Errorf("дамп %q: request усечён при записи (>%d МиБ) — replay невозможен", path, maxDumpBodyBytes>>20)
+	}
 	return &d, nil
 }
 
@@ -128,7 +136,10 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	if err != nil {
 		// *url.Error печатает полный URL: если endpoint содержит секрет в
 		// query, он не должен попасть в терминал/лог replay.
-		msg := strings.ReplaceAll(err.Error(), target, redactURL(req.URL))
+		msg := strings.ReplaceAll(err.Error(), target, redactTarget(target))
+		if req.URL != nil {
+			msg = strings.ReplaceAll(msg, req.URL.String(), redactURL(req.URL))
+		}
 		return nil, fmt.Errorf("replay: провайдер недоступен: %s", msg)
 	}
 	defer resp.Body.Close()
@@ -143,24 +154,35 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	return reply, nil
 }
 
-// sameProviderHost — host url (дампа или endpoint) должен совпадать с
-// MODEL_ENDPOINT: ключ не отправляется чужому хосту.
+// sameProviderHost — схема и host url (дампа или endpoint) должны совпадать с
+// MODEL_ENDPOINT: ключ не отправляется чужому хосту. Кривой endpoint — отказ,
+// а не «поверим файлу»: направление ошибки должно быть безопасным (m6 ревью).
 func (r *Replayer) sameProviderHost(target string) error {
 	if strings.TrimSpace(r.Endpoint) == "" {
 		return nil
 	}
 	ep, err := url.Parse(ensureChatPath(r.Endpoint))
-	if err != nil {
-		return nil // кривой endpoint — пусть ответит сеть, ошибка не про хосты
+	if err != nil || ep.Host == "" {
+		return fmt.Errorf("replay: MODEL_ENDPOINT %q не разобран — ключ не отправляю; проверь .env", r.Endpoint)
 	}
 	tp, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("replay: url не разобран: %v", err)
+	if err != nil || tp.Host == "" {
+		return fmt.Errorf("replay: url %q не разобран — ключ не отправляю", redactTarget(target))
 	}
-	if !strings.EqualFold(ep.Host, tp.Host) {
-		return fmt.Errorf("replay: host url из дампа (%s) не совпадает с MODEL_ENDPOINT (%s) — ключ не отправляется чужому хосту; обнови MODEL_ENDPOINT или используй дамп того же провайдера", tp.Host, ep.Host)
+	if !strings.EqualFold(ep.Scheme, tp.Scheme) || !strings.EqualFold(ep.Host, tp.Host) {
+		return fmt.Errorf("replay: url из дампа (%s://%s) не совпадает со схемой/хостом MODEL_ENDPOINT (%s://%s) — ключ не отправляется чужому хосту; обнови MODEL_ENDPOINT или используй дамп того же провайдера",
+			tp.Scheme, tp.Host, ep.Scheme, ep.Host)
 	}
 	return nil
+}
+
+// redactTarget — адрес для сообщений об ошибках: без секретов query/userinfo.
+func redactTarget(target string) string {
+	u, err := url.Parse(target)
+	if err != nil {
+		return "<неразобранный url>"
+	}
+	return redactURL(u)
 }
 
 // ensureChatPath добавляет /chat/completions, если адрес — только база.

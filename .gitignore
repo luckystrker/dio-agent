@@ -2,9 +2,10 @@
 .env.*
 !.env.example
 .DS_Store
-# локальная сборка без -o (go build ./cmd/agent)
-agent
-agent.exe
+# локальная сборка без -o (go build ./cmd/agent) — только бинарник в корне,
+# иначе правило цепляет каталог cmd/agent/ (B0 ревью 2026-11-06)
+/agent
+/agent.exe
 evals/results/
 
 # Локальный мусор Windows-инструментов

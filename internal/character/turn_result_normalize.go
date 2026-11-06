@@ -207,6 +207,10 @@ func degradeAnswerWithoutText(r TurnResult) (TurnResult, bool) {
 	r.ImageURL = ""
 	if r.Reaction != "" || r.Sticker != "" {
 		r.Decision = DecisionReact
+		// Текста ответа больше нет: пересылка/реплаи к выкинутым сообщениям
+		// не должны пережить деградацию (m8 ревью 2026-11-06).
+		r.Forward = ""
+		r.ReplyToByMessage = nil
 		return r, true
 	}
 	r.Decision = DecisionIgnore

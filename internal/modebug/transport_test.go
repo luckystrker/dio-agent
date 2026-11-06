@@ -6,9 +6,11 @@ package modebug
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -340,9 +342,10 @@ func TestTransportRedactsSecretQuery(t *testing.T) {
 	}
 }
 
-// TestNewDumperTightensExistingDir — предсозданный каталог с широкими правами
-// ужесточается до 0700: дамп приватный.
-func TestNewDumperTightensExistingDir(t *testing.T) {
+// TestNewDumperKeepsExistingDirPerms — чужой существующий каталог не трогаем:
+// опечатка в MODEL_DEBUG_DUMP_DIR (/tmp) не должна менять права системы
+// (m5 ревью 2026-11-06). Свои файлы всё равно 0600.
+func TestNewDumperKeepsExistingDirPerms(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "dumps")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("каталог не создан: %v", err)
@@ -354,8 +357,8 @@ func TestNewDumperTightensExistingDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("каталог не найден: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Fatalf("права существующего каталога %o, хочу 700", perm)
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Fatalf("права существующего каталога %o изменены, хочу 755", perm)
 	}
 }
 
@@ -414,6 +417,8 @@ func TestTransportHidesAuthLikeHeaders(t *testing.T) {
 		Model:   "m",
 		ExtraHeaders: map[string]string{
 			"x-api-key": "secret",
+			"X-Api_Key": "secret2",
+			"X-Secret":  "secret3",
 			"Cookie":    "session=secret",
 			"x-trace":   "trace-1",
 		},
@@ -424,11 +429,82 @@ func TestTransportHidesAuthLikeHeaders(t *testing.T) {
 	rec, _, _ := readRecord(t, dumpDir)
 	for name := range rec.Headers {
 		lower := strings.ToLower(name)
-		if strings.Contains(lower, "api-key") || strings.Contains(lower, "cookie") {
+		if strings.Contains(lower, "api-key") || strings.Contains(lower, "api_key") ||
+			strings.Contains(lower, "secret") || strings.Contains(lower, "cookie") {
 			t.Fatalf("credential-заголовок в дампе: %s", name)
 		}
 	}
 	if rec.Headers["x-trace"] != "trace-1" {
 		t.Fatalf("безобидный заголовок потерян: %v", rec.Headers)
+	}
+}
+
+// TestTransportRedactsSecretInError — M1 ревью: *url.Error содержит полный URL,
+// секрет из query не должен попасть в поле error дампа.
+func TestTransportRedactsSecretInError(t *testing.T) {
+	dumpDir := t.TempDir()
+	d, err := NewDumper(dumpDir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	tr := &Transport{Base: failingRT{err: &url.Error{Op: "Post", URL: "https://gw.example/v1?api_key=secret-value", Err: errors.New("timeout")}}, Dumper: d}
+
+	ctx := WithCall(context.Background(), NewCall("turn", "12"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://gw.example/v1?api_key=secret-value", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("запрос не собран: %v", err)
+	}
+	if _, rerr := tr.RoundTrip(req); rerr == nil {
+		t.Fatal("ошибка транспорта потеряна")
+	}
+	rec, _, _ := readRecord(t, dumpDir)
+	if strings.Contains(rec.Error, "secret-value") {
+		t.Fatalf("секрет в error дампа: %s", rec.Error)
+	}
+	if rec.Error == "" {
+		t.Fatal("текст ошибки не записан")
+	}
+}
+
+// TestDumperKeepsBothAttempts — m4 ревью: повтор задачи с тем же operation не
+// затирает файлы первой попытки (суффикс -r2).
+func TestDumperKeepsBothAttempts(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDumper(dir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	rec := Record{Task: "intention:42:1", Call: 1, Request: json.RawMessage(`{}`)}
+	d.Write(rec)
+	d.Write(rec)
+	for _, want := range []string{"bg-intention-42-1-call-1.json", "bg-intention-42-1-call-1-r2.json"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Fatalf("нет файла %s: %v", want, err)
+		}
+	}
+}
+
+// TestDumperPruneRemovesStaleTmp — m3 ревью: осиротевший .tmp — свой файл и
+// удаляется ретенцией.
+func TestDumperPruneRemovesStaleTmp(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDumper(dir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	stale := filepath.Join(dir, "turn-5-call-1.json.tmp")
+	if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("tmp не создан: %v", err)
+	}
+	old := time.Now().Add(-Retention - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("время не подменено: %v", err)
+	}
+	removed, err := d.Prune(time.Now(), Retention)
+	if err != nil {
+		t.Fatalf("ретенция: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("удалено %d, хочу 1 (свой tmp)", removed)
 	}
 }

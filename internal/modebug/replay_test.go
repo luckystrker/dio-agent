@@ -139,3 +139,52 @@ func TestReplayerForcesNonStream(t *testing.T) {
 		t.Fatalf("stream_options остался: %v", got["stream_options"])
 	}
 }
+
+// TestLoadDumpRejectsTruncatedRequest — m7 ревью: заглушка {truncated} — не
+// запрос, replay должен отказать явно, а не отправить её провайдеру.
+func TestLoadDumpRejectsTruncatedRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trunc.json")
+	raw := `{"turn_id":1,"request":{"truncated":true,"bytes":17000000,"prefix":"x"}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("дамп не создан: %v", err)
+	}
+	if _, err := LoadDump(path); err == nil || !strings.Contains(err.Error(), "усечён") {
+		t.Fatalf("усечённый request принят: %v", err)
+	}
+}
+
+// TestReplayerRejectsBrokenEndpoint — m6 ревью: непонятный MODEL_ENDPOINT —
+// отказ, а не «поверим файлу» (fail-closed).
+func TestReplayerRejectsBrokenEndpoint(t *testing.T) {
+	rep := &Replayer{Endpoint: "://плохой", APIKey: "secret-key"}
+	_, err := rep.Send(context.Background(), "https://provider.example/v1/chat/completions",
+		map[string]any{"model": "m"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "не разобран") {
+		t.Fatalf("кривой endpoint не отвергнут: %v", err)
+	}
+}
+
+// TestReplayerRejectsSchemeDowngrade — m6 ревью: сравнение схемы, а не только
+// хоста (https-endpoint не шлёт ключ на http-url из дампа).
+func TestReplayerRejectsSchemeDowngrade(t *testing.T) {
+	rep := &Replayer{Endpoint: "https://provider.example/v1", APIKey: "secret-key"}
+	_, err := rep.Send(context.Background(), "http://provider.example/v1/chat/completions",
+		map[string]any{"model": "m"}, nil)
+	if err == nil {
+		t.Fatal("http-url при https-endpoint принят — ключ ушёл бы по открытому каналу")
+	}
+}
+
+// TestApplyVariantsWarnsPanelMissing — m9 ревью: no-panel без панели — явное
+// предупреждение, а не молчаливое «без изменений».
+func TestApplyVariantsWarnsPanelMissing(t *testing.T) {
+	body := replayBody(t)
+	warnings, err := ApplyVariants(body, []string{"no-panel"},
+		PanelMarkers{Open: "[нет такой панели]", Close: "[/нет]"})
+	if err != nil {
+		t.Fatalf("абляция: %v", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "панель не найдена") {
+		t.Fatalf("нет предупреждения: %v", warnings)
+	}
+}

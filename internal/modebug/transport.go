@@ -19,7 +19,8 @@ import (
 )
 
 // Transport — RoundTripper с дампом и сбором reasoning. Base nil —
-// http.DefaultTransport на момент запроса.
+// http.DefaultTransport на момент запроса. Dumper меняется только до старта
+// трафика (InstallDefaultTransport под installMu): в бою установка одна.
 type Transport struct {
 	Base   http.RoundTripper
 	Dumper *Dumper
@@ -103,26 +104,27 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// читатель, который копит чанки, достаёт reasoning и (при включённом
 	// дампе) пишет файл по завершении. Обёртка нужна и без дампа: сбор
 	// reasoning_content (40.3) не должен зависеть от MODEL_DEBUG_DUMP_DIR.
+	// Цена: до 2 МиБ чанков в памяти на стрим даже без дампа — так reasoning
+	// и склеивается (n4 ревью); ход сейчас не стримит, так что цена нулевая.
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		if dump || call != nil {
-			resp.Body = &streamBody{rc: resp.Body, max: maxStreamDumpBytes, finish: func(raw []byte, truncated bool) {
-				content, reasoning, chunks, cut := parseSSE(raw)
-				call.AddReasoning(reasoning)
-				if !dump {
-					return
-				}
-				payload := map[string]any{
-					"stream":    true,
-					"content":   content,
-					"reasoning": reasoning,
-					"chunks":    chunks,
-				}
-				if truncated || cut {
-					payload["truncated"] = true
-				}
-				t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, payload, nil))
-			}}
-		}
+		// call здесь всегда не nil: без него был ранний pass-through выше.
+		resp.Body = &streamBody{rc: resp.Body, max: maxStreamDumpBytes, finish: func(raw []byte, truncated bool) {
+			content, reasoning, chunks, cut := parseSSE(raw)
+			call.AddReasoning(reasoning)
+			if !dump {
+				return
+			}
+			payload := map[string]any{
+				"stream":    true,
+				"content":   content,
+				"reasoning": reasoning,
+				"chunks":    chunks,
+			}
+			if truncated || cut {
+				payload["truncated"] = true
+			}
+			t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, payload, nil))
+		}}
 		return resp, nil
 	}
 
@@ -171,7 +173,13 @@ func (t *Transport) record(call *Call, seq int, req *http.Request, reqBody []byt
 		rec.Task = subj.ID
 	}
 	if err != nil {
-		rec.Error = err.Error()
+		// *url.Error несёт полный URL: секрет в query endpoint не должен
+		// утечь в файл через поле error (M1 ревью 2026-11-06).
+		msg := err.Error()
+		if req != nil && req.URL != nil {
+			msg = strings.ReplaceAll(msg, req.URL.String(), redactURL(req.URL))
+		}
+		rec.Error = msg
 	}
 	return rec
 }
@@ -210,8 +218,8 @@ func dumpHeaders(h http.Header) map[string]string {
 func sensitiveHeader(name string) bool {
 	n := strings.ToLower(name)
 	for _, marker := range []string{
-		"authorization", "api-key", "apikey", "x-api-key", "auth-token",
-		"cookie", "proxy-authorization",
+		"authorization", "api-key", "api_key", "apikey", "x-api-key",
+		"auth-token", "token", "secret", "cookie", "proxy-authorization",
 	} {
 		if strings.Contains(n, marker) {
 			return true

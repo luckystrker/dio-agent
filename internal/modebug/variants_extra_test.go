@@ -49,7 +49,7 @@ func textParts(t *testing.T, content any) []string {
 // работают с массивом частей (мультимодальный ход), картинку не трогают.
 func TestVariantLabelsAndTimestampsInContentParts(t *testing.T) {
 	body := partsBody()
-	if err := ApplyVariants(body, []string{"no-labels", "no-timestamps"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-labels", "no-timestamps"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляции: %v", err)
 	}
 	msgs := body["messages"].([]any)
@@ -74,7 +74,7 @@ func TestVariantLabelsAndTimestampsInContentParts(t *testing.T) {
 func TestVariantNoPanelInContentParts(t *testing.T) {
 	body := partsBody()
 	markers := PanelMarkers{Open: "[состояние хода]", Close: "[/состояние]"}
-	if err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	msgs := body["messages"].([]any)
@@ -97,7 +97,7 @@ func TestVariantHistoryLastNMultipleSystem(t *testing.T) {
 		map[string]any{"role": "user", "content": "u2"},
 		map[string]any{"role": "user", "content": "u3"},
 	}}
-	if err := ApplyVariants(body, []string{"history-last-2"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"history-last-2"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	msgs := body["messages"].([]any)
@@ -130,7 +130,7 @@ func TestVariantHistoryLastNMultipleSystem(t *testing.T) {
 func TestVariantHistoryLastNLargerThanHistory(t *testing.T) {
 	body := replayBody(t)
 	before := len(body["messages"].([]any))
-	if err := ApplyVariants(body, []string{"history-last-100"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"history-last-100"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	if got := len(body["messages"].([]any)); got != before {
@@ -150,7 +150,7 @@ func TestVariantAssistantAsJSONSkipsToolCalls(t *testing.T) {
 		map[string]any{"role": "tool", "content": "результат"},
 		map[string]any{"role": "assistant", "content": "нашёл"},
 	}}
-	if err := ApplyVariants(body, []string{"assistant-as-json"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"assistant-as-json"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	msgs := body["messages"].([]any)
@@ -175,7 +175,7 @@ func TestVariantNoPanelMissingClose(t *testing.T) {
 		map[string]any{"role": "user", "content": "хвост\n[состояние]\nслужебное без закрытия"},
 	}}
 	markers := PanelMarkers{Open: "[состояние]", Close: "[/состояние]"}
-	if err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	text := body["messages"].([]any)[1].(map[string]any)["content"].(string)
@@ -190,17 +190,17 @@ func TestVariantNoPanelMissingClose(t *testing.T) {
 // TestVariantDegenerateBodies — нет messages/tools, битая температура,
 // пустой список абляций: без паник и с явной ошибкой на мусор.
 func TestVariantDegenerateBodies(t *testing.T) {
-	if err := ApplyVariants(map[string]any{"model": "m"}, []string{"no-labels", "no-timestamps", "history-last-2", "assistant-as-json", "merge-assistant", "no-tools"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(map[string]any{"model": "m"}, []string{"no-labels", "no-timestamps", "history-last-2", "assistant-as-json", "merge-assistant", "no-tools"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляции на теле без messages: %v", err)
 	}
 	for _, bad := range []string{"temperature=abc", "temperature=", "temperature"} {
-		if err := ApplyVariants(replayBody(t), []string{bad}, PanelMarkers{}); err == nil {
+		if _, err := ApplyVariants(replayBody(t), []string{bad}, PanelMarkers{}); err == nil {
 			t.Fatalf("абляция %q: ожидаю ошибку", bad)
 		}
 	}
 	before, _ := json.Marshal(replayBody(t))
 	body := replayBody(t)
-	if err := ApplyVariants(body, nil, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, nil, PanelMarkers{}); err != nil {
 		t.Fatalf("пустой список абляций: %v", err)
 	}
 	after, _ := json.Marshal(body)

@@ -24,7 +24,6 @@ func TestMessageGarbageReasonLive(t *testing.T) {
 		{"}",
 			"пунктуация"},
 		{"Укажи JSON по схеме Turn", "JSON"},
-		{"ответ }", "обрывок"},
 		{"sticker: #3", "sticker"},
 		{"#3", "метка стикера"},
 	}
@@ -111,6 +110,21 @@ func TestDropGarbageMessagesAllBadDegrades(t *testing.T) {
 	}
 }
 
+// TestDropGarbageMessagesClearsForwardOnReact — m8 ревью: при деградации в
+// react пересылка/реплаи к выкинутым сообщениям не должны пережить ход.
+func TestDropGarbageMessagesClearsForwardOnReact(t *testing.T) {
+	got, _ := dropGarbageMessages(TurnResult{
+		Decision:         DecisionAnswer,
+		Messages:         []string{",", "],"},
+		Reaction:         "🤔",
+		Forward:          "#m5",
+		ReplyToByMessage: []MessageReply{{Index: 1, Ref: "#m1"}},
+	})
+	if got.Decision != DecisionReact || got.Forward != "" || len(got.ReplyToByMessage) != 0 {
+		t.Fatalf("react сохранил пересылку/реплаи: %+v", got)
+	}
+}
+
 // TestGarbageRepairHint — подсказка прямо говорит: messages — только текст
 // для собеседника, без меток и служебных полей.
 func TestGarbageRepairHint(t *testing.T) {
@@ -133,10 +147,40 @@ func TestMessageGarbageReasonNoFalsePositives(t *testing.T) {
 		"Send me the JSON later",
 		"ты очень kind, спасибо",
 		"я не помню, что было в messages, но ладно", // одно поле в живой речи
+		// m1 ревью: «по схеме» и императив+JSON — штатная речь про код.
+		"сделал по схеме из доки",
+		"всё собрал по схеме, работает",
+		"верни JSON из функции",
+		"выведи JSON в лог",
+		"напиши JSON конфига",
+		// m2 ревью: капс — акцент, а не формат.
+		"TRUST ME",
 	}
 	for _, text := range normal {
 		if reason := MessageGarbageReason(text); reason != "" {
 			t.Fatalf("ложное срабатывание на %q: %s", text, reason)
+		}
+	}
+}
+
+// TestMessageGarbageReasonCodeNotGarbage — M2 ревью: ответы с кодом не должны
+// чиниться/выкидываться страховкой. Скобки и двоеточия сами по себе — не
+// признак скопированного JSON.
+func TestMessageGarbageReasonCodeNotGarbage(t *testing.T) {
+	code := []string{
+		"func main() {",
+		"if err != nil {",
+		"x = {a: 1}",
+		"return nil }",
+		"[[1],[2]]",
+		"for i := range xs {\n\tfmt.Println(i)\n}",
+		"type Config struct {\n\tName string\n}",
+		`fmt.Printf("%v: %v", key, value)`,
+		`{"a": 1} — примерно так выглядит конфиг`,
+	}
+	for _, text := range code {
+		if reason := MessageGarbageReason(text); reason != "" {
+			t.Fatalf("код %q признан браком: %s", text, reason)
 		}
 	}
 }

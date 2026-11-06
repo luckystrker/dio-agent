@@ -1,8 +1,13 @@
 // Страховка от брака в messages (40.4): ответ может быть валидным JSON по
-// схеме TurnResult, но вместо реплик содержать мусор — обрывки JSON, имена
-// полей схемы, служебные метки или одну пунктуацию (живые ходы 246–248).
-// Схема TurnResult не меняется: брак ловится после разбора и чинится одним
-// repair; что осталось браком — выкидывается, все брак — деградация 38.2.
+// схеме TurnResult, но вместо реплик содержать мусор — одну пунктуацию, имена
+// полей схемы в JSON-окружении, служебные метки или приказ себе «верни JSON»
+// (живые ходы 246–248). Схема TurnResult не меняется: брак ловится после
+// разбора и чинится одним repair; что осталось браком — выкидывается, все
+// брак — деградация 38.2.
+//
+// Важно: обычный ответ с кодом (`func main() {`, `x = {a: 1}`, `return nil }`,
+// `[[1],[2]]`) браком НЕ считается — скобки/двоеточия сами по себе не признак
+// формата (M2 ревью 2026-11-06).
 //
 // Осмысленный, но не по адресу текст (например, жалоба модели на «шаблонный
 // текст») — не брак ФОРМЫ: его ловит отладка (40.1–40.2), а не страховка.
@@ -46,10 +51,10 @@ var turnResultMetaRe = regexp.MustCompile(`(?is)turnresult|\bjson\b.{0,40}(?:с�
 // числе без слова «схема»: «верни JSON», «Выведи JSON», «JSON only» — не
 // реплика. Живая техническая речь («Мне нравится формат JSON», «Send me the
 // JSON later») под шаблон не попадает: нужен императив из списка.
-var jsonInstructionRe = regexp.MustCompile(`(?is)(?:^|[^\p{L}])(?:верни|укажи|выдай|пришли|выведи|сгенерируй|напиши|ответь|отдай|сформируй|return|output|respond|reply)[^\p{L}].{0,30}json|\bjson\b\s*only\b`)
+var jsonInstructionRe = regexp.MustCompile(`(?is)^(?:верни|укажи|выдай|пришли|выведи|сгенерируй|напиши|ответь|отдай|сформируй|return|output|respond|reply)\s+(?:только\s+)?json(?:\s+only)?\s*[.!]?$|^json\s+only\s*[.!]?$`)
 
 // schemeMetaRe — «по схеме Turn/…» без слова JSON: тоже служебная речь.
-var schemeMetaRe = regexp.MustCompile(`(?is)по\s+схеме`)
+var schemeMetaRe = regexp.MustCompile(`(?is)по\s+схеме\s+(?:turn|turnresult|json)\b`)
 
 // stickerLabelOnlyRe — сообщение из одной метки стикера (#3) или метки
 // сообщения (#m12): это не реплика.
@@ -58,15 +63,6 @@ var stickerLabelOnlyRe = regexp.MustCompile(`^#\d+$`)
 // messageLabelAnyRe — метка сообщения внутри текста (ведущую срезает
 // stripLeadingMessageLabels, здесь — любая: признак скопированного формата).
 var messageLabelAnyRe = regexp.MustCompile(`#m\d+`)
-
-// jsonRunsRe — три и более JSON-знака подряд: «}}}», «]],», «":» повторы.
-var jsonRunsRe = regexp.MustCompile(`[{}\[\]",:]{3,}`)
-
-// jsonFragmentPrefixes/Suffixes — обрывки JSON в начале/конце сообщения.
-var (
-	jsonFragmentPrefixes = []string{`{`, `}`, `":`, `],`, `},`, `[,`, `,:`, `","`}
-	jsonFragmentSuffixes = []string{`}`, `{`, `":`, `],`, `},`, `,:`, `","`}
-)
 
 // smileyRe — пунктуация, которая всё-таки реплика: смайлики и смех.
 var smileyRe = regexp.MustCompile(`^(?:[)(]+|[:;=][-^'o]?[)(dDpP3]+|<3+|х+)$`)
@@ -126,19 +122,6 @@ func MessageGarbageReason(s string) string {
 	if turnResultMetaRe.MatchString(text) || jsonInstructionRe.MatchString(text) || schemeMetaRe.MatchString(text) {
 		return "служебная речь про JSON/схему"
 	}
-	for _, frag := range jsonFragmentPrefixes {
-		if strings.HasPrefix(text, frag) {
-			return "обрывок JSON в начале: " + frag
-		}
-	}
-	for _, frag := range jsonFragmentSuffixes {
-		if strings.HasSuffix(text, frag) {
-			return "обрывок JSON в конце: " + frag
-		}
-	}
-	if run := jsonRunsRe.FindString(text); run != "" {
-		return "ряд JSON-знаков (обрывок): " + run
-	}
 	if label := messageLabelAnyRe.FindString(text); label != "" {
 		return "метка сообщения в тексте: " + label
 	}
@@ -184,9 +167,6 @@ func fieldTokenGarbage(text string) string {
 		return token
 	}
 	if strings.Contains(token, "_") {
-		return token
-	}
-	if token == strings.ToUpper(token) {
 		return token
 	}
 	prev, _ := utf8.DecodeLastRuneInString(text[:matches[0][0]])

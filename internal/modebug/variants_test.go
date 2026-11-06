@@ -51,7 +51,7 @@ func messageTexts(t *testing.T, body map[string]any) []string {
 
 func TestVariantNoLabels(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"no-labels"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-labels"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	joined := strings.Join(messageTexts(t, body), "\n")
@@ -65,7 +65,7 @@ func TestVariantNoLabels(t *testing.T) {
 
 func TestVariantNoTimestamps(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"no-timestamps"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-timestamps"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	joined := strings.Join(messageTexts(t, body), "\n")
@@ -83,7 +83,7 @@ func TestVariantNoPanel(t *testing.T) {
 		Open:  "[состояние хода — служебное, не от собеседника]",
 		Close: "[/состояние]",
 	}
-	if err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-panel"}, markers); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	texts := messageTexts(t, body)
@@ -96,14 +96,14 @@ func TestVariantNoPanel(t *testing.T) {
 	}
 	// Панель без маркеров — не трогаем (меньше удивления, ничего не ломаем).
 	body2 := replayBody(t)
-	if err := ApplyVariants(body2, []string{"no-panel"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body2, []string{"no-panel"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция без маркеров: %v", err)
 	}
 }
 
 func TestVariantHistoryLastN(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"history-last-2"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"history-last-2"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	msgs := body["messages"].([]any)
@@ -118,14 +118,14 @@ func TestVariantHistoryLastN(t *testing.T) {
 	if !strings.Contains(texts[2], "а ты?") {
 		t.Fatalf("последнее сообщение потеряно: %v", texts)
 	}
-	if err := ApplyVariants(replayBody(t), []string{"history-last"}, PanelMarkers{}); err == nil {
+	if _, err := ApplyVariants(replayBody(t), []string{"history-last"}, PanelMarkers{}); err == nil {
 		t.Fatal("history-last без N должен быть ошибкой")
 	}
 }
 
 func TestVariantAssistantAsJSON(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"assistant-as-json"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"assistant-as-json"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	texts := messageTexts(t, body)
@@ -153,7 +153,7 @@ func TestVariantAssistantAsJSON(t *testing.T) {
 
 func TestVariantMergeAssistant(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"merge-assistant"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"merge-assistant"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	texts := messageTexts(t, body)
@@ -167,7 +167,7 @@ func TestVariantMergeAssistant(t *testing.T) {
 
 func TestVariantNoToolsAndTemperature(t *testing.T) {
 	body := replayBody(t)
-	if err := ApplyVariants(body, []string{"no-tools", "temperature=0.2"}, PanelMarkers{}); err != nil {
+	if _, err := ApplyVariants(body, []string{"no-tools", "temperature=0.2"}, PanelMarkers{}); err != nil {
 		t.Fatalf("абляция: %v", err)
 	}
 	if _, ok := body["tools"]; ok {
@@ -186,7 +186,7 @@ func TestVariantNoToolsAndTemperature(t *testing.T) {
 }
 
 func TestVariantUnknown(t *testing.T) {
-	if err := ApplyVariants(replayBody(t), []string{"nope"}, PanelMarkers{}); err == nil {
+	if _, err := ApplyVariants(replayBody(t), []string{"nope"}, PanelMarkers{}); err == nil {
 		t.Fatal("неизвестная абляция должна быть ошибкой")
 	}
 }

@@ -26,21 +26,28 @@ var messageLabelRe = regexp.MustCompile(`\s*#m\d+`)
 var timestampRe = regexp.MustCompile(`(?m)^\s*\[\s*(?:пн|вт|ср|чт|пт|сб|вс)\s+\d{2}\.\d{2}\s+\d{2}:\d{2}\s*\]\s*`)
 
 // ApplyVariants применяет абляции к телу запроса (мутирует body — вызывающий
-// делает копию на прогон). Неизвестная абляция — ошибка, а не тихое «ладно».
-func ApplyVariants(body map[string]any, variants []string, panel PanelMarkers) error {
+// делает копию на прогон). Возвращает предупреждения (например, no-panel не
+// нашёл панель: запрос ушёл без изменений — вывод replay не должен врать).
+// Неизвестная абляция — ошибка, а не тихое «ладно».
+func ApplyVariants(body map[string]any, variants []string, panel PanelMarkers) ([]string, error) {
+	var warnings []string
 	for _, v := range variants {
 		v = strings.TrimSpace(v)
 		if v == "" {
 			continue
 		}
-		if err := applyVariant(body, v, panel); err != nil {
-			return err
+		warning, err := applyVariant(body, v, panel)
+		if err != nil {
+			return warnings, err
+		}
+		if warning != "" {
+			warnings = append(warnings, warning)
 		}
 	}
-	return nil
+	return warnings, nil
 }
 
-func applyVariant(body map[string]any, variant string, panel PanelMarkers) error {
+func applyVariant(body map[string]any, variant string, panel PanelMarkers) (string, error) {
 	switch {
 	case variant == "no-labels":
 		transformMessages(body, func(s string) string {
@@ -51,31 +58,31 @@ func applyVariant(body map[string]any, variant string, panel PanelMarkers) error
 			return timestampRe.ReplaceAllString(s, "")
 		})
 	case variant == "no-panel":
-		return dropPanel(body, panel)
+		return dropPanel(body, panel), nil
 	case variant == "assistant-as-json":
-		return assistantAsJSON(body)
+		return "", assistantAsJSON(body)
 	case variant == "merge-assistant":
-		return mergeAssistant(body)
+		return "", mergeAssistant(body)
 	case variant == "no-tools":
 		delete(body, "tools")
 		delete(body, "tool_choice")
 	case strings.HasPrefix(variant, "history-last-"):
 		n, err := strconv.Atoi(strings.TrimPrefix(variant, "history-last-"))
 		if err != nil || n <= 0 {
-			return fmt.Errorf("абляция %q: нужно положительное N (history-last-10)", variant)
+			return "", fmt.Errorf("абляция %q: нужно положительное N (history-last-10)", variant)
 		}
-		return historyLastN(body, n)
+		return "", historyLastN(body, n)
 	case strings.HasPrefix(variant, "temperature="), strings.HasPrefix(variant, "temperature:"):
 		raw := strings.TrimPrefix(strings.TrimPrefix(variant, "temperature="), "temperature:")
 		t, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 		if err != nil {
-			return fmt.Errorf("абляция %q: температура должна быть числом", variant)
+			return "", fmt.Errorf("абляция %q: температура должна быть числом", variant)
 		}
 		body["temperature"] = t
 	default:
-		return fmt.Errorf("неизвестная абляция %q: допустимы no-labels, no-timestamps, no-panel, history-last-N, assistant-as-json, merge-assistant, no-tools, temperature=X", variant)
+		return "", fmt.Errorf("неизвестная абляция %q: допустимы no-labels, no-timestamps, no-panel, history-last-N, assistant-as-json, merge-assistant, no-tools, temperature=X", variant)
 	}
-	return nil
+	return "", nil
 }
 
 // transformMessages применяет f к тексту всех сообщений (строки или текстовые
@@ -116,62 +123,72 @@ func transformContent(content any, f func(string) string) any {
 }
 
 // dropPanel вырезает панель состояния из последнего user-сообщения (в том
-// числе из текстовой части мультимодального content).
-func dropPanel(body map[string]any, panel PanelMarkers) error {
+// числе из текстовой части мультимодального content) и возвращает
+// предупреждение, если панели не оказалось: иначе оператор сравнит «с
+// панелью / без панели», не зная, что второго условия не было (m9 ревью).
+func dropPanel(body map[string]any, panel PanelMarkers) string {
 	if panel.Open == "" || panel.Close == "" {
-		return nil
+		return "no-panel: маркеры панели не заданы — запрос без изменений"
 	}
 	msgs, ok := body["messages"].([]any)
 	if !ok {
-		return nil
+		return "no-panel: в запросе нет messages — без изменений"
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		mm, ok := msgs[i].(map[string]any)
 		if !ok || mm["role"] != "user" {
 			continue
 		}
-		mm["content"] = stripPanelContent(mm["content"], panel)
-		return nil
+		content, changed := stripPanelContent(mm["content"], panel)
+		mm["content"] = content
+		if !changed {
+			return "no-panel: панель не найдена в последнем user — запрос без изменений"
+		}
+		return ""
 	}
-	return nil
+	return "no-panel: в запросе нет user-сообщения — без изменений"
 }
 
-// stripPanelContent применяет stripPanel к строке или к текстовым частям.
-func stripPanelContent(content any, panel PanelMarkers) any {
+// stripPanelContent применяет stripPanel к строке или к текстовым частям;
+// changed — панель действительно найдена и вырезана.
+func stripPanelContent(content any, panel PanelMarkers) (any, bool) {
 	switch c := content.(type) {
 	case string:
 		return stripPanel(c, panel)
 	case []any:
+		changed := false
 		for _, part := range c {
 			pm, ok := part.(map[string]any)
 			if !ok || pm["type"] != "text" {
 				continue
 			}
 			if text, ok := pm["text"].(string); ok {
-				pm["text"] = stripPanel(text, panel)
+				var cut bool
+				pm["text"], cut = stripPanel(text, panel)
+				changed = changed || cut
 			}
 		}
-		return c
+		return c, changed
 	default:
-		return content
+		return content, false
 	}
 }
 
 // stripPanel удаляет блок панели (вместе с маркерами) и лишние края.
-func stripPanel(s string, panel PanelMarkers) string {
+func stripPanel(s string, panel PanelMarkers) (string, bool) {
 	start := strings.Index(s, panel.Open)
 	if start < 0 {
-		return s
+		return s, false
 	}
 	tail := s[start+len(panel.Open):]
 	endRel := strings.Index(tail, panel.Close)
 	if endRel < 0 {
 		// Панель без закрывающего маркера: режем до конца — иначе маркер
 		// останется в запросе и абляция будет ложной.
-		return strings.TrimSpace(s[:start])
+		return strings.TrimSpace(s[:start]), true
 	}
 	end := start + len(panel.Open) + endRel + len(panel.Close)
-	return strings.TrimSpace(s[:start] + s[end:])
+	return strings.TrimSpace(s[:start] + s[end:]), true
 }
 
 // historyLastN оставляет system-сообщения и N последних прочих сообщений.
