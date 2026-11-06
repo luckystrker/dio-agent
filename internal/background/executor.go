@@ -201,13 +201,12 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 			// очереди переносим на ближайший дневной слот, остальные отменяем.
 			// Иначе после дня с двумя инициативами наступает тишина, пока
 			// человек сам не напишет (живой смоук 2026-11-04).
-			if dailyLimitDeferral(reason) {
+			if until, ok := initiativeDeferralUntil(reason, it.Kind, s.now(), s.location); ok {
 				other, herr := s.intentions.HasOtherPending(ctx, it.TargetChatID, it.ID)
 				if herr != nil {
 					return out, herr
 				}
 				if !other {
-					until := nextDailySlot(s.now(), s.location, initiativeDailySlotHour)
 					// Срок намерения может истечь раньше слота: переносить
 					// некуда, честно отменяем, а не оставляем мёртвый pending.
 					if canDeferTo(until, it.ExpiresAt) {
@@ -366,6 +365,21 @@ func (s *Scheduler) runIntention(ctx context.Context, it Intention) (intentionOu
 				out.Latency = s.now().Sub(started)
 				return out, nil
 			}
+			// Постоянный отказ провайдера (401/403/400 формы запроса, m5 ревью
+			// 2026-11-06) повтором не лечится: терминально failed, а не пять
+			// попыток с мёртвым ключом. Контекст-длина сюда не входит (M5).
+			if character.IsPermanentProviderError(err) {
+				reason := "постоянный отказ провайдера: " + err.Error()
+				if turnID > 0 {
+					s.skipTurn(ctx, turnID, "generate", reason)
+				}
+				_ = s.intentions.Fail(ctx, it.ID, reason)
+				_ = s.wal.StepDone(ctx, unitID, stepGenerate, map[string]any{"failed": true})
+				_ = task.Fail(err)
+				out.Outcome, out.Detail = "failed", reason
+				out.Latency = s.now().Sub(started)
+				return out, nil
+			}
 			// Транзитный сбой (сеть/бюджет/БД): turn_started без model_output →
 			// повтор с тем же unit и новой попыткой (§12.2). Исчерпанный бюджет
 			// сюда тоже попадает (гонка с соседней задачей) — это не сбой
@@ -506,6 +520,22 @@ func dailyLimitDeferral(reason string) bool {
 	return strings.HasPrefix(reason, "достигнут дневной лимит инициатив")
 }
 
+// initiativeDeferralUntil — до какого момента переносится инициатива, которую
+// гейт не пустил (41.2 M6): дневной лимит — следующий дневной слот, пауза между
+// инициативами — её окончание. Отложенный ответ на прямой вопрос не должен
+// отменяться из-за паузы.
+func initiativeDeferralUntil(reason, kind string, now time.Time, loc *time.Location) (time.Time, bool) {
+	if dailyLimitDeferral(reason) {
+		return nextDailySlot(now, loc, initiativeDailySlotHour), true
+	}
+	// Пауза между инициативами переносит только reply_later (defer): для
+	// check_in/share «слишком рано» по-прежнему повод отменить инициативу.
+	if kind == KindReplyLater && strings.HasPrefix(reason, "между инициативами прошло меньше") {
+		return now.Add(MinProactiveGap), true
+	}
+	return time.Time{}, false
+}
+
 // canDeferTo — перенос на until имеет смысл, только если намерение ещё не
 // истечёт к этому моменту; иначе получится мёртвый pending.
 func canDeferTo(until time.Time, expires *time.Time) bool {
@@ -575,7 +605,16 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 			if err != nil {
 				return false, "", err
 			}
-			if allowed, reason := ProactiveAllowed(true, usage, now); !allowed {
+			// 41.2 M6: дневной лимит — только check_in/share; reply_later
+			// ограничен паузой между инициативами, а не дневным потолком.
+			var allowed bool
+			var reason string
+			if isDailyLimitedKind(it.Kind) {
+				allowed, reason = ProactiveAllowed(true, usage, now)
+			} else {
+				allowed, reason = proactiveGapAllowed(usage, now)
+			}
+			if !allowed {
 				return true, reason, nil
 			}
 		}

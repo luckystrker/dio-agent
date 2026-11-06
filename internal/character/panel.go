@@ -182,7 +182,7 @@ func buildStatePanel(d statePanelData) string {
 		lines = append(lines, "ты в разговоре группы — можешь ответить, поставить реакцию или промолчать")
 	}
 	if d.InitiativesExhausted {
-		lines = append(lines, "на сегодня инициатив больше нельзя — не планируй check_in/share")
+		lines = append(lines, "на сегодня инициатив больше нельзя — не планируй check_in/share; отложить ответ (defer) можно")
 	}
 	if d.WebTools && !d.WebExhausted {
 		lines = append(lines, "веб доступен инструментами (поиск и web_fetch) — только если нужен свежий факт, которого нет в истории и памяти, или тебя прямо просят поискать/найти/скинуть")

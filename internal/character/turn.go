@@ -279,9 +279,17 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 		// без нового LLM (§12.2, требование 9.7).
 		r.logf("ход %d: восстановление — применяю сохранённый результат без новой генерации", in.TurnID)
 		out.Recovered = true
-		// Картинка восстановления: проверка «URL из выдачи» уже была сделана
-		// при генерации (model_output пишется после неё) — allowed nil.
-		image := r.resolveImage(ctx, in.TurnID, state.Output.ImageURL, "", nil)
+		// Картинка восстановления (41.2 M1): качается ТОЛЬКО сохранённый
+		// вердикт проверки «URL из выдачи этого хода» и его alt (m18). Раньше
+		// восстановление качало сырой image_url как проверенный — выдуманный
+		// моделью адрес мог уйти пользователю.
+		if state.ImageURL == "" && state.Output.ImageURL != "" {
+			r.logf("ход %d: картинка не восстановлена — вердикт проверки в model_output отсутствует (image_url %q)",
+				in.TurnID, redactURLSecrets(state.Output.ImageURL))
+		}
+		image := r.fetchImage(ctx, in.TurnID, imageVerdict{
+			URL: state.ImageURL, Alt: sanitizeInlineNote(state.ImageAlt),
+		})
 		return r.apply(ctx, in, *state.Output, image, state.ImageNotes, out)
 	}
 
@@ -373,17 +381,21 @@ func (r *Runner) Run(ctx context.Context, in Input) (Outcome, error) {
 	// Описания картинок сопоставляются с событиями пачки в том же порядке
 	// нумерации, что видел модель (37.1); в память они не идут.
 	imageNotes := ImageNotesForEvents(visuals.Groups, result.ImageNotes)
-	if err := r.Journal.WriteModelOutput(ctx, in.TurnID, result, nil, repairs,
-		reasoning.First, reasoning.Repair, imageNotes); err != nil {
+	// Картинка хода (36.2) проверяется ДО записи model_output (41.2 M1):
+	// в журнал попадает только проверенный адрес и подпись, поэтому
+	// восстановление не может отправить отклонённый при генерации URL.
+	image := r.verifyImage(in.TurnID, result.ImageURL, webURLs.altFor(result.ImageURL), webURLs.all())
+	if err := r.Journal.WriteModelOutputWithImage(ctx, in.TurnID, result, nil, repairs,
+		reasoning.First, reasoning.Repair, imageNotes, image); err != nil {
 		return out, fmt.Errorf("ход %d: model_output не записан: %w", in.TurnID, err)
 	}
 
-	// Картинка хода (36.2): проверка выдачи, скачивание через fetch-слой §15.
-	// Не прошло — мягко обнуляется с логом, ход живёт.
-	image := r.resolveImage(ctx, in.TurnID, result.ImageURL, webURLs.altFor(result.ImageURL), webURLs.all())
+	// Скачивание — после записи вердикта: сбой сети не теряет решение о
+	// картинке, а повтор восстановления снова скачает уже проверенный адрес.
+	sentImage := r.fetchImage(ctx, in.TurnID, image)
 
 	// --- Фаза 4: применение одной транзакцией ---
-	return r.apply(ctx, in, result, image, imageNotes, out)
+	return r.apply(ctx, in, result, sentImage, imageNotes, out)
 }
 
 // invalidResultError — ответ модели не прошёл валидацию §11.2 ни с первой,
@@ -433,7 +445,7 @@ func truncateRawOutput(text string) string {
 // тот же пустой answer.
 func repairHint(perr error) string {
 	hint := RepairHint(perr, "TurnResult")
-	if strings.Contains(perr.Error(), "answer требует") {
+	if errors.Is(perr, ErrAnswerWithoutText) {
 		hint += " Ты выбрал decision=answer, но не написал ни одного сообщения: напиши текст в messages или выбери decision=react."
 	}
 	return hint
@@ -561,7 +573,7 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 				return &webUsageMW{name: searchName, db: r.Pool, remaining: bctx.WebSearchesLeft,
 					logger: r.Logger, onExhausted: func() {
 						cfg.DisableTools()
-						toolMW.SetClosed()
+						toolMW.SetClosedByLimit()
 					}}
 			},
 			func() agomiddleware.Middleware {
@@ -666,13 +678,13 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 		reasoningOut.Repair = reasoning.Take()
 		var repairBody string
 		result, repairBody, perr = parseReply(fixed, bctx.History)
-		if perr != nil && strings.Contains(perr.Error(), "answer требует") {
+		if perr != nil && errors.Is(perr, ErrAnswerWithoutText) {
 			// 38.2: answer без сообщений после repair — не терминальный
 			// пропуск, а деградация: есть реакция/стикер — decision=react
-			// (стикер остаётся), иначе ignore. Модель не написала текст, но ход
-			// всё ещё может доставить что-то видимое.
+			// (стикер остаётся), иначе ignore. M3: на прямом ходе молчаливый
+			// ignore не принимается — вопрос не должен исчезнуть без следа.
 			if degraded, ok := degradeAnswerWithoutText(result); ok {
-				if verr := degraded.Validate(); verr == nil {
+				if verr := degraded.Validate(); verr == nil && canDegradeEmptyAnswer(in.Direct, degraded) {
 					r.logf("ход %d: answer без текста после repair — деградация в %s (38.2)",
 						in.TurnID, degraded.Decision)
 					result, perr = degraded, nil
@@ -732,7 +744,7 @@ type toolJournalMW struct {
 func (m *toolJournalMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
 	ctx := context.Background()
 	if err := m.runner.Journal.WriteToolCallFor(ctx, m.turnID,
-		&ToolCallRecorded{CallID: ev.ID, Tool: ev.Name, Arguments: ev.Arguments}); err != nil {
+		&ToolCallRecorded{CallID: ev.ID, Tool: ev.Name, Arguments: redactURLSecrets(ev.Arguments)}); err != nil {
 		m.runner.logf("ход %d: tool_call не записан: %v", m.turnID, err)
 	}
 	result, err := next(ev, cx)
@@ -749,9 +761,12 @@ func (m *toolJournalMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *eve
 				texts = append(texts, string(b))
 			}
 		}
-		rec.Result = strings.Join(texts, "\n")
+		// Подписанные query-параметры (sig/token/key) в журнал не пишутся
+		// (m14 ревью 2026-11-06): модель видит исходный текст результата, а
+		// durable-след остаётся узнаваемым без секрета.
+		rec.Result = redactURLSecrets(strings.Join(texts, "\n"))
 	case events.ToolErrorEvent:
-		rec.Error = out.Error
+		rec.Error = redactURLSecrets(out.Error)
 	}
 	if werr := m.runner.Journal.WriteToolResultFor(ctx, m.turnID, rec); werr != nil {
 		m.runner.logf("ход %d: tool_result не записан: %v", m.turnID, werr)

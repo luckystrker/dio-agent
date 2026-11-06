@@ -34,6 +34,15 @@ func IsInitiativeKind(kind string) bool {
 	return false
 }
 
+// IsDailyLimitedInitiative — вид считается в ДНЕВНОМ лимите инициатив (§14.3,
+// 41.2 M6): check_in/share — проактивные сообщения, а reply_later — отложенный
+// ответ на прямой вопрос (defer): лимитируется расстоянием до следующей
+// инициативы, а не дневным потолком. Иначе исчерпанный лимит молча съедал бы
+// отложенный ответ — пользователь не получает ни сейчас, ни позже.
+func IsDailyLimitedInitiative(kind string) bool {
+	return kind == "check_in" || kind == "share"
+}
+
 // InitiativeDailyExhausted — дневной лимит инициатив чата исчерпан (§14.3).
 func InitiativeDailyExhausted(usage InitiativeUsage) bool {
 	return usage.Today >= InitiativePerChatPerDay
@@ -45,8 +54,12 @@ func InitiativeDailyExhausted(usage InitiativeUsage) bool {
 // Тот же запрос, что был в гейте фона (ProactiveUsage).
 func ReadInitiativeUsage(ctx context.Context, db DBTX, chatID int64) (InitiativeUsage, error) {
 	var usage InitiativeUsage
+	// 41.2 M6: дневной счёт — только check_in/share; reply_later (отложенный
+	// ответ на прямой вопрос) дневной потолок не расходует. Время последней
+	// инициативы (для паузы между инициативами) считается по всем видам.
 	err := db.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE i.updated_at >= date_trunc('day', now())),
+		SELECT count(*) FILTER (WHERE i.kind <> 'reply_later'
+		                         AND i.updated_at >= date_trunc('day', now())),
 		       max(i.updated_at)
 		FROM intentions i
 		WHERE i.kind = ANY($1)

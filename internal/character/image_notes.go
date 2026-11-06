@@ -3,9 +3,10 @@
 // пачки и сохраняет в social_events.image_note. История показывает описание
 // вместо плейсхолдера — модель помнит увиденное без повторной отправки байтов.
 //
-// Нумерация картинок — часть текста хода: «1 — фото от Данила, 2–6 — кадры
-// гифки». Кадры одного видео занимают один слот (одно описание на видео):
-// модель видит несколько картинок, но описывает сюжет ролика одной фразой.
+// Нумерация картинок — часть текста хода: «1 — фото от Данила, 2 — кадры
+// гифки (5 кадров)». Номер — ПОЗИЦИЯ (этап 41.2 M7), кадры одного видео
+// занимают одну позицию и описываются одной фразой: модель видит несколько
+// картинок, но сюжет ролика — одно описание.
 package character
 
 import (
@@ -29,7 +30,6 @@ const (
 type ImageGroup struct {
 	EventID int64
 	Kind    string
-	First   int // 1-based номер первой картинки группы
 	Count   int
 	// Label — человеческое описание позиции для нумерации: «фото от Данила»,
 	// «кадры гифки», «превью кружка».
@@ -68,21 +68,24 @@ type EventImageNote struct {
 }
 
 // ImageNumberingLine — пометка перед картинками: модель должна знать, какой
-// номер у какой картинки. Пусто — картинок нет.
+// номер у какой ПОЗИЦИИ (41.2 M7): кадры одного видео — одна позиция, поэтому
+// номера идут 1, 2, 3…, а не индексами картинок («фото, затем 2–6»), и фразы
+// image_notes не съезжают на чужое событие. Пусто — картинок нет.
 func ImageNumberingLine(groups []ImageGroup) string {
 	if len(groups) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(groups))
-	for _, g := range groups {
+	for i, g := range groups {
+		position := i + 1
 		if g.Count <= 1 {
-			parts = append(parts, fmt.Sprintf("%d — %s", g.First, g.Label))
+			parts = append(parts, fmt.Sprintf("%d — %s", position, g.Label))
 			continue
 		}
-		last := g.First + g.Count - 1
-		parts = append(parts, fmt.Sprintf("%d–%d — %s (%d кадров)", g.First, last, g.Label, g.Count))
+		parts = append(parts, fmt.Sprintf("%d — %s (%d кадров)", position, g.Label, g.Count))
 	}
-	return "[Картинки в сообщении: " + strings.Join(parts, "; ") + ". Верни image_notes по одной короткой фразе на номер.]"
+	return fmt.Sprintf("[Картинки в сообщении: %s. Верни image_notes по одной короткой фразе на позицию, всего %d.]",
+		strings.Join(parts, "; "), len(groups))
 }
 
 // historyMarkerRe — вид вложения в тексте события/истории.

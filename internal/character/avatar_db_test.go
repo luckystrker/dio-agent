@@ -39,7 +39,7 @@ func TestTurnEnqueuesAvatarCheckDB(t *testing.T) {
 
 	// Проверка выполнена (сутки не прошли): повторный ход не сдвигает срок и не
 	// дублирует строку — аватарку на обычных ходах не качаем.
-	if err := avatar.Complete(ctx, f.pool, 777, testScopeID, "u1", true, "кот"); err != nil {
+	if err := avatar.Complete(ctx, f.pool, 777, testScopeID, "u1", true, "кот", false); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	var next time.Time
@@ -100,7 +100,7 @@ func TestAvatarClaimLeaseDB(t *testing.T) {
 	if len(again) != 0 {
 		t.Fatalf("lease не удержал строку: %+v", again)
 	}
-	if err := avatar.Complete(ctx, pool, 777, testScopeID, "u1", true, "кот"); err != nil {
+	if err := avatar.Complete(ctx, pool, 777, testScopeID, "u1", true, "кот", false); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	var (

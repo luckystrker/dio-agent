@@ -304,12 +304,15 @@ type ToolKindCap struct {
 // финальным TurnResult.
 //
 // Если модель игнорирует и tool_choice=none (снова зовёт инструмент при уже
-// закрытых инструментах), срабатывает стоп-кран: middleware возвращает
+// закрытых инструментах) НА СЛЕДУЮЩЕМ модельном ходу — после того как подсказку
+// было видно, — срабатывает стоп-кран: middleware возвращает
 // финальный результат (ToolResult с Final=true), executor ago обращает его в
 // ModelResponse с ResponseForce — агентский цикл завершается без нового
-// модельного вызова. Тело крана: на прямом ходе — react «🤔», на
-// непрямом/фоновом — ignore (39.1: видимая реакция — только когда финальный
-// вызов без инструментов не дал валидного TurnResult).
+// модельного вызова. Вызовы одного блока tool-call'ов исполняются параллельно и
+// подсказку ещё не видели: кран внутри блока не взводится (B1 ревью 2026-11-06).
+// Тело крана: на прямом ходе — react «🤔», на непрямом/фоновом — ignore
+// (39.1: видимая реакция — только когда финальный вызов без инструментов не дал
+// валидного TurnResult).
 type ToolLimitMiddleware struct {
 	middleware.Base
 	limit  int
@@ -333,9 +336,16 @@ type ToolLimitMiddleware struct {
 	// warned — модель уже получила подсказку «инструменты закрыты, ответь
 	// текстом»; повторный вызов после неё замыкает ход краном.
 	warned bool
+	// modelCalls — сколько модельных вызовов прошло с начала хода (OnLLMCall),
+	// warnedAtCall — значение на момент подсказки. B1: вызовы инструментов
+	// ОДНОГО блока исполняются параллельно, и модель ещё не видела подсказку —
+	// кран взводится только если после подсказки был реальный модельный ход.
+	modelCalls   int
+	warnedAtCall int
 	// closedByReject — инструменты закрыты именно отказом лимита (39.1):
 	// только тогда невалидный финальный ответ деградирует в react, а не в
-	// терминальный пропуск.
+	// терминальный пропуск. Harness-закрытие (tool_choice=none с начала) сюда
+	// не входит (M4).
 	closedByReject bool
 	// direct — прямой ход (§5.2 приоритет 1): стоп-кран отдаёт видимую
 	// реакцию вместо молчаливого ignore.
@@ -372,6 +382,17 @@ func (m *ToolLimitMiddleware) SetClosed() {
 	m.mu.Unlock()
 }
 
+// SetClosedByLimit отмечает закрытие инструментов отказом ЛИМИТА из другого
+// middleware (суточный веб-лимит, 39.2): невалидный финальный ответ прямого
+// хода деградирует в видимую реакцию (39.1), как при отказе самого лимита
+// обращений (M4 различает «закрыли, потому что не нужны» и «закрыли отказом»).
+func (m *ToolLimitMiddleware) SetClosedByLimit() {
+	m.mu.Lock()
+	m.toolsClosed = true
+	m.closedByReject = true
+	m.mu.Unlock()
+}
+
 // SetDirect отмечает прямой ход: стоп-кран ответит видимой реакцией.
 func (m *ToolLimitMiddleware) SetDirect(direct bool) {
 	m.mu.Lock()
@@ -392,7 +413,9 @@ func (m *ToolLimitMiddleware) SetKindCaps(caps []ToolKindCap) {
 }
 
 // kindCapOver считает обращение вида и возвращает потолок, если он превышен
-// (вызывается под m.mu).
+// (вызывается под m.mu). Инструмент, не попавший ни в один явный вид, идёт в
+// «прочие» с тем же потолком, что у памяти (M2 ревью 2026-11-06): иначе новый
+// инструмент обходил бы гарантию раздельных потолков 38.4.
 func (m *ToolLimitMiddleware) kindCapOver(name string) *ToolKindCap {
 	for i := range m.kindCaps {
 		cap := &m.kindCaps[i]
@@ -407,7 +430,31 @@ func (m *ToolLimitMiddleware) kindCapOver(name string) *ToolKindCap {
 			return nil
 		}
 	}
+	if len(m.kindCaps) == 0 {
+		return nil
+	}
+	const otherKind = "other"
+	const otherLimit = memoryToolsLimit
+	m.kindSeen[otherKind]++
+	if m.kindSeen[otherKind] > otherLimit {
+		return &ToolKindCap{
+			Kind:   otherKind,
+			Limit:  otherLimit,
+			Reject: "лимит обращений к инструментам этого вида на ход исчерпан — отвечай тем, что уже есть",
+		}
+	}
 	return nil
+}
+
+// OnLLMCall считает модельные ходы хода. B1: кран взводится только после
+// подсказки, которую модель могла увидеть, — то есть после нового модельного
+// вызова; вызовы одного блока tool-call'ов идут параллельно и подсказку ещё не
+// видели.
+func (m *ToolLimitMiddleware) OnLLMCall(next middleware.LLMCallFunc, evs []events.Event, cx *agocontext.Context) (*events.ModelResponse, error) {
+	m.mu.Lock()
+	m.modelCalls++
+	m.mu.Unlock()
+	return next(evs, cx)
 }
 
 // OnToolExecution считает обращения и гасит лишние.
@@ -432,18 +479,23 @@ func (m *ToolLimitMiddleware) OnToolExecution(next middleware.ToolExecFunc, ev *
 			m.toolsClosed = true
 			m.closedByReject = true
 			m.warned = true
+			m.warnedAtCall = m.modelCalls
 			closeNow = true
 		case !m.warned:
 			// Инструменты были закрыты харнессом с самого начала (39.2):
-			// первый вызов — нарушение, но сначала даём подсказку.
-			m.closedByReject = true
+			// первый вызов — нарушение, но сначала даём подсказку. Это не
+			// «отказ лимита»: невалидный финальный ответ остаётся терминальным
+			// пропуском (M4).
 			m.warned = true
+			m.warnedAtCall = m.modelCalls
 		}
 	} else {
 		m.rejects = 0
 	}
-	// Кран — повторный вызов после уже выданной подсказки о закрытии.
-	crane := rejected && m.toolsClosed && warnedBefore && m.rejects >= stopCraneRejects
+	// Кран — повторный вызов после подсказки, которую модель уже могла видеть:
+	// между подсказкой и вызовом прошёл новый модельный ход (B1).
+	crane := rejected && m.warned && warnedBefore && m.rejects >= stopCraneRejects &&
+		m.modelCalls > m.warnedAtCall
 	direct := m.direct
 	onExhausted := m.onExhausted
 	rejects := m.rejects

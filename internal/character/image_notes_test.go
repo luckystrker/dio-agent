@@ -48,11 +48,12 @@ func TestParseTurnResultImageNotes(t *testing.T) {
 
 func TestImageNumberingLine(t *testing.T) {
 	groups := []ImageGroup{
-		{EventID: 1, Kind: imageKindPhoto, First: 1, Count: 1, Label: "фото от Данила"},
-		{EventID: 2, Kind: imageKindGIF, First: 2, Count: 5, Label: "кадры гифки"},
+		{EventID: 1, Kind: imageKindPhoto, Count: 1, Label: "фото от Данила"},
+		{EventID: 2, Kind: imageKindGIF, Count: 5, Label: "кадры гифки"},
 	}
 	line := ImageNumberingLine(groups)
-	for _, want := range []string{"1 — фото от Данила", "2–6 — кадры гифки (5 кадров)"} {
+	// 41.2 M7: нумерация — позиции групп, кадры гифки — одна позиция.
+	for _, want := range []string{"1 — фото от Данила", "2 — кадры гифки (5 кадров)", "всего 2"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("нумерация %q не содержит %q", line, want)
 		}
@@ -66,9 +67,9 @@ func TestImageNumberingLine(t *testing.T) {
 // слот), лишние описания отбрасываются, пустые позиции не затирают соседей.
 func TestImageNotesForEvents(t *testing.T) {
 	groups := []ImageGroup{
-		{EventID: 11, Kind: imageKindPhoto, First: 1, Count: 1},
-		{EventID: 12, Kind: imageKindSticker, First: 2, Count: 1},
-		{EventID: 13, Kind: imageKindGIF, First: 3, Count: 5},
+		{EventID: 11, Kind: imageKindPhoto, Count: 1},
+		{EventID: 12, Kind: imageKindSticker, Count: 1},
+		{EventID: 13, Kind: imageKindGIF, Count: 5},
 	}
 	notes := []string{"закат", "кот", "прыжок", "лишнее"}
 	got := ImageNotesForEvents(groups, notes)

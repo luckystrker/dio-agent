@@ -13,7 +13,8 @@ func TestChatBlockedError(t *testing.T) {
 	}{
 		{"бот заблокирован", &APIError{Method: "sendMessage", HTTPStatus: 403, Description: "Forbidden: bot was blocked by the user"}, true},
 		{"аккаунт удалён", &APIError{Method: "sendMessage", HTTPStatus: 403, Description: "Forbidden: user is deactivated"}, true},
-		{"чат не найден", &APIError{Method: "sendMessage", HTTPStatus: 400, Description: "Bad Request: chat not found"}, true},
+		{"чат не найден (400 — не повод для пометки, m6)", &APIError{Method: "sendMessage", HTTPStatus: 400, Description: "Bad Request: chat not found"}, false},
+		{"peer_id_invalid (400 — не повод для пометки, m6)", &APIError{Method: "sendMessage", HTTPStatus: 400, Description: "Bad Request: PEER_ID_INVALID"}, false},
 		{"бота выгнали из группы", &APIError{Method: "sendMessage", HTTPStatus: 403, Description: "Forbidden: bot was kicked from the supergroup chat"}, true},
 		{"нет прав в группе", &APIError{Method: "sendMessage", HTTPStatus: 403, Description: "Forbidden: not enough rights to send text messages to the chat"}, false},
 		{"флуд-контроль", &APIError{Method: "sendMessage", HTTPStatus: 429, Description: "Too Many Requests: retry after 5"}, false},

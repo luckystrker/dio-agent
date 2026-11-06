@@ -90,6 +90,12 @@ type ModelOutput struct {
 	// ImageNotes — сопоставленные с событиями описания картинок (этап 37.1):
 	// восстановление хода применяет те же описания, не скачивая картинки снова.
 	ImageNotes []EventImageNote `json:"image_notes,omitempty"`
+	// ImageURL/ImageAlt — вердикт проверки картинки хода (41.2 M1): только URL,
+	// прошедший проверку «из выдачи этого хода», и подпись со страницы. Пусто —
+	// картинки нет (не было или отклонена). Восстановление качает только
+	// проверенный адрес — выдуманный моделью URL в outbox не попадёт.
+	ImageURL string `json:"image_url,omitempty"`
+	ImageAlt string `json:"image_alt,omitempty"`
 }
 
 func (ModelOutput) EventType() string    { return EventTypeModelOutput }
@@ -139,7 +145,7 @@ func (DeliveryQueued) Conversational() bool { return false }
 type QueuedDelivery struct {
 	ID       int64  `json:"id"`
 	Position int    `json:"position"`
-	Kind     string `json:"kind"` // message | reaction | sticker | photo
+	Kind     string `json:"kind"` // message | reaction | sticker | photo | forward
 	Text     string `json:"text,omitempty"`
 	Reaction string `json:"reaction,omitempty"`
 	FileID   string `json:"file_id,omitempty"` // стикер: file_id из коллекции

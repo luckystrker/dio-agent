@@ -152,12 +152,63 @@ func isToolChoiceRejection(err error) bool {
 	return strings.Contains(msg, "tool_choice") || strings.Contains(msg, "tool choice")
 }
 
+// contextLengthMarkers — отказы 400, которые лечатся урезанием контекста или
+// повтором, а не «тем же запросом навсегда» (41.2 M5): фон не должен отправлять
+// эпизод в 24-часовой cooldown из-за длины.
+var contextLengthMarkers = []string{
+	"context_length_exceeded",
+	"context length",
+	"maximum context",
+	"context window",
+	"prompt is too long",
+	"too many tokens",
+	"input is too long",
+	"reduce the length",
+}
+
+// isContextLengthError — 400 про слишком длинный контекст/промпт.
+func isContextLengthError(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok || code != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range contextLengthMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSchemaRejection — 400, которым провайдер отказывает именно в строгой
+// JSON-схеме (response_format/json_schema/structured output). m3: после
+// фолбэка без tool_choice провайдер может отвергнуть и её — тогда один повтор
+// без схемы, а не терминальный отказ.
+func isSchemaRejection(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok || code != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"response_format", "json_schema", "json schema", "structured output", "structured_output"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsPermanentProviderError — отказ провайдера, который не лечится повтором
-// с тем же контекстом: 4xx, кроме 429 (флуд-контроль). Фон использует это,
+// с тем же контекстом: 4xx, кроме 429 (флуд-контроль) и отказов про длину
+// контекста (41.2 M5 — они чинятся урезанием/повтором). Фон использует это,
 // чтобы 400 не жёг пять попыток одинаковым запросом (§12.1/§16, этап 38.6).
 func IsPermanentProviderError(err error) bool {
 	code, ok := modelStatus(err)
 	if !ok {
+		return false
+	}
+	if isContextLengthError(err) {
 		return false
 	}
 	return code >= 400 && code < 500 && code != 429
@@ -343,7 +394,18 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 		simple := opts
 		simple.Tools = nil
 		params.Extra = withoutToolChoice(params.Extra)
-		return callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
+		resp, ferr := callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
+		if ferr != nil && isSchemaRejection(ferr) {
+			// m3: провайдер не принимает и strict-схему — второй фолбэк без
+			// response_format. Сырая валидация TurnResult остаётся в раннере.
+			if c.logf != nil {
+				c.logf("провайдер отклонил strict-схему — один повтор без схемы и инструментов: %v", ferr)
+			}
+			noSchema := simple
+			noSchema.ResponseSchema = nil
+			return callWithShort429Retry(ctx, params, messages, conv, noSchema, c.logf)
+		}
+		return resp, ferr
 	}
 	if err != nil && isUnsupportedFeatureError(err) {
 		// 400 «feature is not yet supported» — опциональная часть запроса не

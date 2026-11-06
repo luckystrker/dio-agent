@@ -45,6 +45,9 @@ type Check struct {
 	FileUniqueID string // последний увиденный file_unique_id; пусто — не было
 	Visible      bool
 	Description  string // последнее записанное описание; пусто — не было
+	// InvisibleReported — «аватарки не видно» уже сообщали хотя бы раз (m26):
+	// повтор и переход visible→invisible не пишут память снова.
+	InvisibleReported bool
 }
 
 // Enqueue ставит проверку в очередь для первого разговора в скоупе и после
@@ -87,7 +90,8 @@ func ClaimDue(ctx context.Context, db DB, limit int) ([]Check, error) {
 		FROM due
 		WHERE p.user_id = due.user_id AND p.scope_id = due.scope_id
 		RETURNING p.user_id, p.scope_id, p.chat_id, COALESCE(p.actor_name, ''),
-		          COALESCE(p.file_unique_id, ''), p.visible, COALESCE(p.description, '')`,
+		          COALESCE(p.file_unique_id, ''), p.visible, COALESCE(p.description, ''),
+		          p.invisible_reported`,
 		limit, int64(Lease/time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("аватарки: очередь проверок не читается: %w", err)
@@ -97,7 +101,7 @@ func ClaimDue(ctx context.Context, db DB, limit int) ([]Check, error) {
 	for rows.Next() {
 		var c Check
 		if err := rows.Scan(&c.UserID, &c.ScopeID, &c.ChatID, &c.ActorName,
-			&c.FileUniqueID, &c.Visible, &c.Description); err != nil {
+			&c.FileUniqueID, &c.Visible, &c.Description, &c.InvisibleReported); err != nil {
 			return nil, fmt.Errorf("аватарки: строка проверки не читается: %w", err)
 		}
 		out = append(out, c)
@@ -108,15 +112,17 @@ func ClaimDue(ctx context.Context, db DB, limit int) ([]Check, error) {
 	return out, nil
 }
 
-// Complete фиксирует успешную проверку: увиденный file_unique_id, видимость и
-// описание; следующая проверка — через сутки.
-func Complete(ctx context.Context, db DB, userID int64, scopeID, fileUniqueID string, visible bool, description string) error {
+// Complete фиксирует успешную проверку: увиденный file_unique_id, видимость,
+// описание и маркер «не видно уже сообщали» (m26); следующая проверка — через
+// сутки.
+func Complete(ctx context.Context, db DB, userID int64, scopeID, fileUniqueID string, visible bool, description string, invisibleReported bool) error {
 	if _, err := db.Exec(ctx, `
 		UPDATE person_avatars
 		SET file_unique_id = NULLIF($3, ''), visible = $4, description = NULLIF($5, ''),
-		    checked_at = now(), next_check_at = now() + $6::bigint * interval '1 second'
+		    invisible_reported = $6,
+		    checked_at = now(), next_check_at = now() + $7::bigint * interval '1 second'
 		WHERE user_id = $1 AND scope_id = $2`,
-		userID, scopeID, fileUniqueID, visible, description,
+		userID, scopeID, fileUniqueID, visible, description, invisibleReported,
 		int64(CheckInterval/time.Second)); err != nil {
 		return fmt.Errorf("аватарки: результат пользователя %d не записан: %w", userID, err)
 	}

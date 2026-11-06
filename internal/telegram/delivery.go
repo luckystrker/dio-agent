@@ -320,6 +320,8 @@ func (l *DeliveryLoop) deliver(ctx context.Context, row OutboxItem) {
 			l.markUnknownAfterDBError(ctx, row, err.Error())
 			return
 		}
+		l.noteSent(row)
+		l.markGroupInvolvement(row.ChatID)
 		l.logger.Printf("delivery: картинка отправлена (turn %d, поз. %d, message_id %d, %s, %d байт)",
 			row.TurnID, row.Position, messageID, contentType, len(data))
 		return
@@ -458,6 +460,7 @@ func (l *DeliveryLoop) markUnknownAfterDBError(ctx context.Context, row OutboxIt
 		return
 	}
 	if changed {
+		l.deleteImageIfPhoto(qctx, row)
 		l.logger.Printf("delivery: sent не записан после отправки — исход неопределён, зависимых отменено %d (строка %d, turn %d, поз. %d)",
 			cancelled, row.ID, row.TurnID, row.Position)
 	}
@@ -508,6 +511,7 @@ func (l *DeliveryLoop) handleSendError(ctx context.Context, row OutboxItem, send
 			l.logger.Printf("delivery: failed не записан: %v", err)
 			return
 		}
+		l.deleteImageIfPhoto(qctx, row)
 		l.logger.Printf("delivery: доставка провалилась навсегда (turn %d, поз. %d): %s",
 			row.TurnID, row.Position, message)
 	default: // outcomeUnknown
@@ -516,8 +520,21 @@ func (l *DeliveryLoop) handleSendError(ctx context.Context, row OutboxItem, send
 			l.logger.Printf("delivery: unknown не записан: %v", err)
 			return
 		}
+		l.deleteImageIfPhoto(qctx, row)
 		l.logger.Printf("delivery: отправка неопределённа (unknown), зависимых отменено %d (turn %d, поз. %d): %s",
 			cancelled, row.TurnID, row.Position, message)
+	}
+}
+
+// deleteImageIfPhoto — терминальный исход (failed/unknown) не вернётся в
+// отправку: байты картинки (до 5 МиБ) больше не нужны (m13 ревью 2026-11-06).
+// Сбой удаления не влияет на доставку — байты добьёт ретенция.
+func (l *DeliveryLoop) deleteImageIfPhoto(ctx context.Context, row OutboxItem) {
+	if row.Kind != "photo" {
+		return
+	}
+	if err := l.repo.DeleteImage(ctx, row.ID); err != nil {
+		l.logger.Printf("delivery: байты картинки не удалены после терминального исхода (строка %d): %v", row.ID, err)
 	}
 }
 

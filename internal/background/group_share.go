@@ -23,7 +23,8 @@ const (
 	// GroupShareLiveWindow — насколько недавним должен быть живой разговор с
 	// ботом в группе, чтобы share был уместен.
 	GroupShareLiveWindow = 6 * time.Hour
-	// GroupSharePerDay — потолок инициатив в группу (share/reply_later).
+	// GroupSharePerDay — потолок share в группу за сутки (reply_later — 41.2 M6
+	// — дневным потолком не ограничивается).
 	GroupSharePerDay = 1
 	// groupShareTopicDistanceMax — абсолютный порог близости темы к истории
 	// группы (калибровка bge-m3, как у карточки памяти).
@@ -44,14 +45,16 @@ func (s *Scheduler) groupInitiativeAllowed(ctx context.Context, it Intention, no
 		ok, reason, err := s.groupShareAllowed(ctx, it, now)
 		return ok, reason, err
 	case KindReplyLater:
-		// Reply_later создан в этой группе (defer в ответ на сообщение):
-		// остаётся там, где создан, но с групповым потолком инициатив.
+		// Reply_later создан в этой группе (defer в ответ на сообщение) и
+		// остаётся там, где создан. 41.2 M6: это отложенный ответ на прямое
+		// обращение, а не проактивная инициатива — групповой дневной потолок
+		// share к нему не применяется, только пауза между инициативами.
 		usage, err := s.intentions.ProactiveUsage(ctx, it.TargetChatID)
 		if err != nil {
 			return false, "", err
 		}
-		if usage.Today >= GroupSharePerDay {
-			return false, fmt.Sprintf("дневной лимит инициатив группы (%d/сутки, §14.3)", GroupSharePerDay), nil
+		if allowed, reason := proactiveGapAllowed(usage, now); !allowed {
+			return false, reason, nil
 		}
 		return true, "", nil
 	default:

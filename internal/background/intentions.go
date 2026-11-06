@@ -49,6 +49,10 @@ const (
 
 func isInitiativeKind(kind string) bool { return character.IsInitiativeKind(kind) }
 
+// isDailyLimitedKind — вид под дневным лимитом инициатив (41.2 M6):
+// reply_later — отложенный ответ на прямой вопрос, а не проактивная инициатива.
+func isDailyLimitedKind(kind string) bool { return character.IsDailyLimitedInitiative(kind) }
+
 // Intention — строка intentions (поля, нужные исполнению; §14.1).
 type Intention struct {
 	ID            int64
@@ -76,6 +80,13 @@ func ProactiveAllowed(isPrivate bool, usage proactiveUsage, now time.Time) (bool
 	if usage.Today >= MaxProactivePerChatPerDay {
 		return false, fmt.Sprintf("достигнут дневной лимит инициатив (%d/сутки, §14.3)", MaxProactivePerChatPerDay)
 	}
+	return proactiveGapAllowed(usage, now)
+}
+
+// proactiveGapAllowed — пауза между инициативами (§14.3): не чаще раза в
+// MinProactiveGap. Действует и для reply_later, который не считается в дневном
+// лимите (41.2 M6).
+func proactiveGapAllowed(usage proactiveUsage, now time.Time) (bool, string) {
 	if usage.Last != nil && now.Sub(*usage.Last) < MinProactiveGap {
 		return false, fmt.Sprintf("между инициативами прошло меньше %v (§14.3)", MinProactiveGap)
 	}

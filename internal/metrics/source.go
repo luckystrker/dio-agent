@@ -609,6 +609,9 @@ func (s *PgSource) collectLifeEvents(ctx context.Context, snap *Snapshot, _ time
 // источник — web_usage (суточный счётчик поисков) и delivery_outbox
 // (подтверждённые sendPhoto), поэтому цифры переживают рестарт.
 func (s *PgSource) collectWeb(ctx context.Context, snap *Snapshot, _ time.Time) error {
+	// m19: отдельной настройки суточного лимита поиска нет — эффективный лимит
+	// и метрика берут одну константу. Когда лимит станет настраиваемым, сюда
+	// пойдёт SourceOptions (как у модельных пулов).
 	snap.Web.SearchesLimit = character.WebSearchDailyLimit
 	if err := s.pool.QueryRow(ctx, `
 		SELECT coalesce(sum(count), 0) FROM web_usage

@@ -62,7 +62,9 @@ func TestToolLimitStopCraneThreshold(t *testing.T) {
 		t.Fatalf("отказанный вызов ушёл в исполнитель: %d", executed)
 	}
 
-	// Модель игнорирует tool_choice=none — кран: финальный результат.
+	// Модель игнорирует tool_choice=none на СЛЕДУЮЩЕМ модельном ходу — кран:
+	// финальный результат (B1: внутри одного блока кран не взводится).
+	modelTurn(t, m)
 	tr, ok := call("c3").(*events.ToolResultEvent)
 	if !ok {
 		t.Fatalf("игнорирование закрытия не включило стоп-кран")
@@ -117,8 +119,9 @@ func TestToolLimitStopCraneDirectReacts(t *testing.T) {
 		return out
 	}
 
-	call("c1") // в лимите
-	call("c2") // первый отказ — закрытие инструментов
+	call("c1")      // в лимите
+	call("c2")      // первый отказ — закрытие инструментов
+	modelTurn(t, m) // следующий модельный ход: подсказку было видно
 	ev := call("c3")
 	tr, ok := ev.(*events.ToolResultEvent)
 	if !ok || !tr.Result.Final {

@@ -205,3 +205,51 @@ func TestAvatarUnchangedDoesNotCallModelDB(t *testing.T) {
 		t.Fatalf("неизменившаяся аватарка не должна плодить записи: %d", count)
 	}
 }
+
+// TestAvatarInvisibleAfterVisibleWritesOnceDB — m26 (этап 41.3): аватарка была
+// описана, потом скрыта — «не видно» пишется один раз (описание прошлой
+// аватарки не глушит сообщение), повтор и переходы не дублируют запись.
+func TestAvatarInvisibleAfterVisibleWritesOnceDB(t *testing.T) {
+	f, ctx := newFixture(t)
+	src := &fakeAvatarSource{} // аватарки нет / скрыта приватностью
+	f.sched.avatar = src
+	f.withModel(t)
+
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO person_avatars
+		  (user_id, scope_id, chat_id, actor_name, visible, description, next_check_at)
+		VALUES ($1, $2, $3, 'Коля', true, 'на аватарке кот', now() - interval '1 minute')`,
+		bgActor, bgScope, bgChatID); err != nil {
+		t.Fatalf("очередь аватарки не создана: %v", err)
+	}
+	if err := f.sched.Tick(ctx); err != nil {
+		t.Fatalf("такт: %v", err)
+	}
+	var count int
+	if err := f.pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_items
+		WHERE scope_id = $1 AND text = 'у Коля не видно аватарки'`, bgScope).Scan(&count); err != nil {
+		t.Fatalf("память не читается: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("«не видно» после описанной аватарки записано %d раз, хочу 1", count)
+	}
+
+	// Повторная проверка: маркер уже выставлен, запись не дублируется.
+	if _, err := f.pool.Exec(ctx, `
+		UPDATE person_avatars SET next_check_at = now() - interval '1 minute'
+		WHERE user_id = $1 AND scope_id = $2`, bgActor, bgScope); err != nil {
+		t.Fatalf("срок не сдвинут: %v", err)
+	}
+	if err := f.sched.Tick(ctx); err != nil {
+		t.Fatalf("повторный такт: %v", err)
+	}
+	if err := f.pool.QueryRow(ctx, `
+		SELECT count(*) FROM memory_items
+		WHERE scope_id = $1 AND text = 'у Коля не видно аватарки'`, bgScope).Scan(&count); err != nil {
+		t.Fatalf("память не читается: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("«не видно» повторено после перехода: %d", count)
+	}
+}

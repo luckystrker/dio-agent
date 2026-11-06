@@ -99,7 +99,10 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 		text = &reactionText
 		event.Text = &reactionText
 		status = StatusJournalOnly
-		if found {
+		// 41.3 m28: снятие реакции (ReactionAdded=false) — всегда история.
+		// Случайно поставленная и снятая 😂 не должна порождать ход: снятие
+		// не несёт адресованного боту сообщения.
+		if found && event.ReactionAdded {
 			if event.ChatType == ChatPrivate {
 				status = StatusPending
 			} else {

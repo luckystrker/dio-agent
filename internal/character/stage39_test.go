@@ -322,6 +322,8 @@ func TestToolLimitClosedAtStartWarnsThenCrane(t *testing.T) {
 	if !ok || !strings.Contains(te.Error, "закрыты") {
 		t.Fatalf("первый вызов при закрытых инструментах не получил подсказку: %#v", ev)
 	}
+	// Новый модельный ход: подсказку было видно, повторный вызов замыкает ход.
+	modelTurn(t, m)
 	ev, err = m.OnToolExecution(next, &events.ToolCallEvent{ID: "c2", Name: "memory_search"}, cx)
 	if err != nil {
 		t.Fatalf("второй вызов: %v", err)

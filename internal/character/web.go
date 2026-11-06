@@ -15,8 +15,8 @@ package character
 
 import (
 	"context"
+	"encoding/json"
 	"log"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -143,9 +143,13 @@ type ImageFetcher interface {
 	FetchImage(ctx context.Context, rawURL string) (*web.Image, error)
 }
 
-// webURLCollector собирает адреса, встретившиеся в результатах веб-инструментов
-// ЭТОГО хода. Картинка вне множества не отправляется: модель не может принести
-// URL из головы (§9.2 — данные извне только через проверенный канал).
+// webURLCollector собирает адреса, встретившиеся в СТРУКТУРИРОВАННОЙ выдаче
+// веб-инструментов ЭТОГО хода (41.2 M2): список картинок web_fetch
+// (`web.ImagesBlockHeader`) и ссылки результатов поиска (href/url/images в
+// JSON-выдаче). Адреса из свободного текста страницы не собираются: иначе
+// страница (и промпт-инъекция из web_fetch/памяти) управляла бы множеством
+// разрешённых image_url — проверка «URL из выдачи» аутентифицировала бы
+// подстроку, а не предложение картинки.
 type webURLCollector struct {
 	mu   sync.Mutex
 	urls map[string]struct{}
@@ -156,19 +160,23 @@ func newWebURLCollector() *webURLCollector {
 	return &webURLCollector{urls: make(map[string]struct{}), alts: make(map[string]string)}
 }
 
-func (c *webURLCollector) add(text string) {
-	urls := collectToolResultURLs(text)
-	alts := collectToolResultURLAlts(text)
+// addStructured принимает готовые пары «адрес — подпись» из структурированного
+// источника; пустые адреса отбрасываются.
+func (c *webURLCollector) addStructured(pairs map[string]string) {
 	c.mu.Lock()
-	for _, u := range urls {
-		c.urls[normalizeCandidateURL(u)] = struct{}{}
-	}
-	for u, alt := range alts {
-		if _, ok := c.alts[u]; !ok {
-			c.alts[u] = alt
+	defer c.mu.Unlock()
+	for raw, alt := range pairs {
+		u := normalizeCandidateURL(strings.TrimSpace(raw))
+		if u == "" {
+			continue
+		}
+		c.urls[u] = struct{}{}
+		if alt = sanitizeInlineNote(alt); alt != "" {
+			if _, ok := c.alts[u]; !ok {
+				c.alts[u] = alt
+			}
 		}
 	}
-	c.mu.Unlock()
 }
 
 // altFor — подпись картинки из выдачи хода (alt со страницы); пусто — нет.
@@ -189,63 +197,98 @@ func (c *webURLCollector) all() map[string]bool {
 	return out
 }
 
-// urlCandidateRe — грубое извлечение http(s)-адресов из текста результата
-// инструмента: поиск отдаёт JSON со ссылками, web_fetch — текст и список
-// картинок. Точную проверку (SSRF, content-type) делает fetch-слой.
-var urlCandidateRe = regexp.MustCompile(`https?://[^\s"'<>\[\]{}]+`)
-
-// collectToolResultURLAlts — подписи картинок из строк выдачи «URL — alt»
-// (web_fetch, этап 37.1): адрес и текст после него до конца строки.
-func collectToolResultURLAlts(text string) map[string]string {
-	out := make(map[string]string)
-	for _, line := range strings.Split(text, "\n") {
-		loc := urlCandidateRe.FindStringIndex(line)
-		if loc == nil {
-			continue
+// collectPageImageURLs — картинки из структурированного парта web_fetch:
+// список [{url, alt}]. Свободный текст результата не разбирается (41.2 M2):
+// страница не управляет множеством разрешённых image_url.
+func collectPageImageURLs(data any) map[string]string {
+	m := normalizeJSONData(data)
+	if m == nil {
+		return nil
+	}
+	items, _ := m["images"].([]any)
+	out := make(map[string]string, len(items))
+	for _, item := range items {
+		switch v := item.(type) {
+		case string:
+			out[v] = ""
+		case map[string]any:
+			u, _ := v["url"].(string)
+			if u == "" {
+				continue
+			}
+			alt, _ := v["alt"].(string)
+			out[u] = alt
 		}
-		raw := line[loc[0]:loc[1]]
-		u := normalizeCandidateURL(raw)
-		if u == "" || u != raw {
-			// Хвостовая пунктуация уже срезана — подпись начинается сразу
-			// после адреса в исходной строке.
-			raw = u
-		}
-		if raw == "" {
-			continue
-		}
-		tail := strings.TrimSpace(line[loc[1]:])
-		if !strings.HasPrefix(tail, "—") {
-			// Подпись идёт только в формате списка web_fetch «URL — текст»;
-			// произвольный хвост строки поиска подписью не считается.
-			continue
-		}
-		tail = strings.TrimSpace(strings.TrimPrefix(tail, "—"))
-		if tail == "" {
-			continue
-		}
-		out[normalizeCandidateURL(raw)] = tail
 	}
 	return out
 }
 
-// collectToolResultURLs — адреса из результата инструмента без хвостовой
-// пунктуации (точка в конце предложения не часть URL).
-func collectToolResultURLs(text string) []string {
-	raw := urlCandidateRe.FindAllString(text, -1)
-	out := make([]string, 0, len(raw))
-	seen := make(map[string]struct{}, len(raw))
-	for _, u := range raw {
-		u = normalizeCandidateURL(u)
-		if u == "" {
-			continue
-		}
-		if _, ok := seen[u]; ok {
-			continue
-		}
-		seen[u] = struct{}{}
-		out = append(out, u)
+// normalizeJSONData приводит значение выдачи к map[string]any через JSON:
+// инструменты ago кладут в DataInput Go-структуры (toolpacks.*SearchResponse),
+// а не map — обход по полям должен видеть одинаковую форму (41.2 M2).
+func normalizeJSONData(data any) map[string]any {
+	if m, ok := data.(map[string]any); ok {
+		return m
 	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// searchResultFieldKeys — поля JSON-выдачи поиска, которые являются адресами
+// (а не свободным текстом: title/body/content/snippet/answer адресами не
+// считаются — 41.2 M2).
+var searchResultFieldKeys = map[string]bool{
+	"href": true, "url": true, "image_url": true, "images": true,
+}
+
+// collectSearchResultURLs — адреса из структурированной JSON-выдачи поиска:
+// поля href/url/image_url/images на любой глубине. Свободный текст (body,
+// snippet, answer) не разбирается.
+func collectSearchResultURLs(data any) []string {
+	var out []string
+	var walk func(v any)
+	walk = func(v any) {
+		switch val := v.(type) {
+		case map[string]any:
+			for key, item := range val {
+				if searchResultFieldKeys[strings.ToLower(key)] {
+					out = append(out, stringURLs(item)...)
+					continue
+				}
+				walk(item)
+			}
+		case []any:
+			for _, item := range val {
+				walk(item)
+			}
+		}
+	}
+	walk(normalizeJSONData(data))
 	return out
+}
+
+// stringURLs вытаскивает адреса из значения поля выдачи (строка или список строк).
+func stringURLs(v any) []string {
+	switch val := v.(type) {
+	case string:
+		if u := normalizeCandidateURL(strings.TrimSpace(val)); u != "" && strings.HasPrefix(u, "http") {
+			return []string{u}
+		}
+	case []any:
+		var out []string
+		for _, item := range val {
+			out = append(out, stringURLs(item)...)
+		}
+		return out
+	}
+	return nil
 }
 
 // normalizeCandidateURL срезает обрамляющую пунктуацию, которая прилипает к
@@ -299,9 +342,10 @@ func hasUnmatchedOpenBracket(u string) bool {
 	return open > closed
 }
 
-// webResultMW — middleware журналирования адресов выдачи: после исполнения
-// веб-инструмента собирает URL из текста результата (36.2). Сбои инструмента
-// ничего не добавляют.
+// webResultMW — middleware сбора СТРУКТУРИРОВАННЫХ адресов выдачи (36.2,
+// 41.2 M2): у web_fetch — список картинок страницы (с подписями), у поиска —
+// поля JSON-выдачи href/url/images. Свободный текст результата адресов не даёт;
+// сбои инструмента ничего не добавляют.
 type webResultMW struct {
 	agomiddleware.Base
 	collector  *webURLCollector
@@ -310,32 +354,40 @@ type webResultMW struct {
 
 func (m *webResultMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events.ToolCallEvent, cx *agocontext.Context) (events.Event, error) {
 	result, err := next(ev, cx)
-	if err == nil && (ev.Name == webFetchToolName || ev.Name == m.searchName) {
-		if text := toolResultText(result); text != "" {
-			m.collector.add(text)
+	if err != nil {
+		return result, err
+	}
+	out, ok := events.AsValue(result).(events.ToolResultEvent)
+	if !ok {
+		return result, nil
+	}
+	switch ev.Name {
+	case webFetchToolName:
+		for _, p := range out.Result.Parts {
+			if part, ok := events.AsValue(p).(events.DataInput); ok {
+				if pairs := collectPageImageURLs(part.Data); len(pairs) > 0 {
+					m.collector.addStructured(pairs)
+				}
+			}
+		}
+	case m.searchName:
+		for _, p := range out.Result.Parts {
+			if part, ok := events.AsValue(p).(events.DataInput); ok {
+				pairs := make(map[string]string)
+				for _, u := range collectSearchResultURLs(part.Data) {
+					pairs[u] = ""
+				}
+				m.collector.addStructured(pairs)
+			}
 		}
 	}
 	return result, err
 }
 
-// toolResultText — текстовые части ToolResult (модель видит их же).
-func toolResultText(result events.Event) string {
-	out, ok := events.AsValue(result).(events.ToolResultEvent)
-	if !ok {
-		return ""
-	}
-	var text string
-	for _, p := range out.Result.Parts {
-		if part, ok := events.AsValue(p).(events.TextInput); ok {
-			text += part.Content + "\n"
-		}
-	}
-	return text
-}
-
 // webUsageMW — суточный учёт поисков разговорного пула (36.1). Счётчик
-// увеличивается до исполнения; исчерпание лимита внутри хода (remaining
-// досчитан при сборке контекста) отвечает модели отказом, а не сетевым вызовом.
+// увеличивается после УСПЕШНОГО исполнения (m16): исчерпание лимита внутри хода
+// (remaining досчитан при сборке контекста) отвечает модели отказом, а не
+// сетевым вызовом.
 type webUsageMW struct {
 	agomiddleware.Base
 	name   string
@@ -355,8 +407,10 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 		return next(ev, cx)
 	}
 	m.mu.Lock()
-	m.remaining--
-	over := m.remaining < 0
+	over := m.remaining <= 0
+	if !over {
+		m.remaining-- // резерв: параллельные вызовы одного блока не переберут лимит
+	}
 	m.mu.Unlock()
 	if over {
 		if m.logger != nil {
@@ -370,39 +424,80 @@ func (m *webUsageMW) OnToolExecution(next agomiddleware.ToolExecFunc, ev *events
 			Error:           "поиск на сегодня исчерпан — инструменты на этот ход закрыты, ответь текстом без поиска",
 		}, nil
 	}
-	if err := (web.UsageStore{}).IncrementSearch(context.Background(), m.db); err != nil && m.logger != nil {
-		m.logger.Printf("веб: поиск не учтён в суточном счётчике: %v", err)
+	result, err := next(ev, cx)
+	// m16: неуспешный поиск не тратит ни суточный счётчик, ни бюджет хода —
+	// резерв возвращается. В счётчик идёт только успешный вызов.
+	if err != nil || isToolFailure(result) {
+		m.mu.Lock()
+		m.remaining++
+		m.mu.Unlock()
+		return result, err
 	}
-	return next(ev, cx)
+	if ierr := (web.UsageStore{}).IncrementSearch(context.Background(), m.db); ierr != nil && m.logger != nil {
+		m.logger.Printf("веб: поиск не учтён в суточном счётчике: %v", ierr)
+	}
+	return result, err
 }
 
-// resolveImage — проверка и скачивание картинки хода (36.2): URL обязан быть в
-// выдаче этого хода (allowed nil — восстановление сохранённого model_output,
-// проверка была сделана при генерации), скачивание — fetch-слоем §15. Любая
-// проблема мягко обнуляет картинку: ход живёт, в лог — причина.
-func (r *Runner) resolveImage(ctx context.Context, turnID int64, rawURL, alt string, allowed map[string]bool) *OutboxImage {
+// isToolFailure — вызов завершился ошибкой инструмента (сеть/провайдер).
+func isToolFailure(result events.Event) bool {
+	_, failed := events.AsValue(result).(events.ToolErrorEvent)
+	return failed
+}
+
+// imageVerdict — решение проверки картинки хода ДО применения (41.2 M1):
+// проверенный адрес и подпись со страницы. Пустой URL — картинки нет (не было
+// или отклонена). Пишется в model_output, поэтому восстановление качает только
+// проверенный адрес и не теряет alt (m18).
+type imageVerdict struct {
+	URL string
+	Alt string
+}
+
+// verifyImage проверяет адрес картинки: полный http(s) из выдачи этого хода и
+// наличие fetch-слоя. Любая проблема мягко обнуляет картинку (ход живёт, в лог
+// — причина). allowed nil — проверка пропускается только для внутренних
+// тестовых путей; восстановление берёт сохранённый вердикт, а не nil.
+func (r *Runner) verifyImage(turnID int64, rawURL, alt string, allowed map[string]bool) imageVerdict {
 	u := normalizeCandidateURL(strings.TrimSpace(rawURL))
 	if u == "" {
-		return nil
+		return imageVerdict{}
 	}
 	if allowed != nil && !allowed[u] {
-		r.logf("ход %d: image_url %q не встречался в выдаче веб-инструментов этого хода — картинка не отправлена (36.2)", turnID, u)
+		r.logf("ход %d: image_url %q не встречался в выдаче веб-инструментов этого хода — картинка не отправлена (36.2)",
+			turnID, redactURLSecrets(u))
+		return imageVerdict{}
+	}
+	if r.ImageFetcher == nil {
+		r.logf("ход %d: image_url %q есть, но fetch-слой картинок не настроен — картинка не отправлена",
+			turnID, redactURLSecrets(u))
+		return imageVerdict{}
+	}
+	return imageVerdict{URL: u, Alt: sanitizeInlineNote(alt)}
+}
+
+// fetchImage скачивает проверенный адрес картинки через fetch-слой §15. Байты
+// нужны для outbox_images; сбой скачивания ход не роняет.
+func (r *Runner) fetchImage(ctx context.Context, turnID int64, v imageVerdict) *OutboxImage {
+	if v.URL == "" {
 		return nil
 	}
 	if r.ImageFetcher == nil {
-		r.logf("ход %d: image_url %q есть, но fetch-слой картинок не настроен — картинка не отправлена", turnID, u)
+		// Вердикт мог быть записан при включённом вебе, а после рестарта веб
+		// выключен (m1): не паникуем — картинки просто нет.
+		r.logf("ход %d: вердикт картинки есть, но fetch-слой не настроен — картинка не отправлена", turnID)
 		return nil
 	}
-	img, err := r.ImageFetcher.FetchImage(ctx, u)
+	img, err := r.ImageFetcher.FetchImage(ctx, v.URL)
 	if err != nil {
-		r.logf("ход %d: картинка %q не скачана — ход без картинки: %v", turnID, u, err)
+		r.logf("ход %d: картинка %q не скачана — ход без картинки: %v", turnID, redactURLSecrets(v.URL), err)
 		return nil
 	}
 	if img == nil || len(img.Bytes) == 0 {
-		r.logf("ход %d: картинка %q пустая — ход без картинки", turnID, u)
+		r.logf("ход %d: картинка %q пустая — ход без картинки", turnID, redactURLSecrets(v.URL))
 		return nil
 	}
-	r.logf("ход %d: картинка к отправке: %s (%s, %d байт)", turnID, img.URL, img.ContentType, len(img.Bytes))
-	alt = strings.TrimSpace(alt)
-	return &OutboxImage{SourceURL: img.URL, ContentType: img.ContentType, Bytes: img.Bytes, Alt: alt}
+	r.logf("ход %d: картинка к отправке: %s (%s, %d байт)",
+		turnID, redactURLSecrets(img.URL), img.ContentType, len(img.Bytes))
+	return &OutboxImage{SourceURL: img.URL, ContentType: img.ContentType, Bytes: img.Bytes, Alt: v.Alt}
 }

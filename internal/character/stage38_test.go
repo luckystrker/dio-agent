@@ -346,7 +346,9 @@ func TestToolLimitPerKindCaps(t *testing.T) {
 	if executed != 2 {
 		t.Fatalf("исполнено вызовов %d, хочу 2", executed)
 	}
-	// После закрытия любой другой вид тоже закрыт — вызов замыкает ход краном.
+	// После закрытия любой другой вид тоже закрыт — вызов на СЛЕДУЮЩЕМ
+	// модельном ходу замыкает ход краном (B1: в том же блоке крана нет).
+	modelTurn(t, m)
 	ev = call("web_search")
 	if tr, ok := ev.(*events.ToolResultEvent); !ok || !tr.Result.Final {
 		t.Fatalf("после закрытия веб-вызов не замкнут стоп-краном: %T", ev)
@@ -439,7 +441,9 @@ func TestToolLimitKindRejectClosesTools(t *testing.T) {
 	if closed != 1 {
 		t.Fatalf("первый отказ вида не закрыл инструменты: onExhausted=%d", closed)
 	}
-	// Модель игнорирует закрытие и снова зовёт инструмент — стоп-кран.
+	// Модель игнорирует закрытие на следующем модельном ходу и снова зовёт
+	// инструмент — стоп-кран (B1).
+	modelTurn(t, m)
 	ev, err = m.OnToolExecution(next, &events.ToolCallEvent{ID: "m4", Name: "web_search"}, cx)
 	if err != nil {
 		t.Fatalf("четвёртый вызов: %v", err)

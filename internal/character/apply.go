@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -167,6 +168,15 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// 41.3 m23: чтение и создание инициатив идут под advisory-блокировкой чата:
+	// два конкурентных применения одного чата не обойдут дневной лимит
+	// (check-then-act), не создав третью инициативу сверх потолка.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`,
+		fmt.Sprintf("apply-chat:%d", opts.ChatID)); err != nil {
+		return ApplyResult{}, fmt.Errorf("применение: блокировка чата не взята: %w", err)
+	}
+
 	// --- CAS строки хода: повторное применение отклоняется (§12.1, инвариант 4);
 	// терминальный провал (29.1) и пропуск тоже не «воскрешаются» применением.
 	tag, err := tx.Exec(ctx,
@@ -307,6 +317,9 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		} else if sticker, err := NewStickerRepo().ByLabel(ctx, tx, opts.Result.Sticker); err != nil {
 			return ApplyResult{}, err
 		} else if sticker == nil {
+			// m22: неизвестная метка/слово без эмодзи молча обнулялась — модель
+			// не узнавала, что промахнулась. Строка в лог (ход живёт).
+			log.Printf("применение: стикер %q не найден в коллекции — стикер не отправлен (33.1)", opts.Result.Sticker)
 			res.SkippedSticker = true
 		} else if frequent, ferr := stickerTooFrequent(ctx, tx, opts.ChatID, opts.TurnID); ferr != nil {
 			return ApplyResult{}, ferr
@@ -389,11 +402,13 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 
 	// --- намерения (§14.1): предложения модели + defer → reply_later (§11.2) ---
 	// Дневной лимит инициатив чата (§14.3, этап 33.2): тот же расчёт, что гейт
-	// фона. Исчерпан — новые check_in/share/reply_later не создаём: фон отменил
-	// бы их, а живая база копила десятки мёртвых строк за сутки. Исключение —
-	// одна инициатива, если в чате нет ни одной ожидающей: фон при наступлении
-	// срока перенесёт её на следующий слот (dailyLimitDeferral), иначе после
-	// дня с двумя инициативами наступает тишина, пока человек сам не напишет.
+	// фона. Исчерпан — новые check_in/share не создаём: фон отменил бы их, а
+	// живая база копила десятки мёртвых строк за сутки. reply_later (defer) не
+	// лимитируется дневным потолком (41.2 M6): это отложенный ответ на прямой
+	// вопрос. Исключение — одна инициатива, если в чате нет ни одной ожидающей:
+	// фон при наступлении срока перенесёт её на следующий слот
+	// (dailyLimitDeferral), иначе после дня с двумя инициативами наступает
+	// тишина, пока человек сам не напишет.
 	initiativeLimitReached := false
 	if chatType, cerr := ChatTypeOf(ctx, tx, opts.ChatID); cerr != nil {
 		return ApplyResult{}, cerr
@@ -415,7 +430,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 			})
 			continue
 		}
-		if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
+		if initiativeLimitReached && IsDailyLimitedInitiative(proposal.Kind) {
 			if limitSlotReserved {
 				res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
 					Kind: proposal.Kind, Topic: proposal.Topic,
@@ -458,7 +473,7 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		if created {
 			res.IntentionIDs = append(res.IntentionIDs, id)
 			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
-			if initiativeLimitReached && IsInitiativeKind(proposal.Kind) {
+			if initiativeLimitReached && IsDailyLimitedInitiative(proposal.Kind) {
 				limitSlotReserved = true
 			}
 			if raised != nil {
@@ -469,45 +484,41 @@ func ApplyTurn(ctx context.Context, pool *runtime.Pool, opts ApplyOptions) (Appl
 		}
 	}
 	if opts.Result.Decision == DecisionDefer {
-		if initiativeLimitReached {
-			// reply_later — инициатива по §14.3 (гейт фона считает его так же):
-			// при исчерпанном лимите не создаём и его.
-			res.LimitedIntentions = append(res.LimitedIntentions, LimitedIntention{
-				Kind: "reply_later", Topic: "отложенный ответ",
-			})
-		} else {
-			topic, err := deferTopic(ctx, tx, opts.TurnID)
-			if err != nil {
-				return ApplyResult{}, err
+		// 41.2 M6: defer — отложенный ответ на прямой вопрос, а не проактивная
+		// инициатива: дневной лимит инициатив его не блокирует (расстояние до
+		// следующей инициативы ограничивает гейт фона). Иначе при исчерпанном
+		// лимите пользователь не получал ни ответа сейчас, ни позже.
+		topic, err := deferTopic(ctx, tx, opts.TurnID)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		// defer модельный: тот же runtime-пол вида reply_later (26.2).
+		flooredDefer, floored := floorIntentionDelay("reply_later", *opts.Result.DeferHours)
+		var raisedDefer *RaisedIntention
+		if floored {
+			raisedDefer = &RaisedIntention{Kind: "reply_later", Topic: topic,
+				From: *opts.Result.DeferHours, To: flooredDefer}
+		}
+		id, created, dup, err := createIntention(ctx, tx, intentionRow{
+			kind:          "reply_later",
+			chatID:        opts.ChatID,
+			scopeID:       opts.ScopeID,
+			topic:         topic,
+			reason:        "decision=defer: персонаж отложил ответ (§11.2)",
+			delayHours:    flooredDefer,
+			relatedTurnID: opts.TurnID,
+		})
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		if created {
+			res.IntentionIDs = append(res.IntentionIDs, id)
+			deltas.IntentionIDs = append(deltas.IntentionIDs, id)
+			if raisedDefer != nil {
+				res.RaisedIntentions = append(res.RaisedIntentions, *raisedDefer)
 			}
-			// defer модельный: тот же runtime-пол вида reply_later (26.2).
-			flooredDefer, floored := floorIntentionDelay("reply_later", *opts.Result.DeferHours)
-			var raisedDefer *RaisedIntention
-			if floored {
-				raisedDefer = &RaisedIntention{Kind: "reply_later", Topic: topic,
-					From: *opts.Result.DeferHours, To: flooredDefer}
-			}
-			id, created, dup, err := createIntention(ctx, tx, intentionRow{
-				kind:          "reply_later",
-				chatID:        opts.ChatID,
-				scopeID:       opts.ScopeID,
-				topic:         topic,
-				reason:        "decision=defer: персонаж отложил ответ (§11.2)",
-				delayHours:    flooredDefer,
-				relatedTurnID: opts.TurnID,
-			})
-			if err != nil {
-				return ApplyResult{}, err
-			}
-			if created {
-				res.IntentionIDs = append(res.IntentionIDs, id)
-				deltas.IntentionIDs = append(deltas.IntentionIDs, id)
-				if raisedDefer != nil {
-					res.RaisedIntentions = append(res.RaisedIntentions, *raisedDefer)
-				}
-			} else if dup != nil {
-				res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
-			}
+		} else if dup != nil {
+			res.DuplicateIntentions = append(res.DuplicateIntentions, *dup)
 		}
 	}
 

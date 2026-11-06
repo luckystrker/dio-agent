@@ -4,6 +4,7 @@
 package background
 
 import (
+	"errors"
 	"testing"
 
 	agocontext "github.com/luckystrker/ago/context"
@@ -40,13 +41,43 @@ func TestUsageCounterCapsTokens(t *testing.T) {
 	next := func([]events.Event, *agocontext.Context) (*events.ModelResponse, error) {
 		return usageResp(20000, 15000), nil
 	}
-	for i := 0; i < 2; i++ {
+	// Второй вызов добирает потолок токенов, третий начинается уже с
+	// выключенными инструментами (m4: закрытие — со следующего хода, чтобы не
+	// отбрасывать tool-call'ы ответа, который добирал потолок).
+	for i := 0; i < 3; i++ {
 		if _, err := u.OnLLMCall(next, nil, nil); err != nil {
 			t.Fatalf("вызов %d упал: %v", i, err)
 		}
 	}
 	if disabled != 1 {
 		t.Fatalf("инструменты выключены %d раз, хочу 1 (40k токенов на втором вызове)", disabled)
+	}
+}
+
+// TestUsageCounterIgnoresFailedCalls — m4: ошибка провайдера не тратит потолок
+// звонков и не взводит его.
+func TestUsageCounterIgnoresFailedCalls(t *testing.T) {
+	disabled := 0
+	u := &usageCounter{capCalls: 2, onCap: func() { disabled++ }}
+	fail := func([]events.Event, *agocontext.Context) (*events.ModelResponse, error) {
+		return nil, errors.New("провайдер недоступен")
+	}
+	ok := func([]events.Event, *agocontext.Context) (*events.ModelResponse, error) {
+		return usageResp(10, 10), nil
+	}
+	for i := 0; i < 3; i++ {
+		_, _ = u.OnLLMCall(fail, nil, nil) // ошибка провайдера ожидаема
+	}
+	if st := u.stats(); st.Calls != 0 {
+		t.Fatalf("неуспешные вызовы учтены в потолке: %+v", st)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := u.OnLLMCall(ok, nil, nil); err != nil {
+			t.Fatalf("вызов %d: %v", i, err)
+		}
+	}
+	if disabled != 1 {
+		t.Fatalf("потолок не сработал после успешных вызовов: %d", disabled)
 	}
 }
 

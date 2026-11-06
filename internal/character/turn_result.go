@@ -18,6 +18,7 @@ package character
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -211,6 +212,11 @@ func parseTurnResult(raw []byte, history []HistoryMessage) (TurnResult, error) {
 	// опустевшее сообщение ушло в repair, а не в чат.
 	r.Messages = stripLeadingHistoryStamps(r.Messages)
 	r.Messages = stripLeadingMessageLabels(r.Messages)
+	// Метки сообщений в любом месте текста (m10): модель копирует их из
+	// истории не только в начало — «привет #m123» не должен уйти собеседнику.
+	for i := range r.Messages {
+		r.Messages[i] = stripMessageLabelsAnywhere(r.Messages[i])
+	}
 	r.Messages = stripCopiedAuthors(r.Messages, history)
 	if err := r.Validate(); err != nil {
 		// Нормализованный, но невалидный результат возвращается вместе с
@@ -341,6 +347,11 @@ func SanitizeInitiativeResult(r TurnResult) TurnResult {
 	return r
 }
 
+// ErrAnswerWithoutText — answer без сообщений (§11.2, 38.2): отдельный
+// сентинел, чтобы repair-подсказка и деградация не зависели от текста ошибки
+// (m30 ревью 2026-11-06).
+var ErrAnswerWithoutText = errors.New("turnresult: answer требует сообщений")
+
 // Validate проверяет структуру и правила результата (§11.2).
 func (r TurnResult) Validate() error {
 	switch r.Decision {
@@ -386,6 +397,11 @@ func (r TurnResult) Validate() error {
 	for _, note := range r.ImageNotes {
 		if runeLen(note) > maxImageNoteLength {
 			return fmt.Errorf("turnresult: описание картинки до %d символов, получено %d", maxImageNoteLength, runeLen(note))
+		}
+		// M8: описание — одна строка: перевод строки подделал бы строку
+		// доверенной истории (нормализация чистит, валидатор — второй пояс).
+		if strings.ContainsAny(note, "\n\r") {
+			return fmt.Errorf("turnresult: описание картинки должно быть одной строкой")
 		}
 	}
 	if len(r.Memory) > maxMemories {
@@ -478,7 +494,8 @@ func (r TurnResult) Validate() error {
 		// после него деградирует в react/ignore. Прежнее молчаливое принятие
 		// «answer с одной реакцией» (577fb25) отменено: пустой answer — не ответ.
 		if len(r.Messages) == 0 {
-			return fmt.Errorf("turnresult: answer требует от 1 до %d сообщений; хочешь только реакцию — decision=react", maxMessages)
+			return fmt.Errorf("%w: от 1 до %d сообщений; хочешь только реакцию — decision=react",
+				ErrAnswerWithoutText, maxMessages)
 		}
 	case DecisionReact:
 		// Реакция — смысл react; стикер без текста тоже доставляет что-то

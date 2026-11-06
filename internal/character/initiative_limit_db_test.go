@@ -2,7 +2,8 @@
 
 // БД-тесты этапа 33.2: когда дневной лимит инициатив личного чата исчерпан
 // (§14.3), панель говорит модели «больше нельзя», а применение хода не
-// создаёт новые check_in/share/reply_later.
+// создаёт новые check_in/share. reply_later (defer) дневным лимитом не
+// ограничивается — см. stage41_db_test.go (41.2 M6).
 package character
 
 import (
@@ -85,29 +86,6 @@ func TestApplyKeepsOneInitiativeAtDailyLimit(t *testing.T) {
 	}
 	if n := countIntentions(t, ctx, f); n != 3 {
 		t.Fatalf("намерений в чате %d, хочу 2 исполненных + 1 ожидающее: %v", n, n)
-	}
-}
-
-func TestApplySkipsDeferReplyLaterAtDailyLimit(t *testing.T) {
-	f, ctx := newFixture(t)
-	seedExhaustedInitiativeLimit(t, ctx, f)
-	f.seedTurn(t, ctx, 802, "поговорим позже")
-	f.withModel(&events.ModelResponse{Message: &events.ModelMessage{Content: `{"decision":"defer",` +
-		`"defer_hours":2,"reason":"сейчас не до разговора"}`}})
-
-	out, err := f.runner.Run(ctx, Input{TurnID: 802, ChatID: testChatID, ScopeID: testScopeID,
-		Batch: []BatchEvent{{EventID: 1, ActorID: 777, ActorName: "Коля", Text: "поговорим позже"}}})
-	if err != nil {
-		t.Fatalf("ход не выполнен: %v", err)
-	}
-	if len(out.Apply.IntentionIDs) != 0 {
-		t.Fatalf("defer создал reply_later при исчерпанном лимите: %v", out.Apply.IntentionIDs)
-	}
-	if len(out.Apply.LimitedIntentions) != 1 || out.Apply.LimitedIntentions[0].Kind != "reply_later" {
-		t.Fatalf("defer не отмечен как ограниченный: %+v", out.Apply.LimitedIntentions)
-	}
-	if n := countIntentions(t, ctx, f); n != 2 {
-		t.Fatalf("намерений в чате %d, хочу только 2 исполненных", n)
 	}
 }
 

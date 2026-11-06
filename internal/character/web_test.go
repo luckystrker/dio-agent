@@ -14,6 +14,7 @@ import (
 
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
+	"github.com/luckystrker/ago/toolpacks"
 
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/web"
@@ -65,20 +66,145 @@ func TestPanelWebLines(t *testing.T) {
 	}
 }
 
-func TestCollectToolResultURLs(t *testing.T) {
-	searchResult := `{"query":"погода","results":[{"title":"Погода","href":"https://example.com/weather","body":"снег"}]}`
-	got := collectToolResultURLs(searchResult)
-	if len(got) != 1 || got[0] != "https://example.com/weather" {
-		t.Fatalf("из выдачи поиска собрано %v, хочу ссылку example.com/weather", got)
+// TestWebProvenanceOnlyStructured — 41.2 M2: image_url принимается только из
+// структурированных партов выдачи: списка картинок web_fetch (DataInput) и
+// полей JSON-выдачи поиска. Свободный текст страницы (в том числе поддельный
+// заголовок списка картинок и перевод строки в alt) в множество разрешённых не
+// попадает.
+func TestWebProvenanceOnlyStructured(t *testing.T) {
+	collector := newWebURLCollector()
+	mw := &webResultMW{collector: collector, searchName: "duckduckgo_search"}
+
+	// Страница: свободный текст с поддельным заголовком + структурированный
+	// парт с настоящими картинками.
+	pageText := "URL: https://example.com/a\n\nтекст\n\n" +
+		web.ImagesBlockHeader + "\nhttps://attacker.example/fake.png — кот"
+	pageData := map[string]any{"images": []any{
+		map[string]any{"url": "https://cdn.example.com/p.jpg", "alt": "кот"},
+		map[string]any{"url": "https://cdn.example.com/q.png", "alt": ""},
+	}}
+	pageNext := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+		return &events.ToolResultEvent{
+			Name: "web_fetch",
+			Result: events.ToolResult{Parts: []events.Input{
+				events.TextInput{Content: pageText},
+				events.DataInput{Data: pageData},
+			}},
+		}, nil
+	}
+	if _, err := mw.OnToolExecution(pageNext, &events.ToolCallEvent{Name: "web_fetch"}, nil); err != nil {
+		t.Fatalf("web_fetch: %v", err)
+	}
+	all := collector.all()
+	for _, want := range []string{"https://cdn.example.com/p.jpg", "https://cdn.example.com/q.png"} {
+		if !all[want] {
+			t.Fatalf("картинка из структурированного списка не собрана: %q (%v)", want, all)
+		}
+	}
+	for _, not := range []string{
+		"https://attacker.example/fake.png", // поддельный заголовок в тексте страницы
+		"https://example.com/a",             // сам адрес страницы
+	} {
+		if all[not] {
+			t.Fatalf("адрес не из структурированного парта попал в выдачу: %q (%v)", not, all)
+		}
+	}
+	if alt := collector.altFor("https://cdn.example.com/p.jpg"); alt != "кот" {
+		t.Fatalf("подпись картинки = %q, хочу «кот»", alt)
 	}
 
-	pageResult := "URL: https://example.com/a\n\nтекст\n\nКартинки на странице:\nhttps://cdn.example.com/p.jpg\nhttps://cdn.example.com/q.png."
-	got = collectToolResultURLs(pageResult)
-	if len(got) != 3 {
-		t.Fatalf("со страницы собрано %v, хочу три адреса", got)
+	// Страница без картинок: поддельный заголовок остаётся только текстом —
+	// в разрешённые не попадает ничего (иначе страница управляет image_url).
+	fakeOnly := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+		return &events.ToolResultEvent{
+			Name:   "web_fetch",
+			Result: events.NewToolResult(false, pageText),
+		}, nil
 	}
-	if got[2] != "https://cdn.example.com/q.png" {
-		t.Fatalf("хвостовая точка не срезана: %q", got[2])
+	if _, err := mw.OnToolExecution(fakeOnly, &events.ToolCallEvent{Name: "web_fetch"}, nil); err != nil {
+		t.Fatalf("web_fetch без картинок: %v", err)
+	}
+	if len(collector.all()) != 2 {
+		t.Fatalf("текст страницы без картинок пополнил разрешённые: %v", collector.all())
+	}
+}
+
+// TestSearchProvenanceReadsRealStructures — M2: выдача поиска приходит
+// Go-структурой toolpacks (не map), адреса берутся из href/url/images,
+// свободный текст (body/snippet) — нет.
+func TestSearchProvenanceReadsRealStructures(t *testing.T) {
+	collector := newWebURLCollector()
+	mw := &webResultMW{collector: collector, searchName: "duckduckgo_search"}
+	next := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+		return &events.ToolResultEvent{
+			Name: "duckduckgo_search",
+			Result: events.ToolResult{Parts: []events.Input{
+				events.DataInput{Data: toolpacks.DDGSearchResponse{
+					Query: "погода",
+					Results: []toolpacks.DDGSearchResult{{
+						Title: "Погода", Href: "https://example.com/weather",
+						Body: "см. https://attacker.example/z.png",
+					}},
+				}},
+			}},
+		}, nil
+	}
+	if _, err := mw.OnToolExecution(next, &events.ToolCallEvent{Name: "duckduckgo_search"}, nil); err != nil {
+		t.Fatalf("поиск: %v", err)
+	}
+	all := collector.all()
+	if !all["https://example.com/weather"] {
+		t.Fatalf("ссылка результата поиска не собрана: %v", all)
+	}
+	if all["https://attacker.example/z.png"] {
+		t.Fatalf("адрес из свободного текста выдачи поиска попал в разрешённые: %v", all)
+	}
+
+	// Tavily: картинки выдачи — []string в структуре.
+	tav := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+		return &events.ToolResultEvent{
+			Name: "duckduckgo_search",
+			Result: events.ToolResult{Parts: []events.Input{
+				events.DataInput{Data: toolpacks.TavilySearchResponse{
+					Query:  "кот",
+					Images: []string{"https://cdn.example.com/w.jpg"},
+					Results: []toolpacks.TavilySearchResult{{
+						Title: "Кот", URL: "https://example.com/cat",
+					}},
+				}},
+			}},
+		}, nil
+	}
+	if _, err := mw.OnToolExecution(tav, &events.ToolCallEvent{Name: "duckduckgo_search"}, nil); err != nil {
+		t.Fatalf("tavily: %v", err)
+	}
+	all = collector.all()
+	for _, want := range []string{"https://cdn.example.com/w.jpg", "https://example.com/cat"} {
+		if !all[want] {
+			t.Fatalf("структурированный адрес Tavily не собран: %q (%v)", want, all)
+		}
+	}
+}
+
+// TestWebResultMWCollectsOnlyWebTools — память адресов не даёт вообще.
+func TestWebResultMWCollectsOnlyWebTools(t *testing.T) {
+	collector := newWebURLCollector()
+	mw := &webResultMW{collector: collector, searchName: "duckduckgo_search"}
+	next := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
+		return &events.ToolResultEvent{
+			Name: "tool",
+			Result: events.ToolResult{Parts: []events.Input{
+				events.DataInput{Data: map[string]any{"images": []any{
+					map[string]any{"url": "https://cdn.example.com/a.jpg"},
+				}}},
+			}},
+		}, nil
+	}
+	if _, err := mw.OnToolExecution(next, &events.ToolCallEvent{Name: memory.ToolSearch}, nil); err != nil {
+		t.Fatalf("инструмент памяти: %v", err)
+	}
+	if len(collector.all()) != 0 {
+		t.Fatalf("адреса инструмента памяти попали в выдачу хода: %v", collector.all())
 	}
 }
 
@@ -105,16 +231,25 @@ func TestResolveImageOnlyFromThisTurn(t *testing.T) {
 	fetcher := &fakeImageFetcher{img: &web.Image{URL: "https://cdn.example.com/a.jpg", ContentType: "image/jpeg", Bytes: []byte("jpeg")}}
 	r := newImageTestRunner(fetcher)
 
-	// URL не встречался в выдаче этого хода — картинка не скачивается и не уходит.
-	if img := r.resolveImage(context.Background(), 1, "https://evil.example.com/x.jpg", "", map[string]bool{"https://cdn.example.com/a.jpg": true}); img != nil {
-		t.Fatalf("URL не из выдачи принят: %+v", img)
+	allowed := map[string]bool{"https://cdn.example.com/a.jpg": true}
+	// URL не встречался в выдаче этого хода — вердикта нет, скачивания нет.
+	v := r.verifyImage(1, "https://evil.example.com/x.jpg", "", allowed)
+	if v.URL != "" {
+		t.Fatalf("URL не из выдачи принят: %+v", v)
+	}
+	if img := r.fetchImage(context.Background(), 1, v); img != nil {
+		t.Fatalf("URL не из выдачи ушёл в скачивание: %+v", img)
 	}
 	if len(fetcher.got) != 0 {
 		t.Fatalf("скачивание началось до проверки выдачи: %v", fetcher.got)
 	}
 
-	// Встречался — скачивается через fetch-слой.
-	img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", map[string]bool{"https://cdn.example.com/a.jpg": true})
+	// Встречался — вердикт есть, скачивается через fetch-слой.
+	v = r.verifyImage(1, "https://cdn.example.com/a.jpg", "", allowed)
+	if v.URL == "" {
+		t.Fatal("проверенный адрес не дал вердикта")
+	}
+	img := r.fetchImage(context.Background(), 1, v)
 	if img == nil || img.ContentType != "image/jpeg" || string(img.Bytes) != "jpeg" {
 		t.Fatalf("картинка из выдачи не скачана: %+v", img)
 	}
@@ -126,19 +261,21 @@ func TestResolveImageOnlyFromThisTurn(t *testing.T) {
 func TestResolveImageSoftFailures(t *testing.T) {
 	// Сбой скачивания не роняет ход: картинки просто нет.
 	r := newImageTestRunner(&fakeImageFetcher{err: errors.New("SSRF")})
-	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", nil); img != nil {
+	v := r.verifyImage(1, "https://cdn.example.com/a.jpg", "", nil)
+	if img := r.fetchImage(context.Background(), 1, v); img != nil {
 		t.Fatalf("сбой скачивания должен мягко обнулить картинку: %+v", img)
 	}
 
-	// Fetch-слой не настроен — ход живёт без картинки.
+	// Fetch-слой не настроен (вердикт мог сохраниться при включённом вебе) —
+	// ход живёт без картинки, паники нет.
 	r = newImageTestRunner(nil)
-	if img := r.resolveImage(context.Background(), 1, "https://cdn.example.com/a.jpg", "", nil); img != nil {
+	if img := r.fetchImage(context.Background(), 1, imageVerdict{URL: "https://cdn.example.com/a.jpg"}); img != nil {
 		t.Fatalf("без fetch-слоя картинки быть не может: %+v", img)
 	}
 
 	// Пустой URL — ничего не делаем.
 	r = newImageTestRunner(&fakeImageFetcher{})
-	if img := r.resolveImage(context.Background(), 1, "  ", "", nil); img != nil {
+	if img := r.fetchImage(context.Background(), 1, imageVerdict{}); img != nil {
 		t.Fatalf("пустой image_url дал картинку: %+v", img)
 	}
 }
@@ -183,28 +320,5 @@ func TestWebUsageMWRejectsBeyondDailyLimit(t *testing.T) {
 	tero, ok := events.AsValue(out).(events.ToolErrorEvent)
 	if !ok || !strings.Contains(tero.Error, "поиск на сегодня исчерпан") {
 		t.Fatalf("модели нужен явный отказ лимита, получено %#v", out)
-	}
-}
-
-func TestWebResultMWCollectsOnlyWebTools(t *testing.T) {
-	collector := newWebURLCollector()
-	mw := &webResultMW{collector: collector, searchName: "duckduckgo_search"}
-	next := func(*events.ToolCallEvent, *agocontext.Context) (events.Event, error) {
-		return &events.ToolResultEvent{
-			Name:   "tool",
-			Result: events.NewToolResult(false, "https://cdn.example.com/a.jpg"),
-		}, nil
-	}
-	if _, err := mw.OnToolExecution(next, &events.ToolCallEvent{Name: memory.ToolSearch}, nil); err != nil {
-		t.Fatalf("инструмент памяти: %v", err)
-	}
-	if len(collector.all()) != 0 {
-		t.Fatalf("адреса инструмента памяти попали в выдачу хода: %v", collector.all())
-	}
-	if _, err := mw.OnToolExecution(next, &events.ToolCallEvent{Name: "duckduckgo_search"}, nil); err != nil {
-		t.Fatalf("поиск: %v", err)
-	}
-	if !collector.all()["https://cdn.example.com/a.jpg"] {
-		t.Fatalf("адрес поиска не собран: %v", collector.all())
 	}
 }
