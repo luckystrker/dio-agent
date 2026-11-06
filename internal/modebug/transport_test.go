@@ -508,3 +508,32 @@ func TestDumperPruneRemovesStaleTmp(t *testing.T) {
 		t.Fatalf("удалено %d, хочу 1 (свой tmp)", removed)
 	}
 }
+
+// TestTransportRedactsUserinfoInError — тестировщик 2026-11-06: net/http
+// маскирует пароль в *url.Error как ***, точная замена не срабатывает —
+// регулярки должны убрать и userinfo, и query-секрет.
+func TestTransportRedactsUserinfoInError(t *testing.T) {
+	dumpDir := t.TempDir()
+	d, err := NewDumper(dumpDir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	full := "https://user:userpass@gw.example/v1?api_key=secret-value"
+	failing := failingRT{err: &url.Error{Op: "Post", URL: "https://user:***@gw.example/v1?api_key=secret-value", Err: errors.New("timeout")}}
+	tr := &Transport{Base: failing, Dumper: d}
+
+	ctx := WithCall(context.Background(), NewCall("turn", "13"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, full, strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("запрос не собран: %v", err)
+	}
+	if _, rerr := tr.RoundTrip(req); rerr == nil {
+		t.Fatal("ошибка транспорта потеряна")
+	}
+	rec, _, _ := readRecord(t, dumpDir)
+	for _, secret := range []string{"userpass", "secret-value"} {
+		if strings.Contains(rec.Error, secret) {
+			t.Fatalf("секрет %q в error дампа: %s", secret, rec.Error)
+		}
+	}
+}

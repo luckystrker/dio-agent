@@ -24,6 +24,7 @@ func TestMessageGarbageReasonLive(t *testing.T) {
 		{"}",
 			"пунктуация"},
 		{"Укажи JSON по схеме Turn", "JSON"},
+		{"TurnResult", "JSON"},
 		{"sticker: #3", "sticker"},
 		{"#3", "метка стикера"},
 	}
@@ -155,6 +156,16 @@ func TestMessageGarbageReasonNoFalsePositives(t *testing.T) {
 		"напиши JSON конфига",
 		// m2 ревью: капс — акцент, а не формат.
 		"TRUST ME",
+		"REASON: опоздал",
+		"no memory of that, confidence is high",
+		// повторный тестировщик: код с именами полей схемы — речь про код.
+		`json.Marshal(map[string]any{"reason": "x"})`,
+		`{"messages": []}`,
+		// m1 ревью: живая речь про TurnResult/JSON и схему.
+		"я смотрел JSON и схему",
+		"разобрал JSON по схеме",
+		"поправил TurnResult",
+		"у меня TurnResult не проходит",
 	}
 	for _, text := range normal {
 		if reason := MessageGarbageReason(text); reason != "" {

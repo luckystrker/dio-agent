@@ -110,7 +110,11 @@ func (d *Dumper) Write(rec Record) {
 	}
 	// Атомарная запись: temp + rename. Осиротевшие .tmp (падение между шагами)
 	// ретенция удаляет вместе с дампами: это наши файлы (m3 ревью).
-	name := d.availableName(filepath.Join(d.dir, recordFileName(rec)))
+	name, err := d.createTemp(filepath.Join(d.dir, recordFileName(rec)))
+	if err != nil {
+		d.log("дамп модели: файл не создан (свободное имя): %v", err)
+		return
+	}
 	tmp := name + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -205,21 +209,36 @@ func (d *Dumper) Prune(now time.Time, maxAge time.Duration) (int, error) {
 	return removed, nil
 }
 
-// availableName — свободное имя дампа: повтор той же фоновой задачи (ретрай с
-// тем же operation) не должен затирать улики первой попытки (m4 ревью).
-// Коллизия → суффикс -r2, -r3…
-func (d *Dumper) availableName(name string) string {
-	if _, err := os.Stat(name); os.IsNotExist(err) {
-		return name
-	}
+// createTemp — свободное имя дампа и зарезервированный temp: повтор той же
+// фоновой задачи (ретрай с тем же operation) не должен затирать улики первой
+// попытки (m4 ревью). Коллизия → суффикс -r2, -r3…; temp создаётся O_EXCL,
+// чтобы два параллельных Write не выбрали одно имя.
+func (d *Dumper) createTemp(name string) (string, error) {
 	base := strings.TrimSuffix(name, ".json")
-	for i := 2; i < 100; i++ {
-		candidate := fmt.Sprintf("%s-r%d.json", base, i)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			return candidate
+	for i := 1; i <= 100; i++ {
+		candidate := name
+		if i > 1 {
+			candidate = fmt.Sprintf("%s-r%d.json", base, i)
 		}
+		if _, err := os.Stat(candidate); err == nil {
+			continue
+		}
+		tmp := candidate + ".tmp"
+		f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+		_ = f.Close()
+		if _, err := os.Stat(candidate); err == nil {
+			_ = os.Remove(tmp)
+			continue
+		}
+		return candidate, nil
 	}
-	return fmt.Sprintf("%s-r%d.json", base, time.Now().UnixNano())
+	return "", fmt.Errorf("свободное имя не найдено (100 коллизий)")
 }
 
 // isDumpFileName — только файлы дампа (turn-<id>-call-<n>[-rK].json /

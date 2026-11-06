@@ -134,13 +134,9 @@ func (r *Replayer) Send(ctx context.Context, url string, request map[string]any,
 	started := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		// *url.Error печатает полный URL: если endpoint содержит секрет в
-		// query, он не должен попасть в терминал/лог replay.
-		msg := strings.ReplaceAll(err.Error(), target, redactTarget(target))
-		if req.URL != nil {
-			msg = strings.ReplaceAll(msg, req.URL.String(), redactURL(req.URL))
-		}
-		return nil, fmt.Errorf("replay: провайдер недоступен: %s", msg)
+		// *url.Error печатает полный URL (иногда с замаскированным паролем):
+		// секреты query/userinfo не должны попасть в терминал/лог replay.
+		return nil, fmt.Errorf("replay: провайдер недоступен: %s", redactErrorMessage(err.Error(), req.URL))
 	}
 	defer resp.Body.Close()
 	body, readErr := io.ReadAll(resp.Body)
@@ -163,7 +159,7 @@ func (r *Replayer) sameProviderHost(target string) error {
 	}
 	ep, err := url.Parse(ensureChatPath(r.Endpoint))
 	if err != nil || ep.Host == "" {
-		return fmt.Errorf("replay: MODEL_ENDPOINT %q не разобран — ключ не отправляю; проверь .env", r.Endpoint)
+		return fmt.Errorf("replay: MODEL_ENDPOINT %q не разобран — ключ не отправляю; проверь .env", redactTarget(r.Endpoint))
 	}
 	tp, err := url.Parse(target)
 	if err != nil || tp.Host == "" {

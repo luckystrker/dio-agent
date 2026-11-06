@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -175,11 +176,11 @@ func (t *Transport) record(call *Call, seq int, req *http.Request, reqBody []byt
 	if err != nil {
 		// *url.Error несёт полный URL: секрет в query endpoint не должен
 		// утечь в файл через поле error (M1 ревью 2026-11-06).
-		msg := err.Error()
-		if req != nil && req.URL != nil {
-			msg = strings.ReplaceAll(msg, req.URL.String(), redactURL(req.URL))
+		var u *url.URL
+		if req != nil {
+			u = req.URL
 		}
-		rec.Error = msg
+		rec.Error = redactErrorMessage(err.Error(), u)
 	}
 	return rec
 }
@@ -226,6 +227,26 @@ func sensitiveHeader(name string) bool {
 		}
 	}
 	return false
+}
+
+// sensitiveQueryInTextRe / userinfoInTextRe — вычищают секреты из текста
+// ошибки: *url.Error может не совпасть с исходным URL строкой (net/http
+// маскирует пароль как ***), поэтому query и userinfo правятся регулярками.
+var (
+	sensitiveQueryInTextRe = regexp.MustCompile(`(?i)([?&](?:api[_-]?key|apikey|token|secret|password|passwd|signature|sig|auth)[^=&\s"']*=)[^&\s"']+`)
+	userinfoInTextRe       = regexp.MustCompile(`://[^/\s@]+@`)
+)
+
+// redactErrorMessage — текст транспортной ошибки без секретов: точная замена
+// известных URL + регулярки на query-секреты и userinfo (M1 ревью 2026-11-06).
+func redactErrorMessage(msg string, urls ...*url.URL) string {
+	for _, u := range urls {
+		if u != nil {
+			msg = strings.ReplaceAll(msg, u.String(), redactURL(u))
+		}
+	}
+	msg = userinfoInTextRe.ReplaceAllString(msg, "://REDACTED@")
+	return sensitiveQueryInTextRe.ReplaceAllString(msg, "${1}REDACTED")
 }
 
 // sensitiveQueryParam — имя параметра URL, значение которого может быть

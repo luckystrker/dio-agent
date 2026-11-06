@@ -188,3 +188,17 @@ func TestApplyVariantsWarnsPanelMissing(t *testing.T) {
 		t.Fatalf("нет предупреждения: %v", warnings)
 	}
 }
+
+// TestReplayerBrokenEndpointRedactsSecret — тестировщик: кривой endpoint с
+// ключом в query не печатается в ошибке открытым текстом.
+func TestReplayerBrokenEndpointRedactsSecret(t *testing.T) {
+	rep := &Replayer{Endpoint: "gw.example/v1?api_key=SECRET", APIKey: "k"}
+	_, err := rep.Send(context.Background(), "https://provider.example/v1/chat/completions",
+		map[string]any{"model": "m"}, nil)
+	if err == nil {
+		t.Fatal("кривой endpoint принят")
+	}
+	if strings.Contains(err.Error(), "SECRET") {
+		t.Fatalf("секрет endpoint в ошибке: %v", err)
+	}
+}

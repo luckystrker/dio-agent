@@ -14,6 +14,7 @@
 package character
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -43,9 +44,10 @@ var schemaFieldTokens = []string{
 // «messagesекафедра» тоже ловится: после латиницы идёт кириллица — граница.
 var schemaFieldRe = regexp.MustCompile(`(?i)\b(?:` + strings.Join(schemaFieldTokens, "|") + `)\b`)
 
-// turnResultMetaRe — служебная речь модели про JSON/схему: «Укажи JSON по
-// схеме Turn», «return JSON by schema» — не реплика собеседнику.
-var turnResultMetaRe = regexp.MustCompile(`(?is)turnresult|\bjson\b.{0,40}(?:схем|schema)|(?:схем|schema).{0,40}\bjson\b`)
+// turnResultMetaRe — сообщение из одного «TurnResult»: имя схемы вместо
+// реплики. Живая речь «поправил TurnResult», «у меня TurnResult не проходит»
+// браком не считается (m1 ревью 2026-11-06).
+var turnResultMetaRe = regexp.MustCompile(`(?is)^\s*turnresult\s*[.!]?$`)
 
 // jsonInstructionRe — прямое указание себе «верни/укажи/выдай JSON», в том
 // числе без слова «схема»: «верни JSON», «Выведи JSON», «JSON only» — не
@@ -113,6 +115,10 @@ func MessageGarbageReason(s string) string {
 	if !speechContent(text) {
 		return "только пунктуация и пробелы"
 	}
+	if looksLikeCode(text) {
+		// Ответ с кодом/JSON-примером — речь, а не скопированный формат.
+		return ""
+	}
 	if token := fieldTokenGarbage(text); token != "" {
 		return fmt.Sprintf("имя поля TurnResult как токен: %s", token)
 	}
@@ -128,27 +134,82 @@ func MessageGarbageReason(s string) string {
 	return ""
 }
 
-// jsonNeighbor — знак рядом с токеном, выдающий скопированный формат:
-// `mood_delta:`, `"messages":`, `sticker: #3`. Запятая и «=» сюда НЕ входят:
-// «See the notes, please» — живая речь, а не формат.
-func jsonNeighbor(r rune) bool {
+// jsonSign — JSON-знак рядом с токеном, выдающий скопированный формат:
+// `{"messages":`, `["reason"]`. Запятая, «=» и двоеточие сами по себе сюда
+// НЕ входят: «See the notes, please» и «REASON: опоздал» — живая речь.
+func jsonSign(r rune) bool {
 	switch r {
-	case ':', '{', '}', '[', ']', '"':
+	case '{', '}', '[', ']', '"':
 		return true
 	default:
 		return false
 	}
 }
 
+// colonValueFormatted — после `поле:` идёт значение формата, а не слово:
+// `sticker: #3`, `Decision: answer`, `messages: [...]`, `reason: "x"`,
+// `defer_hours: 3`. «REASON: опоздал» — обычная фраза.
+func colonValueFormatted(text string, afterIndex int) bool {
+	rest := strings.TrimLeft(text[afterIndex+1:], " \t")
+	if rest == "" {
+		return false
+	}
+	switch rest[0] {
+	case '"', '#', '{', '[', '}', ']':
+		return true
+	}
+	if rest[0] >= '0' && rest[0] <= '9' {
+		return true
+	}
+	word := rest
+	if i := strings.IndexFunc(rest, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_')
+	}); i >= 0 {
+		word = rest[:i]
+	}
+	switch strings.ToLower(word) {
+	case "answer", "react", "ignore", "defer", "null", "true", "false", "none":
+		return true
+	}
+	return false
+}
+
+// codeIndicators — признаки ответа про код/данные: такой текст — речь, а не
+// скопированный формат TurnResult (M2 ревью 2026-11-06).
+var codeIndicators = []string{
+	"json.Marshal", "map[string]", "func ", ":= ", "print(", "fmt.",
+	"return ", "def ", "const ", "var ", "let ", "=>", "```",
+	"struct {", "package ", "import ",
+}
+
+// looksLikeCode — сообщение похоже на пример кода/данных: начинается с
+// ```, содержит характерные конструкции или целиком является JSON-значением.
+func looksLikeCode(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "```") {
+		return true
+	}
+	if (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {
+		return true
+	}
+	for _, marker := range codeIndicators {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // isLatin — латинская буква (включая расширения). Кириллица рядом с
 // латинским полем схемы — склейка вида «messagesекафедра».
 func isLatin(r rune) bool { return unicode.IsLetter(r) && r <= 0x024F }
 
-// fieldTokenGarbage — имя поля схемы в «форматном» окружении. Живая
-// английская речь не должна выкидываться: «no reason to worry» — не брак.
-// Признаки формата: сообщение состоит только из имени поля (и пунктуации),
-// два РАЗНЫХ поля схемы, имя с подчёркиванием (mood_delta, image_url…),
-// JSON-знак рядом (`sticker:`), склейка с не-латиницей или ВСЕ ЗАГЛАВНЫЕ.
+// fieldTokenGarbage — имя поля схемы в «форматном» окружении. Живая речь не
+// должна выкидываться: «no reason to worry», «no memory of that, confidence is
+// high», «REASON: опоздал» — не брак. Признаки формата: сообщение состоит
+// только из имени поля (и пунктуации); два разных поля, КАЖДОЕ в JSON-
+// окружении; имя с подчёркиванием (mood_delta, image_url…); JSON-знак рядом;
+// `поле: значение-формата`; склейка с не-латиницей («messagesекафедра»).
 func fieldTokenGarbage(text string) string {
 	matches := schemaFieldRe.FindAllStringIndex(text, -1)
 	if len(matches) == 0 {
@@ -163,7 +224,7 @@ func fieldTokenGarbage(text string) string {
 	for _, m := range matches {
 		distinct[strings.ToLower(text[m[0]:m[1]])] = struct{}{}
 	}
-	if len(distinct) >= 2 {
+	if len(distinct) >= 2 && allTokensFormatted(text, matches) {
 		return token
 	}
 	if strings.Contains(token, "_") {
@@ -171,7 +232,10 @@ func fieldTokenGarbage(text string) string {
 	}
 	prev, _ := utf8.DecodeLastRuneInString(text[:matches[0][0]])
 	next, _ := utf8.DecodeRuneInString(text[matches[0][1]:])
-	if jsonNeighbor(prev) || jsonNeighbor(next) {
+	if jsonSign(prev) || jsonSign(next) {
+		return token
+	}
+	if next == ':' && colonValueFormatted(text, matches[0][1]) {
 		return token
 	}
 	if (prev != 0 && unicode.IsLetter(prev) && !isLatin(prev)) ||
@@ -179,6 +243,20 @@ func fieldTokenGarbage(text string) string {
 		return token
 	}
 	return ""
+}
+
+// allTokensFormatted — каждое имя поля стоит в JSON-окружении: иначе два
+// случайных английских слова («memory», «confidence») — не формат.
+func allTokensFormatted(text string, matches [][]int) bool {
+	for _, m := range matches {
+		prev, _ := utf8.DecodeLastRuneInString(text[:m[0]])
+		next, _ := utf8.DecodeRuneInString(text[m[1]:])
+		if jsonSign(prev) || jsonSign(next) || (next == ':' && colonValueFormatted(text, m[1])) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // garbageMessages — причины брака для непустого списка сообщений.
