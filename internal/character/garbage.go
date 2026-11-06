@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // garbageRepairHint — подсказка единственного repair при браке сообщений.
@@ -38,6 +39,10 @@ var schemaFieldRe = regexp.MustCompile(`(?i)\b(?:` + strings.Join(schemaFieldTok
 // схеме Turn», «return JSON by schema» — не реплика собеседнику.
 var turnResultMetaRe = regexp.MustCompile(`(?is)turnresult|\bjson\b.{0,40}(?:схем|schema)|(?:схем|schema).{0,40}\bjson\b`)
 
+// jsonInstructionRe — прямое указание себе «верни/укажи/выдай JSON», в том
+// числе без слова «схема»: «верни JSON», «JSON only» — тоже не реплика.
+var jsonInstructionRe = regexp.MustCompile(`(?is)(?:верни|укажи|выдай|пришли|return|output|respond|reply|send).{0,30}json|json.{0,30}(?:only|схем|schema|формат|format)`)
+
 // messageLabelAnyRe — метка сообщения внутри текста (ведущую срезает
 // stripLeadingMessageLabels, здесь — любая: признак скопированного формата).
 var messageLabelAnyRe = regexp.MustCompile(`#m\d+`)
@@ -55,11 +60,19 @@ var (
 var smileyRe = regexp.MustCompile(`^(?:[)(]+|[:;=][-^'o]?[)(dDpP3]+|<3+|х+)$`)
 
 // emojiRune — символ-эмодзи (не любая пунктуация/математический знак).
+// Диапазоны включают эмодзи-презентацию без FE0F: ⭐ (2B50), ⏰ (23F0),
+// ⌛ (231B), стрелки-эмодзи (2190–21FF).
 func emojiRune(r rune) bool {
 	switch {
 	case r >= 0x1F000 && r <= 0x1FAFF:
 		return true
 	case r >= 0x2600 && r <= 0x27BF:
+		return true
+	case r >= 0x2300 && r <= 0x23FF:
+		return true
+	case r >= 0x2B00 && r <= 0x2BFF:
+		return true
+	case r >= 0x2190 && r <= 0x21FF:
 		return true
 	case r == 0xFE0F || r == 0x200D:
 		return true
@@ -92,10 +105,10 @@ func MessageGarbageReason(s string) string {
 	if !speechContent(text) {
 		return "только пунктуация и пробелы"
 	}
-	if m := schemaFieldRe.FindString(text); m != "" {
-		return fmt.Sprintf("имя поля TurnResult как токен: %s", m)
+	if token := fieldTokenGarbage(text); token != "" {
+		return fmt.Sprintf("имя поля TurnResult как токен: %s", token)
 	}
-	if turnResultMetaRe.MatchString(text) {
+	if turnResultMetaRe.MatchString(text) || jsonInstructionRe.MatchString(text) {
 		return "служебная речь про JSON/схему"
 	}
 	for _, frag := range jsonFragmentPrefixes {
@@ -109,10 +122,57 @@ func MessageGarbageReason(s string) string {
 		}
 	}
 	if run := jsonRunsRe.FindString(text); run != "" {
-		return "ряд JSON-знаков: " + run
+		return "ряд JSON-знаков (обрывок): " + run
 	}
 	if label := messageLabelAnyRe.FindString(text); label != "" {
 		return "метка сообщения в тексте: " + label
+	}
+	return ""
+}
+
+// jsonNeighbor — знак рядом с токеном, выдающий скопированный формат:
+// `mood_delta:`, `"messages":`, `sticker #3` не считается (пробел).
+func jsonNeighbor(r rune) bool {
+	switch r {
+	case ':', ',', '{', '}', '[', ']', '"', '=':
+		return true
+	default:
+		return false
+	}
+}
+
+// isLatin — латинская буква (включая расширения). Кириллица рядом с
+// латинским полем схемы — склейка вида «messagesекафедра».
+func isLatin(r rune) bool { return unicode.IsLetter(r) && r <= 0x024F }
+
+// fieldTokenGarbage — имя поля схемы в «форматном» окружении. Живая
+// английская речь не должна выкидываться: «no reason to worry» — не брак.
+// Признаки формата: имя с подчёркиванием (mood_delta, image_url…), JSON-знак
+// рядом (`sticker:`), склейка с не-латиницей, ВСЕ ЗАГЛАВНЫЕ или два разных
+// поля схемы в одном сообщении.
+func fieldTokenGarbage(text string) string {
+	matches := schemaFieldRe.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	token := text[matches[0][0]:matches[0][1]]
+	if len(matches) >= 2 {
+		return token
+	}
+	if strings.Contains(token, "_") {
+		return token
+	}
+	if token == strings.ToUpper(token) {
+		return token
+	}
+	prev, _ := utf8.DecodeLastRuneInString(text[:matches[0][0]])
+	next, _ := utf8.DecodeRuneInString(text[matches[0][1]:])
+	if jsonNeighbor(prev) || jsonNeighbor(next) {
+		return token
+	}
+	if (prev != 0 && unicode.IsLetter(prev) && !isLatin(prev)) ||
+		(next != 0 && unicode.IsLetter(next) && !isLatin(next)) {
+		return token
 	}
 	return ""
 }

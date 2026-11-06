@@ -307,3 +307,54 @@ func TestTakeReasoningPrefersMiddleware(t *testing.T) {
 		t.Fatalf("фолбэк на транспорт = %q", got)
 	}
 }
+
+// TestTransportRedactsSecretQuery — endpoint может содержать ключ в query:
+// в дамп он не попадает, прочие параметры сохраняются для replay.
+func TestTransportRedactsSecretQuery(t *testing.T) {
+	dumpDir := t.TempDir()
+	d, err := NewDumper(dumpDir, nil)
+	if err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	installForTest(t, d)
+
+	var bodies []string
+	var headers []http.Header
+	server := chatServer(t, &bodies, &headers)
+
+	ctx := WithCall(context.Background(), NewCall("turn", "9"))
+	params := config.CompatParams{
+		APIKey:  "k",
+		BaseURL: server.URL + "/v1?api_key=secret-value&region=eu",
+		Model:   "m",
+	}
+	if _, err := config.RunChatCompat(ctx, params, nil, nil, config.CallOptions{}); err != nil {
+		t.Fatalf("вызов упал: %v", err)
+	}
+	rec, _, _ := readRecord(t, dumpDir)
+	if strings.Contains(rec.URL, "secret-value") {
+		t.Fatalf("секрет из query попал в дамп: %s", rec.URL)
+	}
+	if !strings.Contains(rec.URL, "region=eu") {
+		t.Fatalf("несекретный параметр потерян: %s", rec.URL)
+	}
+}
+
+// TestNewDumperTightensExistingDir — предсозданный каталог с широкими правами
+// ужесточается до 0700: дамп приватный.
+func TestNewDumperTightensExistingDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "dumps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("каталог не создан: %v", err)
+	}
+	if _, err := NewDumper(dir, nil); err != nil {
+		t.Fatalf("дампер не создан: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("каталог не найден: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("права существующего каталога %o, хочу 700", perm)
+	}
+}

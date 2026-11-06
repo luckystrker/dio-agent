@@ -115,7 +115,8 @@ func transformContent(content any, f func(string) string) any {
 	}
 }
 
-// dropPanel вырезает панель состояния из последнего user-сообщения.
+// dropPanel вырезает панель состояния из последнего user-сообщения (в том
+// числе из текстовой части мультимодального content).
 func dropPanel(body map[string]any, panel PanelMarkers) error {
 	if panel.Open == "" || panel.Close == "" {
 		return nil
@@ -129,12 +130,31 @@ func dropPanel(body map[string]any, panel PanelMarkers) error {
 		if !ok || mm["role"] != "user" {
 			continue
 		}
-		if text, ok := mm["content"].(string); ok {
-			mm["content"] = stripPanel(text, panel)
-		}
+		mm["content"] = stripPanelContent(mm["content"], panel)
 		return nil
 	}
 	return nil
+}
+
+// stripPanelContent применяет stripPanel к строке или к текстовым частям.
+func stripPanelContent(content any, panel PanelMarkers) any {
+	switch c := content.(type) {
+	case string:
+		return stripPanel(c, panel)
+	case []any:
+		for _, part := range c {
+			pm, ok := part.(map[string]any)
+			if !ok || pm["type"] != "text" {
+				continue
+			}
+			if text, ok := pm["text"].(string); ok {
+				pm["text"] = stripPanel(text, panel)
+			}
+		}
+		return c
+	default:
+		return content
+	}
 }
 
 // stripPanel удаляет блок панели (вместе с маркерами) и лишние края.

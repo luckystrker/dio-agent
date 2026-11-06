@@ -63,7 +63,21 @@ func NewDumper(dir string, logf func(format string, args ...any)) (*Dumper, erro
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("каталог дампа модели %q не создан: %w", dir, err)
 	}
+	// Уже существующий каталог MkdirAll не ужесточает: дамп приватный, права
+	// приводятся к 0700 явно (файлы всё равно 0600).
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("каталог дампа модели %q: права 0700 не выставлены: %w", dir, err)
+	}
 	return &Dumper{dir: dir, logf: logf}, nil
+}
+
+// log — best-effort журнал дампера: nil-логгер молчит, а не паникует
+// (NewDumper(dir, nil) разрешён и используется в тестах).
+func (d *Dumper) log(format string, args ...any) {
+	if d == nil || d.logf == nil {
+		return
+	}
+	d.logf(format, args...)
 }
 
 // Dir — каталог дампа (пусто — выключен).
@@ -81,20 +95,20 @@ func (d *Dumper) Write(rec Record) {
 	}
 	raw, err := json.Marshal(rec)
 	if err != nil {
-		d.logf("дамп модели: запись не сериализуется (call %d): %v", rec.Call, err)
+		d.log("дамп модели: запись не сериализуется (call %d): %v", rec.Call, err)
 		return
 	}
 	name := filepath.Join(d.dir, recordFileName(rec))
 	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		d.logf("дамп модели: файл %s не создан: %v", name, err)
+		d.log("дамп модели: файл %s не создан: %v", name, err)
 		return
 	}
 	if _, err := f.Write(raw); err != nil {
-		d.logf("дамп модели: файл %s не записан: %v", name, err)
+		d.log("дамп модели: файл %s не записан: %v", name, err)
 	}
 	if err := f.Close(); err != nil {
-		d.logf("дамп модели: файл %s не закрыт: %v", name, err)
+		d.log("дамп модели: файл %s не закрыт: %v", name, err)
 	}
 }
 
@@ -170,11 +184,11 @@ func (d *Dumper) RunPrune(ctx context.Context, interval time.Duration) {
 	prune := func() {
 		n, err := d.Prune(time.Now(), Retention)
 		if err != nil {
-			d.logf("дамп модели: ретенция: %v", err)
+			d.log("дамп модели: ретенция: %v", err)
 			return
 		}
 		if n > 0 {
-			d.logf("дамп модели: удалено %d файлов старше %d дней", n, int(Retention.Hours()/24))
+			d.log("дамп модели: удалено %d файлов старше %d дней", n, int(Retention.Hours()/24))
 		}
 	}
 	prune()

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -87,12 +88,17 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Стрим: тело нельзя прочитать целиком до вызывающего — оборачиваем в
-	// читатель, который копит чанки и пишет дамп по завершении (40.1).
+	// читатель, который копит чанки, достаёт reasoning и (при включённом
+	// дампе) пишет файл по завершении. Обёртка нужна и без дампа: сбор
+	// reasoning_content (40.3) не должен зависеть от MODEL_DEBUG_DUMP_DIR.
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		if dump {
-			rec := func(raw []byte, truncated bool) Record {
+		if dump || call != nil {
+			resp.Body = &streamBody{rc: resp.Body, max: maxStreamDumpBytes, finish: func(raw []byte, truncated bool) {
 				content, reasoning, chunks, cut := parseSSE(raw)
 				call.AddReasoning(reasoning)
+				if !dump {
+					return
+				}
 				payload := map[string]any{
 					"stream":    true,
 					"content":   content,
@@ -102,10 +108,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				if truncated || cut {
 					payload["truncated"] = true
 				}
-				return t.record(call, seq, req, reqBody, started, resp.StatusCode, payload, nil)
-			}
-			resp.Body = &streamBody{rc: resp.Body, max: maxStreamDumpBytes, finish: func(raw []byte, truncated bool) {
-				t.Dumper.Write(rec(raw, truncated))
+				t.Dumper.Write(t.record(call, seq, req, reqBody, started, resp.StatusCode, payload, nil))
 			}}
 		}
 		return resp, nil
@@ -140,7 +143,7 @@ func (t *Transport) record(call *Call, seq int, req *http.Request, reqBody []byt
 	rec := Record{
 		Call:      seq,
 		At:        started,
-		URL:       req.URL.String(),
+		URL:       redactURL(req.URL),
 		Headers:   dumpHeaders(req.Header),
 		Request:   jsonOrString(reqBody),
 		Response:  response,
@@ -190,6 +193,38 @@ func dumpHeaders(h http.Header) map[string]string {
 	return out
 }
 
+// sensitiveQueryParam — имя параметра URL, значение которого может быть
+// секретом: endpoint в конфиге иногда содержит ключ в query.
+func sensitiveQueryParam(name string) bool {
+	name = strings.ToLower(name)
+	for _, marker := range []string{"key", "token", "secret", "password", "passwd", "signature", "sig", "auth"} {
+		if strings.Contains(name, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactURL — адрес для дампа: секретные значения query заменяются на
+// REDACTED (заголовок Authorization и так не пишется). Прочие параметры
+// сохраняются — replay должен попасть на тот же адрес (40.2).
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	cp := *u
+	if cp.RawQuery != "" {
+		q := cp.Query()
+		for name := range q {
+			if sensitiveQueryParam(name) {
+				q.Set(name, "REDACTED")
+			}
+		}
+		cp.RawQuery = q.Encode()
+	}
+	return cp.String()
+}
+
 // jsonOrString — тело как JSON, если это JSON, иначе строкой (ошибки HTML и
 // прочий мусор не должны ломать сериализацию дампа).
 func jsonOrString(data []byte) any {
@@ -229,14 +264,16 @@ func reasoningFromResponse(data []byte) string {
 	return b.String()
 }
 
-// streamBody копит прочитанные SSE-байты (до max) и один раз пишет дамп при
-// EOF/Close. Ошибки чтения не глотаются: вызывающий видит исходный результат.
+// streamBody копит прочитанные SSE-байты (до max) и один раз вызывает finish
+// при EOF/Close. Оборванное чтение (Close без EOF) помечается truncated:
+// иначе дамп выглядел бы полным. Ошибки чтения не глотаются.
 type streamBody struct {
 	rc     io.ReadCloser
 	mu     sync.Mutex
 	buf    bytes.Buffer
 	max    int
 	cut    bool
+	eof    bool
 	once   sync.Once
 	finish func(raw []byte, truncated bool)
 }
@@ -258,6 +295,9 @@ func (s *streamBody) Read(p []byte) (int, error) {
 		s.mu.Unlock()
 	}
 	if err == io.EOF {
+		s.mu.Lock()
+		s.eof = true
+		s.mu.Unlock()
 		s.complete()
 	}
 	return n, err
@@ -272,10 +312,10 @@ func (s *streamBody) complete() {
 	s.once.Do(func() {
 		s.mu.Lock()
 		raw := append([]byte(nil), s.buf.Bytes()...)
-		cut := s.cut
+		truncated := s.cut || !s.eof
 		s.mu.Unlock()
 		if s.finish != nil {
-			s.finish(raw, cut)
+			s.finish(raw, truncated)
 		}
 	})
 }

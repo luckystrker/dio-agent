@@ -37,8 +37,11 @@ func LoadDump(path string) (*Dump, error) {
 	if err := json.Unmarshal(raw, &d); err != nil {
 		return nil, fmt.Errorf("дамп %q не JSON (40.1 пишет файл на вызов): %w", path, err)
 	}
-	if len(bytes.TrimSpace(d.Request)) == 0 {
-		return nil, fmt.Errorf("дамп %q: пустой request", path)
+	request := bytes.TrimSpace(d.Request)
+	if len(request) == 0 || request[0] != '{' {
+		// request:null проходит проверку на непустоту, но это не запрос:
+		// абляция temperature упала бы присваиванием в nil-map.
+		return nil, fmt.Errorf("дамп %q: пустой request — нужен JSON-объект", path)
 	}
 	return &d, nil
 }

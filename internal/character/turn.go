@@ -705,11 +705,12 @@ func (r *Runner) generate(ctx context.Context, in Input, bctx BaseContext, userT
 			}
 		}
 	}
-	if perr == nil {
+	if perr == nil && result.Decision == DecisionAnswer {
 		// 40.4: формат валиден, но messages — брак (обрывки JSON, имена полей
 		// схемы, служебные метки, одна пунктуация). Один repair «в messages —
 		// только текст для собеседника» (если repair валидации ещё не было),
-		// затем бракованные выкидываются; все брак — деградация 38.2.
+		// затем бракованные выкидываются; все брак — деградация 38.2. У react/
+		// ignore мусорные messages не доставляются — лишний вызов не нужен.
 		if bad := garbageMessages(result.Messages); len(bad) > 0 {
 			r.logf("ход %d: брак в messages (%s) — repair 40.4", in.TurnID, strings.Join(bad, "; "))
 			if repairs == 0 {
