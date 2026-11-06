@@ -47,3 +47,47 @@ func TestRunTurnModelReasoningFromTransportDB(t *testing.T) {
 		t.Fatalf("reasoning repair при валидном ответе = %q", run.ReasoningRepair)
 	}
 }
+
+// TestRunTurnModelGarbageRepairDB — 40.4 в фоне: валидный JSON с мусором в
+// messages чинится одним repair'ом через тот же общий помощник, что и в
+// разговорном ходе, а не доставляется пользователю как есть.
+func TestRunTurnModelGarbageRepairDB(t *testing.T) {
+	f, ctx := newFixture(t)
+
+	replies := []string{
+		`{"decision":"answer","messages":[",","reply_to_by_message:,"]}`,
+		`{"decision":"answer","messages":["привет, как дела?"]}`,
+	}
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idx := calls
+		calls++
+		if idx >= len(replies) {
+			idx = len(replies) - 1
+		}
+		body, _ := json.Marshal(replies[idx])
+		_, _ = w.Write([]byte(`{"id":"x","model":"m","choices":[{"finish_reason":"stop","message":{"content":` +
+			string(body) + `}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	saved := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = saved })
+	modebug.InstallDefaultTransport(nil)
+
+	f.sched.model = character.NewChatConfig(server.URL, "test-key", "test-model", 1000, 0, 0)
+	run, err := f.sched.runTurnModel(ctx, "model:bg:intention:43:1", "система", "как дела?",
+		nil, bgScope, "", nil)
+	if err != nil {
+		t.Fatalf("фоновый модельный ход: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("модельных вызовов %d, хочу 2 (брак + repair)", calls)
+	}
+	if len(run.Result.Messages) != 1 || run.Result.Messages[0] != "привет, как дела?" {
+		t.Fatalf("фон доставил бы брак: %+v", run.Result)
+	}
+	if run.Repairs != 1 {
+		t.Fatalf("repair фона = %d, хочу 1", run.Repairs)
+	}
+}

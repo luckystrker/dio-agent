@@ -16,6 +16,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/avatar"
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
@@ -143,6 +144,8 @@ func (s *Scheduler) describeAvatar(ctx context.Context, check avatar.Check, mime
 	}
 	counting := &usageCounter{}
 	op := fmt.Sprintf("model:avatar:%d:%s", check.UserID, uniqueID)
+	// Дамп модельных вызовов (40.1): описание аватарки — тоже вызов провайдера.
+	ctx = modebug.WithCall(ctx, modebug.NewCall("bg", dumpTask(op)))
 	a := agent.New("dio-avatar", avatarSystemPrompt,
 		agent.WithConfig(cfg),
 		agent.WithMiddleware(

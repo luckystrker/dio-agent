@@ -257,6 +257,7 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 	reasoningOut := turnModelRun{Stats: counting.stats(), Reasoning: modebug.TakeReasoning(call, reasoning.Take())}
 
 	result, perr := parseTurnReply(first)
+	validationRepair := false
 	if perr != nil {
 		// Один repair-retry (§11.3): тот же контекст, модели показана ошибка.
 		fixed, ferr := first.Ask(ctx, character.RepairHint(perr, "TurnResult"))
@@ -265,12 +266,38 @@ func (s *Scheduler) runTurnModelCapped(ctx context.Context, operation, system, u
 		}
 		reasoningOut.ReasoningRepair = modebug.TakeReasoning(call, reasoning.Take())
 		result, perr = parseTurnReply(fixed)
-		if perr != nil {
-			return reasoningOut, &errInvalidResult{err: perr}
-		}
-		reasoningOut.Result = result
+		validationRepair = true
 		reasoningOut.Repairs = 1
-		return reasoningOut, nil
+	}
+
+	// 40.4: валидный JSON, но messages — брак (как у разговорного хода):
+	// один repair «в messages — только текст», иначе чистка первого ответа.
+	if perr == nil && result.Decision == character.DecisionAnswer {
+		if bad := character.GarbageReasons(result.Messages); len(bad) > 0 {
+			s.logInfo("фон %s: брак в messages (%s) — repair 40.4", operation, strings.Join(bad, "; "))
+			firstAnswer := result
+			attempted := false
+			var dropped []string
+			result, _, dropped = character.FixGarbageMessages(firstAnswer, !validationRepair, func() (character.TurnResult, error) {
+				fixed, ferr := first.Ask(ctx, character.GarbageRepairHint)
+				if ferr != nil {
+					return character.TurnResult{}, ferr
+				}
+				attempted = true
+				reasoningOut.ReasoningRepair = modebug.TakeReasoning(call, reasoning.Take())
+				return parseTurnReply(fixed)
+			})
+			if attempted {
+				reasoningOut.Repairs = 1
+			}
+			if len(dropped) > 0 {
+				s.logInfo("фон %s: бракованные сообщения выкинуты (%s), осталось %d; decision=%s",
+					operation, strings.Join(dropped, "; "), len(result.Messages), result.Decision)
+			}
+		}
+	}
+	if perr != nil {
+		return reasoningOut, &errInvalidResult{err: perr}
 	}
 	reasoningOut.Result = result
 	return reasoningOut, nil
@@ -299,6 +326,8 @@ func (s *Scheduler) runConsolidationModel(ctx context.Context, operation, system
 	if err != nil {
 		return consolidationProposal{}, modelStats{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
 	}
+	// Дамп модельных вызовов (40.1): консолидация тоже видна в MODEL_DEBUG_DUMP_DIR.
+	ctx = modebug.WithCall(ctx, modebug.NewCall("bg", dumpTask(operation)))
 
 	fragments := []string{
 		"Ограничения (runtime, не обсуждаемое):",

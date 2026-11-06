@@ -34,6 +34,7 @@ import (
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
+	"github.com/luckystrker/dio-agent/internal/modebug"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
 
@@ -746,6 +747,8 @@ func (s *Scheduler) runLifeEventModel(ctx context.Context, operation, system, us
 	if err != nil {
 		return lifeEventProposal{}, modelStats{}, fmt.Errorf("фон: конфиг модели не клонирован: %w", err)
 	}
+	// Дамп модельных вызовов (40.1): событие жизни тоже видно в дампе.
+	ctx = modebug.WithCall(ctx, modebug.NewCall("bg", dumpTask(operation)))
 
 	fragments := []string{
 		"Ограничения (runtime, не обсуждаемое):",
