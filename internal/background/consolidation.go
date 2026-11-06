@@ -17,6 +17,7 @@ import (
 
 	agotask "github.com/luckystrker/ago/task"
 
+	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
 )
@@ -163,6 +164,20 @@ func (s *Scheduler) runConsolidation(ctx context.Context, ep Episode) (consolida
 				}
 				_ = task.Fail(invalid)
 				out.Outcome, out.Detail = "failed", invalid.Error()
+				out.Latency = s.now().Sub(started)
+				return out, nil
+			}
+			// Постоянный отказ провайдера (400/401/403) повтором не лечится
+			// (§12.1, этап 38.6): пять одинаковых запросов — это пять сожжённых
+			// попыток и минуты ожидания. Терминально на цикл с тем же cooldown,
+			// что у невалидного proposal; соседние эпизоды слоты не ждут.
+			if character.IsPermanentProviderError(gerr) {
+				if cerr := s.setConsolidationCooldown(ctx, ep); cerr != nil {
+					s.logError("фон: cooldown консолидации %q не записан: %v", unitID, cerr)
+				}
+				_ = task.Fail(gerr)
+				s.logError("фон: консолидация %q: постоянный отказ провайдера — без повторов, пауза %v: %v", unitID, consolidationCooldown, gerr)
+				out.Outcome, out.Detail = "failed", gerr.Error()
 				out.Latency = s.now().Sub(started)
 				return out, nil
 			}

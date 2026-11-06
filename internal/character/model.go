@@ -101,6 +101,55 @@ func modelRetryAfter(err error) (time.Duration, bool) {
 	return d, true
 }
 
+// modelStatusRe — HTTP-код из текста ошибки OpenAI-совместимого слоя ago
+// («config: chat completions returned 400: …»): типизированных ошибок нет.
+var modelStatusRe = regexp.MustCompile(`returned (\d{3})\b`)
+
+// modelStatus достаёт HTTP-код отказа провайдера из текста ошибки.
+func modelStatus(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	m := modelStatusRe.FindStringSubmatch(err.Error())
+	if len(m) != 2 {
+		return 0, false
+	}
+	code, perr := strconv.Atoi(m[1])
+	if perr != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+// isUnsupportedFeatureError — 400, которым провайдер отказывает в ОПЦИОНАЛЬНОЙ
+// части запроса («this feature is not yet supported by atlas», живой прогон
+// 2026-11-06): тот же запрос повторять бессмысленно, но без схемы/инструментов
+// он может пройти.
+func isUnsupportedFeatureError(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok || code != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"not yet supported", "not supported", "unsupported"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPermanentProviderError — отказ провайдера, который не лечится повтором
+// с тем же контекстом: 4xx, кроме 429 (флуд-контроль). Фон использует это,
+// чтобы 400 не жёг пять попыток одинаковым запросом (§12.1/§16, этап 38.6).
+func IsPermanentProviderError(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok {
+		return false
+	}
+	return code >= 400 && code < 500 && code != 429
+}
+
 // ChatConfig — модельный конфиг одного хода (config.ModelConfig). Один конфиг
 // на ход: все запуски агента внутри хода (включая repair §11.3) делят счётчик
 // вызовов, поэтому forced tool_choice встаёт только на самый первый вызов.
@@ -264,7 +313,22 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 		params.ExtraHeaders["x-opencode-session"] = c.cfg.SessionID
 		params.ExtraHeaders["User-Agent"] = "dio-agent/0.1 (living telegram character)"
 	}
-	return callWithShort429Retry(ctx, params, messages, conv, opts, c.logf)
+	resp, err := callWithShort429Retry(ctx, params, messages, conv, opts, c.logf)
+	if err != nil && isUnsupportedFeatureError(err) {
+		// 400 «feature is not yet supported» — опциональная часть запроса не
+		// поддержана провайдером (этап 38.6). Один повтор в упрощённом виде:
+		// без строгой JSON-схемы и инструментов, причина — в лог. Упрощение
+		// картинок не трогает: у отказа по картинке свой честный откат
+		// (turn.go, 25.1), который обязан видеть исходную ошибку.
+		if c.logf != nil {
+			c.logf("провайдер отклонил опциональную часть запроса (400 not supported) — один повтор без строгой схемы и инструментов: %v", err)
+		}
+		simple := opts
+		simple.Tools = nil
+		simple.ResponseSchema = nil
+		return callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
+	}
+	return resp, err
 }
 
 // callWithShort429Retry — один логический модельный вызов с 1–2 короткими
