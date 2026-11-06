@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
@@ -223,10 +224,12 @@ func (s *Scheduler) curiosityTheme(ctx context.Context) (string, int64, error) {
 // написать первым (§14.3: инициативы в группы выключены).
 func (s *Scheduler) latestPrivateChat(ctx context.Context) (int64, error) {
 	var chatID int64
+	// Заблокировавшие бота чаты пропускаются (38.7): share туда не дойдёт.
 	err := s.pool.QueryRow(ctx, `
-		SELECT chat_id FROM social_events
-		WHERE chat_type = 'private'
-		ORDER BY id DESC LIMIT 1`).Scan(&chatID)
+		SELECT chat_id FROM social_events e
+		WHERE e.chat_type = 'private'
+		  AND NOT EXISTS (SELECT 1 FROM blocked_chats b WHERE b.chat_id = e.chat_id)
+		ORDER BY e.id DESC LIMIT 1`).Scan(&chatID)
 	if isNoRows(err) {
 		return 0, nil
 	}
@@ -237,7 +240,9 @@ func (s *Scheduler) latestPrivateChat(ctx context.Context) (int64, error) {
 }
 
 // recentMemoryThemes — недавние темы памяти скоупа (этап 23.2, источник «б»):
-// имена сущностей-тем активных записей, свежие первыми.
+// имена сущностей-тем активных записей, свежие первыми. Только содержательные
+// записи (claim/thought/preference, этап 38.8): «прожитое» из реплик даёт
+// мусорные «темы» вроде «как сам» — это разговор, а не интерес персонажа.
 func (s *Scheduler) recentMemoryThemes(ctx context.Context, scope string) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT e.canonical_name
@@ -245,6 +250,7 @@ func (s *Scheduler) recentMemoryThemes(ctx context.Context, scope string) ([]str
 		JOIN memory_links l ON l.memory_id = i.id
 		JOIN entities e ON e.id = l.entity_id
 		WHERE i.status = 'active' AND i.scope_id = $1 AND e.kind <> 'person'
+		  AND i.kind IN ('claim', 'thought', 'preference')
 		GROUP BY e.canonical_name
 		ORDER BY max(i.recorded_at) DESC
 		LIMIT 20`, scope)
@@ -296,14 +302,66 @@ func splitBio(bio string) []string {
 	return out
 }
 
+// curiosityThemeGreetings — приветствия и вопросы-формулы, которые память
+// иногда хранит как «тему», а как тема-сид они пусты (этап 38.8: живой прогон
+// 2026-11-06 создал explore «по теме «как сам»»). Сравнение — по нормализованной
+// строке (нижний регистр, без обрамляющей пунктуации, одиночные пробелы).
+var curiosityThemeGreetings = map[string]bool{
+	"привет": true, "приветик": true, "здравствуй": true, "здравствуйте": true,
+	"хай": true, "здарова": true, "доброе утро": true, "добрый день": true,
+	"добрый вечер": true, "доброй ночи": true,
+	"как сам": true, "как сама": true, "как ты": true, "как вы": true,
+	"как дела": true, "чё как": true, "че как": true, "что как": true,
+	"как оно": true, "как жизнь": true, "ну как": true,
+	"ты тут": true, "ты здесь": true, "что делаешь": true, "чем занят": true,
+}
+
+// validCuriosityTheme — тема-сид годится для поиска интереса: не пустышка, не
+// приветствие/вопрос-формула, содержит ≥2 слов или ≥8 букв (короткое слово вроде
+// «море» — не тема для исследования).
+func validCuriosityTheme(theme string) bool {
+	if strings.HasSuffix(strings.TrimSpace(theme), "?") {
+		return false // вопрос — не тема для исследования
+	}
+	t := normalizeCuriosityTheme(theme)
+	if t == "" || curiosityThemeGreetings[t] {
+		return false
+	}
+	letters := 0
+	for _, r := range t {
+		if unicode.IsLetter(r) {
+			letters++
+		}
+	}
+	if letters == 0 {
+		return false
+	}
+	return len(strings.Fields(t)) >= 2 || letters >= 8
+}
+
+// normalizeCuriosityTheme — нижний регистр, обрамляющая пунктуация прочь,
+// одиночные пробелы (для сравнения с приветствиями и подсчёта слов).
+func normalizeCuriosityTheme(theme string) string {
+	t := strings.ToLower(strings.TrimSpace(theme))
+	t = strings.Trim(t, " \t\n\r.,!?;:…—–-«»\"'()[]{}")
+	return strings.Join(strings.Fields(t), " ")
+}
+
 // PickCuriosityTheme — детерминированный при данном rand выбор: сначала
 // случайный непустой источник, затем случайная тема в нём. rnd nil — глобальный
-// генератор (только для тестов/частичной сборки).
+// генератор (только для тестов/частичной сборки). Темы-мусор (38.8) не
+// выбираются: нет годной темы — пусто, и скука промолчит до следующего такта.
 func PickCuriosityTheme(rnd *rand.Rand, groups ...[]string) string {
 	var nonEmpty [][]string
 	for _, group := range groups {
-		if len(group) > 0 {
-			nonEmpty = append(nonEmpty, group)
+		var valid []string
+		for _, theme := range group {
+			if validCuriosityTheme(theme) {
+				valid = append(valid, theme)
+			}
+		}
+		if len(valid) > 0 {
+			nonEmpty = append(nonEmpty, valid)
 		}
 	}
 	if len(nonEmpty) == 0 {

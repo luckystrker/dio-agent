@@ -19,6 +19,11 @@ package character
 import (
 	"context"
 	"fmt"
+	"log"
+	"math"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +32,123 @@ import (
 	agocontext "github.com/luckystrker/ago/context"
 	"github.com/luckystrker/ago/events"
 )
+
+// Короткий повтор 429 внутри вызова (этап 38.5). Живой прогон 2026-11-06:
+// провайдер трижды ответил «retry shortly (after 5 s)», транспорт ago с
+// MODEL_MAX_RETRIES=0 не повторяет, ход уходил в очередь с паузой 30 с —
+// ответ приходил через минуты. Пауза N из подсказки провайдера укладывается в
+// ход, если она короткая; более длинную и отсутствие подсказки по-прежнему
+// разбирает очередь (§12.1 retry_wait). Повтор живёт в обёртке клиента, общей
+// для хода и фона, и не второй раз резервирует бюджет: middleware §16 видит
+// один модельный вызов и один operation_id.
+const (
+	// modelRetryAttempts — сколько коротких повторов делает сам вызов (1–2).
+	modelRetryAttempts = 2
+	// modelRetryMaxWait — потолок паузы, которую вызов ждёт на месте.
+	modelRetryMaxWait = 10 * time.Second
+)
+
+// modelRetrySleep — пауза повтора (переменная ради тестов: юнит-тесты не спят).
+var modelRetrySleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+var (
+	// modelStatus429Re — отказ провайдера по коду из текста ошибки ago
+	// («config: chat completions returned 429: …»): типизированных ошибок
+	// провайдер не отдаёт.
+	modelStatus429Re = regexp.MustCompile(`returned 429\b`)
+	// modelRetryAfterRe — подсказка паузы в теле: «retry shortly (after 5 s)»,
+	// «retry after 3 s», «Retry-After: 7» (значение заголовка в секундах, без
+	// единицы). Заголовок Retry-After сюда не попадает — его разбирает
+	// транспорт ago, когда ретраи включены.
+	modelRetryAfterRe = regexp.MustCompile(`(?i)(?:retry[ _-]?after\s*[:=]?\s*(\d+(?:[.,]\d+)?)(?:\s*(?:s\b|sec|second))?|after\s+(\d+(?:[.,]\d+)?)\s*(?:s\b|sec|second))`)
+)
+
+// modelRetryAfter — короткая пауза 429 из текста ошибки: 0 < N ≤ 10 с.
+// Не 429, нет подсказки или пауза длиннее — повтор не нужен (false).
+func modelRetryAfter(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	msg := err.Error()
+	if !modelStatus429Re.MatchString(msg) {
+		return 0, false
+	}
+	m := modelRetryAfterRe.FindStringSubmatch(msg)
+	if len(m) != 3 {
+		return 0, false
+	}
+	raw := m[1]
+	if raw == "" {
+		raw = m[2]
+	}
+	secs, perr := strconv.ParseFloat(strings.ReplaceAll(raw, ",", "."), 64)
+	if perr != nil || math.IsNaN(secs) || secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs * float64(time.Second))
+	if d > modelRetryMaxWait {
+		return 0, false
+	}
+	return d, true
+}
+
+// modelStatusRe — HTTP-код из текста ошибки OpenAI-совместимого слоя ago
+// («config: chat completions returned 400: …»): типизированных ошибок нет.
+var modelStatusRe = regexp.MustCompile(`returned (\d{3})\b`)
+
+// modelStatus достаёт HTTP-код отказа провайдера из текста ошибки.
+func modelStatus(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	m := modelStatusRe.FindStringSubmatch(err.Error())
+	if len(m) != 2 {
+		return 0, false
+	}
+	code, perr := strconv.Atoi(m[1])
+	if perr != nil {
+		return 0, false
+	}
+	return code, true
+}
+
+// isUnsupportedFeatureError — 400, которым провайдер отказывает в ОПЦИОНАЛЬНОЙ
+// части запроса («this feature is not yet supported by atlas», живой прогон
+// 2026-11-06): тот же запрос повторять бессмысленно, но без схемы/инструментов
+// он может пройти.
+func isUnsupportedFeatureError(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok || code != 400 {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, marker := range []string{"not yet supported", "not supported", "unsupported"} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPermanentProviderError — отказ провайдера, который не лечится повтором
+// с тем же контекстом: 4xx, кроме 429 (флуд-контроль). Фон использует это,
+// чтобы 400 не жёг пять попыток одинаковым запросом (§12.1/§16, этап 38.6).
+func IsPermanentProviderError(err error) bool {
+	code, ok := modelStatus(err)
+	if !ok {
+		return false
+	}
+	return code >= 400 && code < 500 && code != 429
+}
 
 // ChatConfig — модельный конфиг одного хода (config.ModelConfig). Один конфиг
 // на ход: все запуски агента внутри хода (включая repair §11.3) делят счётчик
@@ -43,6 +165,8 @@ type ChatConfig struct {
 	// (x-opencode-session, OpenCode Go: маршрутизация и кэш промптов).
 	// Пусто — заголовок не ставится.
 	SessionID string
+	// Logf — журнал коротких повторов 429 (nil — стандартный лог процесса).
+	Logf func(format string, args ...any)
 
 	mu    sync.Mutex
 	calls int
@@ -95,7 +219,11 @@ func (c *ChatConfig) Model() string { return c.params.Model }
 // на ход (ago создаёт клиента на каждый запуск, включая repair) — все они
 // консультируют один счётчик конфига.
 func (c *ChatConfig) Create() (config.LLMClient, error) {
-	return &chatClient{cfg: c, params: c.params, inner: c.inner}, nil
+	logf := c.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	return &chatClient{cfg: c, params: c.params, inner: c.inner, logf: logf}, nil
 }
 
 // DisableTools — харнесс исчерпал лимит обращений к инструментам за ход:
@@ -121,7 +249,7 @@ func (c *ChatConfig) nextCall() (force bool, tool string) {
 // выполняться. Клон получает собственный счётчик вызовов (это отдельный ход).
 // Поддерживается ключ forced_tool.
 func (c *ChatConfig) Clone(overrides map[string]any) (config.ModelConfig, error) {
-	cp := &ChatConfig{params: c.params, inner: c.inner, ForcedTool: c.ForcedTool, SessionID: c.SessionID}
+	cp := &ChatConfig{params: c.params, inner: c.inner, ForcedTool: c.ForcedTool, SessionID: c.SessionID, Logf: c.Logf}
 	for k, v := range overrides {
 		switch k {
 		case "session_id":
@@ -151,6 +279,7 @@ type chatClient struct {
 	cfg    *ChatConfig
 	params config.CompatParams
 	inner  config.LLMClient
+	logf   func(format string, args ...any)
 }
 
 // Call выполняет один модельный вызов (LLMClient).
@@ -184,7 +313,48 @@ func (c *chatClient) Call(ctx context.Context, messages []events.Event, conv *ag
 		params.ExtraHeaders["x-opencode-session"] = c.cfg.SessionID
 		params.ExtraHeaders["User-Agent"] = "dio-agent/0.1 (living telegram character)"
 	}
-	return config.RunChatCompat(ctx, params, messages, conv, opts)
+	resp, err := callWithShort429Retry(ctx, params, messages, conv, opts, c.logf)
+	if err != nil && isUnsupportedFeatureError(err) {
+		// 400 «feature is not yet supported» — опциональная часть запроса не
+		// поддержана провайдером (этап 38.6). Один повтор в упрощённом виде:
+		// без строгой JSON-схемы и инструментов, причина — в лог. Упрощение
+		// картинок не трогает: у отказа по картинке свой честный откат
+		// (turn.go, 25.1), который обязан видеть исходную ошибку.
+		if c.logf != nil {
+			c.logf("провайдер отклонил опциональную часть запроса (400 not supported) — один повтор без строгой схемы и инструментов: %v", err)
+		}
+		simple := opts
+		simple.Tools = nil
+		simple.ResponseSchema = nil
+		return callWithShort429Retry(ctx, params, messages, conv, simple, c.logf)
+	}
+	return resp, err
+}
+
+// callWithShort429Retry — один логический модельный вызов с 1–2 короткими
+// повторами 429 (этап 38.5). Повтор внутри вызова, а не возврат в очередь:
+// резерв бюджета §16 уже стоит за этот вызов (middleware резервирует до
+// next()), повтор с тем же operation_id не должен расходовать день дважды —
+// и не расходует, потому что второго прохода через middleware нет.
+func callWithShort429Retry(ctx context.Context, params config.CompatParams, messages []events.Event,
+	conv *agocontext.Context, opts config.CallOptions, logf func(string, ...any)) (*events.ModelResponse, error) {
+	resp, err := config.RunChatCompat(ctx, params, messages, conv, opts)
+	for attempt := 1; err != nil && attempt <= modelRetryAttempts; attempt++ {
+		wait, ok := modelRetryAfter(err)
+		if !ok {
+			break
+		}
+		if logf != nil {
+			logf("провайдер ответил 429 — короткий повтор через %v (попытка %d из %d)", wait, attempt, modelRetryAttempts)
+		}
+		if serr := modelRetrySleep(ctx, wait); serr != nil {
+			// Отмена/остановка во время паузы: ход остаётся в очереди (§12.2),
+			// ожидание паузы не продлевается.
+			return nil, serr
+		}
+		resp, err = config.RunChatCompat(ctx, params, messages, conv, opts)
+	}
+	return resp, err
 }
 
 // msDuration переводит миллисекунды конфигурации в time.Duration (0 — без потолка).

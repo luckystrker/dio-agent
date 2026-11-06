@@ -148,6 +148,7 @@ func buildFamilies(snap Snapshot) []family {
 		family{name: "dio_deliveries_24h", typ: "gauge", samples: deliverySamples(snap.Deliveries.Last24h)},
 		family{name: "dio_deliveries_replies_24h", typ: "gauge", samples: []sample{{float64(snap.Deliveries.RepliesSent24h), nil}}},
 		family{name: "dio_deliveries_forwards_24h", typ: "gauge", samples: []sample{{float64(snap.Deliveries.ForwardsSent24h), nil}}},
+		family{name: "dio_blocked_chats", typ: "gauge", samples: []sample{{float64(snap.Deliveries.BlockedChats), nil}}},
 	)
 
 	// Инициативы по видам и лимиты §14.3.

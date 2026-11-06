@@ -742,6 +742,16 @@ func CreateIntentionTx(ctx context.Context, tx pgx.Tx, p IntentionParams) (id in
 // intentions_dedupe_live_uidx. Разрешение (provenance) назначает runtime по
 // источнику хода (§9.1). created=false — живой дубль, причина — в Duplicate.
 func createIntention(ctx context.Context, tx pgx.Tx, row intentionRow) (int64, bool, *DuplicateIntention, error) {
+	// Чат заблокировал бота (38.7): новые инициативы в него не создаются —
+	// доставка всё равно получит 403 (этап 38.7). Возвращаем «не создано» с
+	// причиной, чтобы вызывающий не считал это сбоем применения хода.
+	if blocked, err := telegram.ChatBlocked(ctx, tx, row.chatID); err != nil {
+		return 0, false, nil, fmt.Errorf("применение: пометка чата %d не прочитана: %w", row.chatID, err)
+	} else if blocked {
+		return 0, false, &DuplicateIntention{
+			Kind: row.kind, Topic: strings.TrimSpace(row.topic), LiveStatus: "blocked",
+		}, nil
+	}
 	ref := fmt.Sprintf("turn:%d", row.relatedTurnID)
 	provenanceID, err := (memory.SourceRepo{}).EnsureProvenance(ctx, tx,
 		memory.SourceJournalEvent, ref, []string{row.scopeID})

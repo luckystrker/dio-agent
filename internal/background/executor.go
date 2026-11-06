@@ -29,6 +29,7 @@ import (
 	"github.com/luckystrker/dio-agent/internal/character"
 	"github.com/luckystrker/dio-agent/internal/memory"
 	"github.com/luckystrker/dio-agent/internal/runtime"
+	"github.com/luckystrker/dio-agent/internal/telegram"
 	"github.com/luckystrker/dio-agent/internal/web"
 )
 
@@ -544,6 +545,15 @@ func (s *Scheduler) runGates(ctx context.Context, it Intention) (bool, string, e
 		return true, "идентичное намерение уже ждёт исполнения (§14.1)", nil
 	}
 
+	// Чат заблокировал бота (38.7): писать в него некуда — намерение
+	// отменяется до модельного вызова, даже explore (его находка стала бы
+	// share в тот же чат).
+	if blocked, berr := telegram.ChatBlocked(ctx, s.pool, it.TargetChatID); berr != nil {
+		return false, "", berr
+	} else if blocked {
+		return true, "чат заблокировал бота — инициативы не отправляются (§13.2, 38.7)", nil
+	}
+
 	if isInitiativeKind(it.Kind) {
 		// Проактивная политика §14.3: личные чаты — прежние лимиты; группы —
 		// редко и по делу (30.3): share при живом разговоре и близкой теме,
@@ -662,7 +672,8 @@ func (s *Scheduler) generateExplore(ctx context.Context, it Intention, op, scope
 			return turnModelRun{}, err
 		}
 	}
-	return s.runTurnModel(ctx, op, system, character.ComposeUserText(panel, userText), tools, scope, sessionForChat(it.TargetChatID), extra)
+	return s.runTurnModelCapped(ctx, op, system, character.ComposeUserText(panel, userText), tools, scope,
+		sessionForChat(it.TargetChatID), modelCaps{Calls: exploreMaxCalls, Tokens: exploreMaxTokens}, extra)
 }
 
 // stateContext — статичный системный промпт из шаблона §7.1 + addendum задачи.

@@ -380,6 +380,12 @@ func (s *PgSource) collectDeliveries(ctx context.Context, snap *Snapshot, _ time
 		return err
 	}
 	rows.Close()
+	// Заблокировавшие бота чаты (38.7): счётчик, по которому видно, что
+	// инициативы в чат прекращены не из-за сбоя.
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM blocked_chats`).
+		Scan(&snap.Deliveries.BlockedChats); err != nil {
+		return err
+	}
 	// Реплаи и пересылки за сутки (37.2–37.3): только подтверждённые sent.
 	return s.pool.QueryRow(ctx, `
 		SELECT count(*) FILTER (WHERE payload->>'kind' = 'message'

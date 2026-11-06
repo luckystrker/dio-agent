@@ -13,9 +13,10 @@ import (
 )
 
 func TestPickCuriosityThemeDeterministic(t *testing.T) {
-	persona := []string{"старое железо", "море"}
-	memory := []string{"пластинки", "порт"}
-	seeds := []string{"краны", "мемы", "еда"}
+	// Темы-сиды проходят фильтр 38.8 (≥2 слов или ≥8 букв, не приветствия).
+	persona := []string{"старое железо", "морские узлы"}
+	memory := []string{"пластинки", "портовые краны"}
+	seeds := []string{"портовые краны", "мемы про котов", "готовая еда"}
 
 	first := PickCuriosityTheme(rand.New(rand.NewSource(7)), persona, memory, seeds)
 	for i := 0; i < 20; i++ {

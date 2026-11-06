@@ -131,6 +131,13 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 		inserted = false // дубль пачки: уже сохранено, не ошибка (§6.1, шаг 3)
 	}
 	if inserted {
+		// Новое входящее сообщение снимает пометку «чат заблокировал бота»
+		// (38.7): пользователь разблокировал бота и написал сам — инициативы
+		// снова уместны. В той же транзакции, что и событие: пометка не может
+		// пережить пришедшее сообщение.
+		if _, err := tx.Exec(ctx, `DELETE FROM blocked_chats WHERE chat_id = $1`, event.ChatID); err != nil {
+			return IngestResult{}, fmt.Errorf("ingest: пометка заблокированного чата не снята: %w", err)
+		}
 		// Тот же offset в той же транзакции (§6.1, шаг 5); GREATEST — пачки
 		// могут пересекаться, offset только растёт.
 		if _, err := tx.Exec(ctx, `
