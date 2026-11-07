@@ -332,6 +332,17 @@ func (a *App) Start(ctx context.Context) error {
 	if api == nil {
 		api = buildTelegramAPI(a.opts.Config, a.logger)
 	}
+	// Whitelist лички (этап 42) оборачивается один раз сразу после сборки:
+	// все потребители Bot API — typing-пульс, poller, delivery — получают уже
+	// закрытый клиент. Обёртка позже оставляла пульс с сырым api (M1 ревью
+	// 2026-11-07): «печатает…» уходило в чужую личку мимо запрета.
+	var allow telegram.PrivateAllowlist
+	if tg := a.opts.Config.Telegram; tg != nil {
+		allow = telegram.NewPrivateAllowlist(tg.PrivateAllowlist)
+	}
+	if api != nil {
+		api = telegram.GuardAPI(api, allow)
+	}
 	if a.opts.PhotoFetcher != nil {
 		runner.Photos = a.opts.PhotoFetcher
 	} else if tg := a.opts.Config.Telegram; tg != nil && !tg.DryRun && tg.BotToken != "" {
@@ -411,22 +422,22 @@ func (a *App) Start(ctx context.Context) error {
 	}
 
 	if api != nil {
-		// Whitelist лички (этап 42): вход — poller, выход — обёртка API для
-		// всех исходящих вызовов; известные чужие лички — в blocked_chats.
-		var allow telegram.PrivateAllowlist
-		if tg := a.opts.Config.Telegram; tg != nil {
-			allow = telegram.NewPrivateAllowlist(tg.PrivateAllowlist)
-		}
-		api = telegram.GuardAPI(api, allow)
+		// Whitelist лички (этап 42): вход — poller, выход — обёрнутый выше
+		// GuardAPI; известные чужие лички — в blocked_chats, вернувшиеся в
+		// список — разблокируются.
 		a.poller = telegram.NewTelegramPoller(pool, api, a.buffers.Add, a.logger, a.opts.Poll)
 		if len(allow) > 0 {
 			a.poller.SetPrivateAllowlist(allow)
+			unblocked, uerr := telegram.UnblockAllowedPrivateChats(ctx, pool, allow)
+			if uerr != nil {
+				return a.stopFailed(fmt.Errorf("app: whitelist лички: %w", uerr))
+			}
 			blocked, berr := telegram.BlockForeignPrivateChats(ctx, pool, allow)
 			if berr != nil {
 				return a.stopFailed(fmt.Errorf("app: whitelist лички: %w", berr))
 			}
-			a.logger.Printf("личка: whitelist из %d id (TELEGRAM_PRIVATE_ALLOWLIST), чужих личек помечено заблокированными: %d",
-				len(allow), blocked)
+			a.logger.Printf("личка: whitelist из %d id (TELEGRAM_PRIVATE_ALLOWLIST), чужих личек помечено заблокированными: %d, разблокировано вернувшихся в список: %d",
+				len(allow), blocked, unblocked)
 		}
 		// getMe — с несколькими попытками: разовый сетевой сбой на старте не
 		// должен откатывать групповые правила до «любой reply — обращение».

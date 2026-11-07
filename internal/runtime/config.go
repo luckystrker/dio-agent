@@ -418,8 +418,8 @@ func parseTelegramSettings(env Getenv) (*TelegramSettings, error) {
 	return &TelegramSettings{BotToken: botToken, APIBase: apiBase, DryRun: dryRun, PrivateAllowlist: allowlist}, nil
 }
 
-// parseIDList разбирает список int64 через запятую; пустые элементы
-// пропускаются, пустой список — nil.
+// parseIDList разбирает список положительных int64 через запятую; пустые
+// элементы пропускаются, пустой список — nil.
 func parseIDList(raw string) ([]int64, error) {
 	var ids []int64
 	for _, part := range strings.Split(raw, ",") {
@@ -430,6 +430,13 @@ func parseIDList(raw string) ([]int64, error) {
 		id, err := strconv.ParseInt(part, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("не число: %q", part)
+		}
+		// m2 ревью 2026-11-07: id лички — положительный user id. 0 —
+		// синтетический чат неподдерживаемых updates, отрицательные — группы;
+		// в списке они бессмысленны, а молчаливый приём создавал ложное
+		// ощущение настройки.
+		if id <= 0 {
+			return nil, fmt.Errorf("id должен быть положительным user id: %d", id)
 		}
 		ids = append(ids, id)
 	}

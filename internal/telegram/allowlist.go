@@ -117,6 +117,31 @@ func (g *guardedAPI) SetMessageReaction(ctx context.Context, chatID int64, messa
 	return g.API.SetMessageReaction(ctx, chatID, messageID, emoji)
 }
 
+// UnblockAllowedPrivateChats снимает пометки, поставленные whitelist'ом, с id,
+// вернувшихся в список (M2 ревью 2026-11-07). Доставка пишет reason полным
+// текстом ошибки («sendMessage: HTTP 403 — Forbidden: private chat is not in
+// allowlist»), поэтому совпадение — по хвосту allowlistDenied. Настоящие
+// блокировки Telegram (другой reason, например «bot was blocked by the user»)
+// не трогаются: если пользователь действительно заблокировал бота, следующая
+// доставка снова получит 403 и пометит чат заново.
+func UnblockAllowedPrivateChats(ctx context.Context, db DB, allow PrivateAllowlist) (int, error) {
+	if len(allow) == 0 {
+		return 0, nil
+	}
+	ids := make([]int64, 0, len(allow))
+	for id := range allow {
+		ids = append(ids, id)
+	}
+	tag, err := db.Exec(ctx, `
+		DELETE FROM blocked_chats
+		WHERE chat_id = ANY($1::bigint[])
+		  AND (reason = $2 OR reason LIKE '%' || $2)`, ids, allowlistDenied)
+	if err != nil {
+		return 0, fmt.Errorf("пометки whitelist не сняты: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // BlockForeignPrivateChats помечает заблокированными все известные лички вне
 // списка (с отменой их ожидающих намерений) — фон и применение хода не
 // создают туда инициатив. Возвращает число помеченных чатов.

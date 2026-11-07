@@ -34,4 +34,15 @@ func TestLoadConfigPrivateAllowlist(t *testing.T) {
 	if _, err := LoadConfig(envOf(bad)); err == nil || !strings.Contains(err.Error(), "TELEGRAM_PRIVATE_ALLOWLIST") {
 		t.Fatalf("мусор в whitelist должен быть ошибкой с именем переменной, получено %v", err)
 	}
+
+	// m2 ревью 2026-11-07: id лички — положительный user id; 0 (синтетический
+	// чат неподдерживаемых updates) и отрицательные (группы) в списке
+	// бессмысленны — fail-fast вместо ложного ощущения настройки.
+	for _, id := range []string{"0", "-5"} {
+		cfg := map[string]string{"DATABASE_URL": "x", "TELEGRAM_BOT_TOKEN": "t",
+			"TELEGRAM_PRIVATE_ALLOWLIST": "722958928," + id}
+		if _, err := LoadConfig(envOf(cfg)); err == nil || !strings.Contains(err.Error(), "TELEGRAM_PRIVATE_ALLOWLIST") {
+			t.Fatalf("id %q в whitelist должен быть ошибкой с именем переменной, получено %v", id, err)
+		}
+	}
 }
