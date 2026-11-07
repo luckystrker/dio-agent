@@ -87,6 +87,9 @@ type TelegramSettings struct {
 	BotToken string
 	APIBase  string
 	DryRun   bool
+	// PrivateAllowlist — user id, которым разрешена личка
+	// (TELEGRAM_PRIVATE_ALLOWLIST, через запятую); nil — личка открыта всем.
+	PrivateAllowlist []int64
 }
 
 // Config — конфигурация приложения. Model == nil — модель не настроена
@@ -408,7 +411,29 @@ func parseTelegramSettings(env Getenv) (*TelegramSettings, error) {
 		return nil, fmt.Errorf(
 			"TELEGRAM_DRY_RUN=true вместе с TELEGRAM_BOT_TOKEN не имеет смысла: убери токен или выключи dry-run")
 	}
-	return &TelegramSettings{BotToken: botToken, APIBase: apiBase, DryRun: dryRun}, nil
+	allowlist, err := parseIDList(lookupOrEmpty(env, "TELEGRAM_PRIVATE_ALLOWLIST"))
+	if err != nil {
+		return nil, fmt.Errorf("TELEGRAM_PRIVATE_ALLOWLIST: %w", err)
+	}
+	return &TelegramSettings{BotToken: botToken, APIBase: apiBase, DryRun: dryRun, PrivateAllowlist: allowlist}, nil
+}
+
+// parseIDList разбирает список int64 через запятую; пустые элементы
+// пропускаются, пустой список — nil.
+func parseIDList(raw string) ([]int64, error) {
+	var ids []int64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(part, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("не число: %q", part)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func parseModelSettings(env Getenv) (*ModelSettings, error) {

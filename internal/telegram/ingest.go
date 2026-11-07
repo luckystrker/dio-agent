@@ -43,6 +43,12 @@ func IngestUpdate(ctx context.Context, pool *runtime.Pool, raw json.RawMessage) 
 // IngestUpdateWithBot — IngestUpdate с идентичностью бота: prefilter отличает
 // reply/mention боту от переписки людей в группе (M8).
 func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMessage, bot BotIdentity) (IngestResult, error) {
+	return IngestUpdateFiltered(ctx, pool, raw, bot, nil)
+}
+
+// IngestUpdateFiltered — IngestUpdateWithBot с whitelist лички: событие
+// лички чужого сохраняется journal_only и хода не получает.
+func IngestUpdateFiltered(ctx context.Context, pool *runtime.Pool, raw json.RawMessage, bot BotIdentity, allow PrivateAllowlist) (IngestResult, error) {
 	event, err := NormalizeUpdateWithBot(raw, bot)
 	if err != nil {
 		return IngestResult{}, err
@@ -116,6 +122,7 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 			}
 		}
 	}
+	status = allow.Apply(event, status)
 	err = tx.QueryRow(ctx, `
 		INSERT INTO social_events
 		  (telegram_update_id, chat_id, chat_type, actor_id, actor_name, kind, text,
@@ -137,9 +144,12 @@ func IngestUpdateWithBot(ctx context.Context, pool *runtime.Pool, raw json.RawMe
 		// Новое входящее сообщение снимает пометку «чат заблокировал бота»
 		// (38.7): пользователь разблокировал бота и написал сам — инициативы
 		// снова уместны. В той же транзакции, что и событие: пометка не может
-		// пережить пришедшее сообщение.
-		if _, err := tx.Exec(ctx, `DELETE FROM blocked_chats WHERE chat_id = $1`, event.ChatID); err != nil {
-			return IngestResult{}, fmt.Errorf("ingest: пометка заблокированного чата не снята: %w", err)
+		// пережить пришедшее сообщение. Чужая личка (whitelist, этап 42)
+		// пометку не снимает: писать ей по-прежнему нельзя.
+		if event.ChatType != ChatPrivate || allow.allows(event.ChatID) {
+			if _, err := tx.Exec(ctx, `DELETE FROM blocked_chats WHERE chat_id = $1`, event.ChatID); err != nil {
+				return IngestResult{}, fmt.Errorf("ingest: пометка заблокированного чата не снята: %w", err)
+			}
 		}
 		// Тот же offset в той же транзакции (§6.1, шаг 5); GREATEST — пачки
 		// могут пересекаться, offset только растёт.

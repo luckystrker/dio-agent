@@ -60,6 +60,8 @@ type TelegramPoller struct {
 	// bot — идентичность бота (getMe): reply/mention в группе засчитываются
 	// только боту (M8). Нулевая — прежние правила.
 	bot BotIdentity
+	// allow — whitelist лички; nil — личка открыта всем.
+	allow PrivateAllowlist
 }
 
 // NewTelegramPoller строит poller. pool — пул PostgreSQL; onPending —
@@ -79,6 +81,9 @@ func NewTelegramPoller(pool *runtime.Pool, api API, onPending OnPendingEvent, lo
 
 // SetBotIdentity задаёт идентичность бота до запуска Run.
 func (p *TelegramPoller) SetBotIdentity(bot BotIdentity) { p.bot = bot }
+
+// SetPrivateAllowlist задаёт whitelist лички до запуска Run.
+func (p *TelegramPoller) SetPrivateAllowlist(allow PrivateAllowlist) { p.allow = allow }
 
 // Run крутит long polling до отмены контекста (§5.3: polling запускается на
 // старте, останавливается при shutdown). Остановка ошибкой не считается,
@@ -128,7 +133,7 @@ func (p *TelegramPoller) Run(ctx context.Context) error {
 		// Неисправимые данные update'а повтором не лечатся — скип (16.4).
 		failed := false
 		for _, update := range updates {
-			result, err := IngestUpdateWithBot(ctx, p.pool, update.Raw, p.bot)
+			result, err := IngestUpdateFiltered(ctx, p.pool, update.Raw, p.bot, p.allow)
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil

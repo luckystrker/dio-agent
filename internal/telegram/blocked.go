@@ -88,6 +88,7 @@ func ChatBlockedError(err error) bool {
 		"bot was blocked by the user",
 		"user is deactivated",
 		"bot was kicked",
+		"not in allowlist", // GuardAPI: чужая личка (этап 42)
 	} {
 		if strings.Contains(msg, marker) {
 			return true
